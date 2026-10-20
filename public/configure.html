@@ -700,27 +700,29 @@
       <!-- 3 · Stream sources -->
       <section class="panel" aria-labelledby="sources-h">
         <div class="panel-head">
-          <h2 id="sources-h">Stream sources</h2>
-          <p>Fewer sources means faster, more predictable results.</p>
+          <h2 id="sources-h">Live stream sources</h2>
+          <p>Fewer sources means faster, more predictable live results.</p>
         </div>
-        <div class="chip-grid" id="sourcesGrid">
-          <label class="checkbox-label active"><input type="checkbox" value="streamedpk" checked> Streamed.pk</label>
-          <label class="checkbox-label active"><input type="checkbox" value="daddylive" checked> DaddyLive</label>
-          <label class="checkbox-label active"><input type="checkbox" value="watchfooty" checked> WatchFooty</label>
-          <label class="checkbox-label active"><input type="checkbox" value="cdnlive" checked> CDNLiveTV</label>
-          <label class="checkbox-label active"><input type="checkbox" value="streamsports99" checked> StreamSports99</label>
-          <label class="checkbox-label active"><input type="checkbox" value="timstreams" checked> TimStreams</label>
-          <label class="checkbox-label active"><input type="checkbox" value="damitv" checked> DamiTV</label>
-          <label class="checkbox-label active"><input type="checkbox" value="ppvst" checked> PPV.st</label>
-          <label class="checkbox-label active"><input type="checkbox" value="livetv" checked> LiveTV</label>
-          <label class="checkbox-label active"><input type="checkbox" value="replayzone" checked> ReplayZone</label>
-          <label class="checkbox-label active"><input type="checkbox" value="soccerfull" checked> SoccerFull</label>
-          <label class="checkbox-label active"><input type="checkbox" value="basketballvideo" checked> BasketballVideo</label>
-          <label class="checkbox-label active"><input type="checkbox" value="nflvideo" checked> NFLVideo</label>
-          <label class="checkbox-label active"><input type="checkbox" value="fullraces" checked> FullRaces</label>
-          <label class="checkbox-label active"><input type="checkbox" value="hockeyreplays" checked> HockeyReplays</label>
-          <label class="checkbox-label active"><input type="checkbox" value="mlblive" checked> MLBLive</label>
-          <label class="checkbox-label active"><input type="checkbox" value="sktech" checked> SkTech</label>
+        <div id="sourcesGrid">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+            <span style="font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent);">🔴 Live & 24/7 TV Sources</span>
+            <div style="display: flex; gap: 8px;">
+              <button type="button" class="action-link" id="selectAllLive" style="background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0;">All</button>
+              <span style="color: var(--line-strong);">·</span>
+              <button type="button" class="action-link" id="selectNoneLive" style="background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0;">None</button>
+            </div>
+          </div>
+          <div class="chip-grid" id="liveSourcesGrid">
+            <label class="checkbox-label active"><input type="checkbox" value="streamedpk" checked> Streamed.pk</label>
+            <label class="checkbox-label active"><input type="checkbox" value="daddylive" checked> DaddyLive</label>
+            <label class="checkbox-label active"><input type="checkbox" value="watchfooty" checked> WatchFooty</label>
+            <label class="checkbox-label active"><input type="checkbox" value="cdnlive" checked> CDNLiveTV</label>
+            <label class="checkbox-label active"><input type="checkbox" value="streamsports99" checked> StreamSports99</label>
+            <label class="checkbox-label active"><input type="checkbox" value="timstreams" checked> TimStreams</label>
+            <label class="checkbox-label active"><input type="checkbox" value="damitv" checked> DamiTV</label>
+            <label class="checkbox-label active"><input type="checkbox" value="ppvst" checked> PPV.st</label>
+            <label class="checkbox-label active"><input type="checkbox" value="sktech" checked> SkTech</label>
+          </div>
         </div>
       </section>
 
@@ -803,6 +805,28 @@
               <p>Judged from the match name and competition, not from a fixed list. Famous clubs and the major US leagues are always kept, and a lower-division or youth fixture is hidden even when a big club is named in it (e.g. a reserve side like &ldquo;Real Madrid Castilla&rdquo;).</p>
             </div>
           </details>
+
+          <!-- Replay & VOD Sources: collapsed if replayFilter is disabled -->
+          <div id="replaySourcesContainer" style="margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line);">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+              <span style="font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text);">⏪ Replay & VOD Sources</span>
+              <div style="display: flex; gap: 8px;">
+                <button type="button" class="action-link" id="selectAllReplays" style="background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0;">All</button>
+                <span style="color: var(--line-strong);">·</span>
+                <button type="button" class="action-link" id="selectNoneReplays" style="background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0;">None</button>
+              </div>
+            </div>
+            <div class="chip-grid" id="replaySourcesGrid">
+              <label class="checkbox-label active"><input type="checkbox" value="replayzone" checked> ReplayZone</label>
+              <label class="checkbox-label active"><input type="checkbox" value="soccerfull" checked> SoccerFull</label>
+              <label class="checkbox-label active"><input type="checkbox" value="fullraces" checked> FullRaces</label>
+              <label class="checkbox-label active"><input type="checkbox" value="basketballvideo" checked> BasketballVideo</label>
+              <label class="checkbox-label active"><input type="checkbox" value="nflvideo" checked> NFLVideo</label>
+              <label class="checkbox-label active"><input type="checkbox" value="hockeyreplays" checked> HockeyReplays</label>
+              <label class="checkbox-label active"><input type="checkbox" value="mlblive" checked> MLBLive</label>
+              <label class="checkbox-label active"><input type="checkbox" value="livetv" checked> LiveTV</label>
+            </div>
+          </div>
         </div>
 
         <div class="field">
@@ -815,7 +839,7 @@
         </div>
       </section>
 
-            <!-- 5 · Nuvio Sports Replay Connection -->
+      <!-- 5 · Nuvio Sports Replay Connection -->
       <section class="panel" aria-labelledby="collections-h">
         <div class="panel-head">
           <h2 id="collections-h">Nuvio Sports Replay Connection</h2>
@@ -943,10 +967,19 @@
     const COPY_LINK_LABEL = 'Copy link for Nuvio app';
     const input = document.getElementById('teams');
     const checkboxes = document.querySelectorAll('#sportsGrid input[type="checkbox"]');
-    const sourceCheckboxes = document.querySelectorAll('#sourcesGrid input[type="checkbox"]');
+    const liveSourceCheckboxes = document.querySelectorAll('#liveSourcesGrid input[type="checkbox"]');
+    const replaySourceCheckboxes = document.querySelectorAll('#replaySourcesGrid input[type="checkbox"]');
+    const sourceCheckboxes = document.querySelectorAll('#liveSourcesGrid input[type="checkbox"], #replaySourcesGrid input[type="checkbox"]');
     const timezoneSelect = document.getElementById('timezone');
     const languagesInput = document.getElementById('languages');
     const replayFilterSelect = document.getElementById('replayFilter');
+    const replaySourcesContainer = document.getElementById('replaySourcesContainer');
+
+    function syncReplayVisibility() {
+      if (!replaySourcesContainer || !replayFilterSelect) return;
+      const isHidden = replayFilterSelect.value === 'disabled';
+      replaySourcesContainer.style.display = isHidden ? 'none' : 'block';
+    }
     const webStreamsSelect = document.getElementById('webStreams');
 
     const configSummary = document.getElementById('configSummary');
@@ -1059,7 +1092,33 @@
       }
     }
 
-    if (existingConfig.sources) {
+    if (existingConfig.liveSources) {
+      if (existingConfig.liveSources === 'none') {
+        liveSourceCheckboxes.forEach(cb => { cb.checked = false; cb.closest('.checkbox-label').classList.remove('active'); });
+      } else if (existingConfig.liveSources !== 'all') {
+        const allowed = existingConfig.liveSources.split(',');
+        liveSourceCheckboxes.forEach(cb => {
+          cb.checked = allowed.includes(cb.value);
+          if (cb.checked) cb.closest('.checkbox-label').classList.add('active');
+          else cb.closest('.checkbox-label').classList.remove('active');
+        });
+      }
+    }
+
+    if (existingConfig.replaySources) {
+      if (existingConfig.replaySources === 'none') {
+        replaySourceCheckboxes.forEach(cb => { cb.checked = false; cb.closest('.checkbox-label').classList.remove('active'); });
+      } else if (existingConfig.replaySources !== 'all') {
+        const allowed = existingConfig.replaySources.split(',');
+        replaySourceCheckboxes.forEach(cb => {
+          cb.checked = allowed.includes(cb.value);
+          if (cb.checked) cb.closest('.checkbox-label').classList.add('active');
+          else cb.closest('.checkbox-label').classList.remove('active');
+        });
+      }
+    }
+
+    if (existingConfig.sources && !existingConfig.liveSources && !existingConfig.replaySources) {
       if (existingConfig.sources === 'none') {
         sourceCheckboxes.forEach(cb => { cb.checked = false; cb.closest('.checkbox-label').classList.remove('active'); });
       } else if (existingConfig.sources !== 'all') {
@@ -1077,18 +1136,20 @@
     let effectiveOrigin = window.location.origin;
 
     // Renders the live summary chips from the current selections.
-    function renderSummary(selectedSports, selectedSources, tz, languages, replayFilter, webStreams) {
+    function renderSummary(selectedSports, selectedLive, selectedReplay, tz, languages, replayFilter, webStreams) {
       if (!configSummary) return;
       // Values come straight from user input, so escape before interpolating
       // into innerHTML.
       const esc = (s) => String(s == null ? '' : s)
         .replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      const isReplayDisabled = replayFilter === 'disabled';
       const items = [
         { k: 'Sports', v: selectedSports.length === checkboxes.length ? 'All' : String(selectedSports.length) },
-        { k: 'Sources', v: selectedSources.length === sourceCheckboxes.length ? 'All' : String(selectedSources.length) },
+        { k: 'Live Sources', v: selectedLive.length === liveSourceCheckboxes.length ? 'All' : String(selectedLive.length) },
+        ...(isReplayDisabled ? [] : [{ k: 'Replay Sources', v: selectedReplay.length === replaySourceCheckboxes.length ? 'All' : String(selectedReplay.length) }]),
         { k: 'Timezone', v: tz || 'n/a' },
         { k: 'Languages', v: languages || 'English only' },
-        { k: 'Replays', v: replayFilter === 'disabled' ? 'Hidden' : (replayFilter === 'mainstream' ? 'Mainstream' : 'All') },
+        { k: 'Replays', v: isReplayDisabled ? 'Hidden' : (replayFilter === 'mainstream' ? 'Mainstream' : 'All') },
         { k: 'Web Streams', v: webStreams === 'disabled' ? 'Hidden' : 'Included' }
       ];
       configSummary.innerHTML = items
@@ -1097,11 +1158,14 @@
     }
 
     function updateLink() {
+      syncReplayVisibility();
       const teams = input.value.trim();
       const languages = languagesInput ? languagesInput.value.trim() : '';
       const replayFilter = replayFilterSelect ? replayFilterSelect.value : 'all';
       const webStreams = webStreamsSelect ? webStreamsSelect.value : 'enabled';
       const selectedSports = Array.from(checkboxes).filter(cb => cb.checked).map(cb => cb.value);
+      const selectedLive = Array.from(liveSourceCheckboxes).filter(cb => cb.checked).map(cb => cb.value);
+      const selectedReplay = Array.from(replaySourceCheckboxes).filter(cb => cb.checked).map(cb => cb.value);
       const selectedSources = Array.from(sourceCheckboxes).filter(cb => cb.checked).map(cb => cb.value);
       let tz = timezoneSelect.value || Intl.DateTimeFormat().resolvedOptions().timeZone;
       try {
@@ -1129,9 +1193,14 @@
         if (config.sports === '') config.sports = 'none';
       }
 
-      if (selectedSources.length < sourceCheckboxes.length) {
-        config.sources = selectedSources.join(',');
-        if (config.sources === '') config.sources = 'none';
+      if (selectedLive.length < liveSourceCheckboxes.length) {
+        config.liveSources = selectedLive.join(',');
+        if (config.liveSources === '') config.liveSources = 'none';
+      }
+
+      if (selectedReplay.length < replaySourceCheckboxes.length) {
+        config.replaySources = selectedReplay.join(',');
+        if (config.replaySources === '') config.replaySources = 'none';
       }
 
       if (Object.keys(config).length > 0) {
@@ -1165,7 +1234,7 @@
       if (manualUrl) manualUrl.value = manifestUrl;
       if (collectionsUrlInput) collectionsUrlInput.value = collectionsUrl;
 
-      renderSummary(selectedSports, selectedSources, tz, languages, replayFilter, webStreams);
+      renderSummary(selectedSports, selectedLive, selectedReplay, tz, languages, replayFilter, webStreams);
 
       const installUrl = manifestUrl.replace(/^https?:\/\//, 'stremio://');
       btn.href = installUrl;
@@ -1269,6 +1338,26 @@
     // The two personalization controls must re-derive the addon URL the same
     // way teams/timezone do; without these listeners typing a language or
     // changing the replay scope left the copied link on its previous config.
+    function setCheckboxes(cbs, checked) {
+      cbs.forEach(cb => {
+        cb.checked = checked;
+        const label = cb.closest('.checkbox-label');
+        if (label) {
+          if (checked) label.classList.add('active');
+          else label.classList.remove('active');
+        }
+      });
+      updateLink();
+    }
+    const selectAllLiveBtn = document.getElementById('selectAllLive');
+    if (selectAllLiveBtn) selectAllLiveBtn.addEventListener('click', () => setCheckboxes(liveSourceCheckboxes, true));
+    const selectNoneLiveBtn = document.getElementById('selectNoneLive');
+    if (selectNoneLiveBtn) selectNoneLiveBtn.addEventListener('click', () => setCheckboxes(liveSourceCheckboxes, false));
+    const selectAllReplaysBtn = document.getElementById('selectAllReplays');
+    if (selectAllReplaysBtn) selectAllReplaysBtn.addEventListener('click', () => setCheckboxes(replaySourceCheckboxes, true));
+    const selectNoneReplaysBtn = document.getElementById('selectNoneReplays');
+    if (selectNoneReplaysBtn) selectNoneReplaysBtn.addEventListener('click', () => setCheckboxes(replaySourceCheckboxes, false));
+
     if (languagesInput) languagesInput.addEventListener('input', updateLink);
     if (replayFilterSelect) replayFilterSelect.addEventListener('change', updateLink);
     if (webStreamsSelect) webStreamsSelect.addEventListener('change', updateLink);

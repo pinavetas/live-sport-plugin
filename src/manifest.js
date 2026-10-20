@@ -76,7 +76,10 @@ const manifest = {
     { key: 'languages', title: 'Preferred Languages (comma separated, English always first)', type: 'text' },
     // 'all' (default) lists every replay; 'mainstream' hides niche and
     // lower-division fixtures from the replay catalogs and hubs.
-    { key: 'replayFilter', title: 'Replay Catalog (all or mainstream)', type: 'text', default: 'all' }
+    { key: 'replayFilter', title: 'Replay Catalog (all or mainstream)', type: 'text', default: 'all' },
+    { key: 'liveSources', title: 'Live & TV Sources (comma separated)', type: 'text', default: 'all' },
+    { key: 'replaySources', title: 'Replay & VOD Sources (comma separated)', type: 'text', default: 'all' },
+    { key: 'sources', title: 'All Sources (legacy, comma separated)', type: 'text', default: 'all' }
   ],
 
   idPrefixes: ['nuvio_sport_'],
