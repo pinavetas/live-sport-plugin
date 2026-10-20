@@ -172,6 +172,45 @@ function isMatchLive(match) {
  * never drift apart. 24/7 networks are never replays.
  * Replays must originate from a replay-capable provider (replayzone, livetv).
  */
+/**
+ * Determines whether a match was parsed by an AI-generated custom parser.
+ */
+function isCustomAiMatch(match) {
+  if (!match) return false;
+  if (match.isCustomAi === true) return true;
+  if (match.customAiSource) return true;
+
+  if (Array.isArray(match.sources)) {
+    let dynamicParserRegistry = null;
+    try {
+      dynamicParserRegistry = container.resolve('dynamicParserRegistry');
+    } catch (_) {
+      try { dynamicParserRegistry = require('./services/DynamicParserRegistry'); } catch (_) {}
+    }
+    if (dynamicParserRegistry) {
+      const active = dynamicParserRegistry.activeProviders;
+      if (active && active.size > 0) {
+        for (let i = 0; i < match.sources.length; i++) {
+          const s = match.sources[i];
+          if (s && s.source && active.has(s.source)) return true;
+        }
+      }
+      if (typeof dynamicParserRegistry.listParsers === 'function') {
+        const parsers = dynamicParserRegistry.listParsers();
+        for (let i = 0; i < parsers.length; i++) {
+          const p = parsers[i];
+          const pName = p.name || p.id;
+          if (pName && ((match.id && match.id.startsWith(pName + '_')) || match.sources.some(s => s.source === pName))) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
 function isReplayMatch(match) {
   if (!match) return false;
   if (match.category === 'networks') return false;
@@ -728,7 +767,11 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
 
   // Providers only supply a score for a fixture that is under way or finished.
   const scoreSuffix = match.score ? ` (${match.score})` : '';
-  const prefix = isReplay ? '⏪ ' : (isLive ? (is247 ? '📺 ' : '🔴 LIVE: ') : '⏱️ ');
+  const isCustomAi = isCustomAiMatch(match);
+  let prefix = isReplay ? '⏪ ' : (isLive ? (is247 ? '📺 ' : '🔴 LIVE: ') : '⏱️ ');
+  if (isCustomAi) {
+    prefix = isLive ? '🤖🔴 LIVE: ' : (isReplay ? '🤖⏪ ' : '🤖 ');
+  }
   const cast = [];
   if (team1Name) cast.push(team1Name);
   if (team2Name) cast.push(team2Name);
@@ -741,7 +784,10 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
     : (isLive
         ? `🔴 LIVE NOW${scoreSuffix}`
         : (isReplay ? `⏪ Replay (${replayReleaseInfo})` : `⏱️ Kickoff at ${timeString}${relativeTimeStr}`));
-  const desc = `${leagueStr}📅 Category: ${match.category.toUpperCase()}\n⏰ Status: ${statusStr}`;
+  let desc = `${leagueStr}📅 Category: ${match.category.toUpperCase()}\n⏰ Status: ${statusStr}`;
+  if (isCustomAi) {
+    desc += `\n🤖 Source: Custom IA Parser (${match.customAiSource || 'Studio'})`;
+  }
 
   const isSeriesReplay = reqType === 'series';
 
@@ -749,7 +795,7 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
     id: `nuvio_sport_${match.id}`,
     type: reqType,
     name: `${prefix}${match.title}`,
-    genres: [match.category.toUpperCase()],
+    genres: [match.category.toUpperCase(), ...(isCustomAi ? ['CUSTOM IA'] : [])],
     poster: poster,
     posterShape: isSeriesReplay ? 'regular' : 'landscape',
     background: background,
@@ -1359,6 +1405,8 @@ async function handleCatalogUncached(type, id, extra, config) {
   } else if (categoryMatch === 'upcoming') {
     const now = Date.now();
     filteredMatches = matches.filter(m => !isMatchLive(m) && (getKickoff(m.date) || 0) > now);
+  } else if (categoryMatch === 'custom_ai') {
+    filteredMatches = matches.filter(m => isCustomAiMatch(m));
   } else if (categoryMatch === 'replays') {
     filteredMatches = matches.filter(m => {
       if (!isReplayMatch(m)) return false;
@@ -1409,6 +1457,10 @@ async function handleCatalogUncached(type, id, extra, config) {
 
   filteredMatches = filteredMatches.filter(m => {
     const isReplay = isReplayMatch(m);
+
+    if (categoryMatch === 'custom_ai') {
+      return true; // Keep all custom AI games (live, replay, upcoming)
+    }
 
     if (isReplayMode) {
       if (m.sources && m.sources.some(s => s.source === 'timstreams')) return false;
@@ -1509,7 +1561,7 @@ async function handleCatalogUncached(type, id, extra, config) {
   }
 
   // ── Genre filter (Replays / Live Now / Upcoming) ──────────────────────────
-  const GENRE_FILTERABLE = { replays: 1, live: 1, upcoming: 1 };
+  const GENRE_FILTERABLE = { replays: 1, live: 1, upcoming: 1, custom_ai: 1 };
   if (GENRE_FILTERABLE[categoryMatch] && extra && typeof extra.genre === 'string' && extra.genre.trim()) {
     const wanted = GENRE_TO_CATEGORY[extra.genre.trim().toLowerCase()] || null;
     if (wanted) {
@@ -1622,6 +1674,9 @@ async function handleCatalogUncached(type, id, extra, config) {
   } else if (categoryMatch === 'live') {
     cacheTtl = 120; // 2 minutes for live matches
     staleTtl = 300; // 5 minutes SWR
+  } else if (categoryMatch === 'custom_ai') {
+    cacheTtl = 60; // 1 minute for custom AI matches
+    staleTtl = 120;
   } else if (categoryMatch === 'upcoming') {
     cacheTtl = 300; // 5 minutes for upcoming
     staleTtl = 600;
@@ -1727,6 +1782,7 @@ module.exports = {
   handleMeta,
   isMatchLive,
   isReplayMatch,
+  isCustomAiMatch,
   mapMatchToMetaPreview,
   getKickoff,
   getEventDurationMs,

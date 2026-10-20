@@ -24,6 +24,11 @@ const manifest = {
       { name: 'genre', options: ['Football', 'Cricket', 'Basketball', 'Motorsport', 'Tennis', 'Baseball', 'Hockey', 'Rugby', 'American Football', 'MMA', 'Golf', 'Darts', 'Other'], isRequired: false },
       { name: 'search', isRequired: false }
     ] },
+    { type: 'tv', id: 'nuvio_sports_custom_ai', name: '🤖 Custom IA Games', extra: [
+      { name: 'genre', options: ['All', 'Football', 'Cricket', 'Basketball', 'Motorsport', 'Tennis', 'Baseball', 'Hockey', 'Rugby', 'American Football', 'MMA', 'Golf', 'Darts', 'Other'], isRequired: false },
+      { name: 'search', isRequired: false },
+      { name: 'skip', isRequired: false }
+    ] },
     { type: 'tv', id: 'nuvio_sports_networks', name: '📺 24/7 Live TV', extra: [
       { name: 'search', isRequired: false },
       { name: 'skip', isRequired: false }
@@ -99,4 +104,3 @@ const manifest = {
 const builder = new addonBuilder(manifest);
 
 module.exports = { builder, manifest };
-

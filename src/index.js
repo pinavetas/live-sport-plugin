@@ -21,7 +21,7 @@ const child_process = require('child_process');
 const path = require('path');
 
 const { builder } = require('./manifest');
-const { handleCatalog, handleMeta, isReplayMatch } = require('./catalog');
+const { handleCatalog, handleMeta, isReplayMatch, isCustomAiMatch } = require('./catalog');
 const { handleStream } = require('./streams');
 const { PORT, BASE_URL, getRequestBaseUrl, getLocalIp } = require('./config');
 const { isLocalDirectRequest } = require('./services/localRequest');
@@ -973,7 +973,7 @@ app.get('/:config?/manifest.json', (req, res, next) => {
     const enabledSports = parsedConfig.sports.split(',');
     
     // General catalogs to always keep (Your Teams leads first)
-    const keepCatalogs = ['nuvio_sports_teams', 'nuvio_sports_live', 'nuvio_sports_upcoming', 'nuvio_sports_networks', 'nuvio_sports_replays'];
+    const keepCatalogs = ['nuvio_sports_teams', 'nuvio_sports_live', 'nuvio_sports_custom_ai', 'nuvio_sports_upcoming', 'nuvio_sports_networks', 'nuvio_sports_replays'];
     
     // Add specific catalogs based on selection
     const sportCatalogs = ['football', 'cricket', 'basketball', 'motorsport', 'hockey', 'baseball', 'mma', 'golf', 'tennis', 'rugby', 'american_football', 'darts'];
@@ -998,6 +998,18 @@ app.get('/:config?/manifest.json', (req, res, next) => {
     newManifest.catalogs = newManifest.catalogs.filter(c => c.id !== 'nuvio_sports_teams');
   }
 
+  // Hide custom AI games catalog if no dynamic parsers are configured and no custom matches exist
+  try {
+    const dpr = container.resolve('dynamicParserRegistry');
+    const cs = container.resolve('cacheService');
+    const hasParsers = dpr && dpr.listParsers && dpr.listParsers().length > 0;
+    const cachedMatches = (cs && cs.getMatchesReadOnly ? cs.getMatchesReadOnly() : (cs ? cs.getMatches() : [])) || [];
+    const hasCustomMatches = cachedMatches.some(m => isCustomAiMatch(m));
+    if (!hasParsers && !hasCustomMatches) {
+      newManifest.catalogs = newManifest.catalogs.filter(c => c.id !== 'nuvio_sports_custom_ai');
+    }
+  } catch (_) {}
+
   // Catalog management: hide sport catalogs that currently have no content.
   // Dead shelves (a catalog chip that always opens empty) are worse UX than an
   // absent one. Guarded so this only applies once a sync has actually produced
@@ -1015,8 +1027,8 @@ app.get('/:config?/manifest.json', (req, res, next) => {
 
       // Always-keep catalogs: not tied to a single sport.
       const ALWAYS_KEEP = new Set([
-        'nuvio_sports_teams', 'nuvio_sports_live', 'nuvio_sports_upcoming',
-        'nuvio_sports_other', 'nuvio_sports_networks'
+        'nuvio_sports_teams', 'nuvio_sports_live', 'nuvio_sports_custom_ai',
+        'nuvio_sports_upcoming', 'nuvio_sports_other', 'nuvio_sports_networks'
       ]);
 
       // Lazily extract lowercase network titles if needed by any catalog

@@ -131,4 +131,50 @@ router.delete('/:name', (req, res) => {
   return res.json(result);
 });
 
+/**
+ * POST /api/parser/sync or /api/parser/:name/sync
+ * Triggers an immediate crawl of custom parsers and pushes matches to cache.
+ */
+router.post(['/sync', '/:name/sync'], async (req, res) => {
+  const { name } = req.params;
+  const container = req.app.get('container');
+  const cache = container ? container.resolve('cacheService') : null;
+  const active = dynamicParserRegistry.activeProviders;
+
+  const targets = [];
+  if (name) {
+    const cleanName = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const p = active.get(cleanName);
+    if (p) targets.push(p);
+  } else {
+    targets.push(...active.values());
+  }
+
+  if (targets.length === 0) {
+    return res.status(404).json({ success: false, error: 'No matching active parser found' });
+  }
+
+  let totalExtracted = 0;
+  for (const provider of targets) {
+    try {
+      const matches = await provider.getMatches();
+      if (matches && matches.length > 0 && cache) {
+        const existing = cache.getMatches() || [];
+        const matchIds = new Set(matches.map(m => m.id));
+        const filtered = existing.filter(m => !matchIds.has(m.id));
+        cache.setMatches([...filtered, ...matches]);
+        totalExtracted += matches.length;
+      }
+    } catch (err) {
+      console.warn(`[ParserStudio] Sync failed for ${provider.name}: ${err.message}`);
+    }
+  }
+
+  return res.json({
+    success: true,
+    message: `Synced ${targets.length} parser(s), extracted ${totalExtracted} matches`,
+    extracted: totalExtracted
+  });
+});
+
 module.exports = router;

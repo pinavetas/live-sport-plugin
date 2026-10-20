@@ -80,6 +80,8 @@ class DynamicCustomProvider extends BaseProvider {
             category: this.normalizeCategory(this.defaultCategory),
             date: Date.now().toString(),
             poster: thumbnail,
+            isCustomAi: true,
+            customAiSource: this.sourceName,
             sources: [{
               source: this.sourceName,
               id: link,
