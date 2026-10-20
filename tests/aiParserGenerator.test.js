@@ -147,6 +147,34 @@ describe('AiParserGeneratorService & DynamicParserRegistry', () => {
       expect(res).toBe('{"name":"cascade-success"}');
     });
 
+    test('cascades to next Gemini candidate model if first encounters HTTP 503 high demand spike', async () => {
+      const attemptedModels = [];
+      aiService.fetchFn = jest.fn((url, opts) => {
+        const body = JSON.parse(opts.body);
+        attemptedModels.push(body.model);
+        if (body.model === 'gemini-3.8-flash') {
+          return Promise.resolve({
+            ok: false,
+            status: 503,
+            text: async () => '[{"error":{"code":503,"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.","status":"UNAVAILABLE"}}]'
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ choices: [{ message: { content: '{"name":"high-demand-failover-success"}' } }] })
+        });
+      });
+
+      const res = await aiService.queryLlm({
+        prompt: 'test',
+        systemPrompt: 'sys',
+        config: { apiKey: 'AIzaSyExampleKey123', model: '3.8 flash' }
+      });
+
+      expect(attemptedModels).toEqual(['gemini-3.8-flash', 'gemini-3.5-flash-lite']);
+      expect(res).toBe('{"name":"high-demand-failover-success"}');
+    });
+
     test('falls back to Gemini native generateContent if OpenAI endpoint fails', async () => {
       aiService.fetchFn = jest.fn((url, opts) => {
         if (url.includes('/openai/chat/completions')) {

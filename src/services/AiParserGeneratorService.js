@@ -89,6 +89,7 @@ class AiParserGeneratorService {
       'gemini-3.8-flash',
       'gemini-3.5-flash-lite',
       'gemini-2.5-flash',
+      'gemini-2.5-flash-lite',
       'gemini-2.0-flash'
     ];
     const candidates = [];
@@ -141,16 +142,17 @@ class AiParserGeneratorService {
         }
 
         const errText = await res.text().catch(() => '');
-        // If 404 (model not found / deprecated), continue cascade to next model candidate
-        if (res.status === 404 || errText.includes('not found') || errText.includes('not supported')) {
-          lastError = new Error(`Gemini model '${modelCandidate}' 404: ${errText.slice(0, 150)}`);
+        // If transient error (503 high demand, 429 rate limit, 404 model not found), cascade to next candidate
+        if (this._isModelCascadable(res.status, errText)) {
+          console.warn(`[AiParserGenerator] Gemini model '${modelCandidate}' returned HTTP ${res.status}. Cascading to next candidate...`);
+          lastError = new Error(`Gemini model '${modelCandidate}' HTTP ${res.status}: ${errText.slice(0, 150)}`);
           continue;
         }
 
-        // For non-404 errors (e.g. 400 invalid API key, 403 quota), throw immediately
+        // For non-cascadable client errors (e.g. 400 invalid API key), throw immediately
         throw new Error(`LLM API returned HTTP ${res.status}: ${errText.slice(0, 200)}`);
       } catch (err) {
-        if (err.message && (err.message.includes('404') || err.message.includes('not found'))) {
+        if (this._isModelCascadable(0, err.message)) {
           lastError = err;
           continue;
         }
@@ -193,14 +195,15 @@ class AiParserGeneratorService {
         }
 
         const errText = await res.text().catch(() => '');
-        if (res.status === 404 || errText.includes('not found') || errText.includes('not supported')) {
-          lastError = new Error(`Gemini native '${modelCandidate}' 404: ${errText.slice(0, 150)}`);
+        if (this._isModelCascadable(res.status, errText)) {
+          console.warn(`[AiParserGenerator] Gemini native '${modelCandidate}' returned HTTP ${res.status}. Cascading to next candidate...`);
+          lastError = new Error(`Gemini native '${modelCandidate}' HTTP ${res.status}: ${errText.slice(0, 150)}`);
           continue;
         }
 
         throw new Error(`LLM API returned HTTP ${res.status}: ${errText.slice(0, 200)}`);
       } catch (err) {
-        if (err.message && (err.message.includes('404') || err.message.includes('not found'))) {
+        if (this._isModelCascadable(0, err.message)) {
           lastError = err;
           continue;
         }
@@ -208,7 +211,25 @@ class AiParserGeneratorService {
       }
     }
 
-    throw lastError || new Error('All Google Gemini candidate models returned 404 Not Found');
+    throw lastError || new Error('All Google Gemini candidate models failed (High demand / Not Found)');
+  }
+
+  /**
+   * Identifies if an HTTP response code or error message represents a model-specific or transient issue
+   * that should trigger automated cascade to another candidate model.
+   */
+  _isModelCascadable(status, errText = '') {
+    if ([404, 429, 500, 502, 503, 504].includes(status)) {
+      return true;
+    }
+    const lower = String(errText).toLowerCase();
+    return lower.includes('not found') || 
+           lower.includes('not supported') || 
+           lower.includes('high demand') || 
+           lower.includes('unavailable') || 
+           lower.includes('resource_exhausted') || 
+           lower.includes('rate limit') ||
+           lower.includes('503');
   }
 
   /**
