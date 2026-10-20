@@ -86,13 +86,11 @@ class AiParserGeneratorService {
    * Resilient Google Gemini handler with automatic model cascading and native API fallback.
    */
   async _queryGemini({ prompt, systemPrompt, apiKey, requestedModel }) {
-    // Models to attempt: prioritize current 3.8 / 3.5 / 2.5 generations
+    // Models to attempt: only active 3.x generation (1.5, 2.0, 2.5 were sunset by Google)
     const defaultGeminiCandidates = [
       'gemini-3.8-flash',
       'gemini-3.5-flash-lite',
-      'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
-      'gemini-2.0-flash'
+      'gemini-3.5-flash'
     ];
     const candidates = [];
 
@@ -103,69 +101,97 @@ class AiParserGeneratorService {
 
     if (normalizedRequested && 
         normalizedRequested !== 'deepseek-chat' && 
-        !normalizedRequested.startsWith('gemini-1.5')) {
+        !normalizedRequested.startsWith('gemini-1.') &&
+        !normalizedRequested.startsWith('gemini-2.')) {
       candidates.push(normalizedRequested);
     }
     for (const c of defaultGeminiCandidates) {
       if (!candidates.includes(c)) candidates.push(c);
     }
 
+    let primaryError = null;
     let lastError = null;
 
     // Strategy 1: Google Gemini OpenAI-compatible endpoint
     const openaiEndpoint = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
-    for (const modelCandidate of candidates) {
-      try {
-        const payload = {
-          model: modelCandidate,
-          temperature: 0.1,
-          max_tokens: 1500,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: prompt }
-          ]
-        };
+    for (let i = 0; i < candidates.length; i++) {
+      const modelCandidate = candidates[i];
+      const isPrimary = (i === 0);
 
-        const res = await this._fetchLlm(openaiEndpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`,
-            'User-Agent': 'Nuvio-AI-Parser-Studio/1.0'
-          },
-          body: JSON.stringify(payload),
-          timeoutMs: 20000,
-          attempts: 1
-        });
+      // Try up to 2 attempts per model if 503 High Demand occurs
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const payload = {
+            model: modelCandidate,
+            temperature: 0.1,
+            max_tokens: 1500,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: prompt }
+            ]
+          };
 
-        if (res.ok) {
-          const data = await res.json();
-          const content = data?.choices?.[0]?.message?.content;
-          if (content) return content;
+          const res = await this._fetchLlm(openaiEndpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${apiKey}`,
+              'User-Agent': 'Nuvio-AI-Parser-Studio/1.0'
+            },
+            body: JSON.stringify(payload),
+            timeoutMs: 20000,
+            attempts: 1
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            const content = data?.choices?.[0]?.message?.content;
+            if (content) return content;
+          }
+
+          const errText = await res.text().catch(() => '');
+          const errorObj = new Error(`Gemini model '${modelCandidate}' returned HTTP ${res.status}: ${errText.slice(0, 200)}`);
+          if (isPrimary && !primaryError) primaryError = errorObj;
+
+          // If 503 high demand on first attempt, wait 1.2s before retrying or cascading
+          if (res.status === 503 && attempt === 1) {
+            console.warn(`[AiParserGenerator] Gemini model '${modelCandidate}' is experiencing high demand (503). Retrying in 1200ms...`);
+            await new Promise(r => setTimeout(r, 1200));
+            continue;
+          }
+
+          if (this._isModelCascadable(res.status, errText)) {
+            console.warn(`[AiParserGenerator] Gemini model '${modelCandidate}' returned HTTP ${res.status}. Cascading to next candidate...`);
+            lastError = errorObj;
+            break; // cascade to next model candidate
+          }
+
+          throw new Error(`LLM API returned HTTP ${res.status}: ${errText.slice(0, 200)}`);
+        } catch (err) {
+          const isCascadable = this._isModelCascadable(0, err.message);
+          if (isPrimary && !primaryError) primaryError = err;
+
+          if (err.message && err.message.includes('503') && attempt === 1) {
+            console.warn(`[AiParserGenerator] Gemini model '${modelCandidate}' 503 retry in 1200ms...`);
+            await new Promise(r => setTimeout(r, 1200));
+            continue;
+          }
+
+          if (isCascadable) {
+            console.warn(`[AiParserGenerator] Gemini model '${modelCandidate}' failed (${err.message}). Cascading to next candidate...`);
+            lastError = err;
+            break;
+          }
+          throw err;
         }
-
-        const errText = await res.text().catch(() => '');
-        // If transient error (503 high demand, 429 rate limit, 404 model not found, timeout), cascade to next candidate
-        if (this._isModelCascadable(res.status, errText)) {
-          console.warn(`[AiParserGenerator] Gemini model '${modelCandidate}' returned HTTP ${res.status}. Cascading to next candidate...`);
-          lastError = new Error(`Gemini model '${modelCandidate}' HTTP ${res.status}: ${errText.slice(0, 150)}`);
-          continue;
-        }
-
-        // For non-cascadable client errors (e.g. 400 invalid API key), throw immediately
-        throw new Error(`LLM API returned HTTP ${res.status}: ${errText.slice(0, 200)}`);
-      } catch (err) {
-        if (this._isModelCascadable(0, err.message)) {
-          console.warn(`[AiParserGenerator] Gemini model '${modelCandidate}' failed (${err.message}). Cascading to next candidate...`);
-          lastError = err;
-          continue;
-        }
-        throw err;
       }
     }
 
     // Strategy 2: Google Gemini Native generateContent REST fallback
-    for (const modelCandidate of candidates) {
+    for (let i = 0; i < candidates.length; i++) {
+      const modelCandidate = candidates[i];
+      const isPrimary = (i === 0);
+
       try {
         const nativeEndpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelCandidate}:generateContent?key=${apiKey}`;
         const nativePayload = {
@@ -200,9 +226,12 @@ class AiParserGeneratorService {
         }
 
         const errText = await res.text().catch(() => '');
+        const errorObj = new Error(`Gemini native '${modelCandidate}' returned HTTP ${res.status}: ${errText.slice(0, 200)}`);
+        if (isPrimary && !primaryError) primaryError = errorObj;
+
         if (this._isModelCascadable(res.status, errText)) {
           console.warn(`[AiParserGenerator] Gemini native '${modelCandidate}' returned HTTP ${res.status}. Cascading to next candidate...`);
-          lastError = new Error(`Gemini native '${modelCandidate}' HTTP ${res.status}: ${errText.slice(0, 150)}`);
+          lastError = errorObj;
           continue;
         }
 
@@ -217,7 +246,8 @@ class AiParserGeneratorService {
       }
     }
 
-    throw lastError || new Error('All Google Gemini candidate models failed (High demand / Not Found / Timeout)');
+    // Throw the primary model's error so the user sees the real reason for their requested model
+    throw primaryError || lastError || new Error(`Google Gemini model '${candidates[0]}' failed to respond`);
   }
 
   /**

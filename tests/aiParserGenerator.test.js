@@ -171,7 +171,7 @@ describe('AiParserGeneratorService & DynamicParserRegistry', () => {
         config: { apiKey: 'AIzaSyExampleKey123', model: '3.8 flash' }
       });
 
-      expect(attemptedModels).toEqual(['gemini-3.8-flash', 'gemini-3.5-flash-lite']);
+      expect(attemptedModels).toEqual(['gemini-3.8-flash', 'gemini-3.8-flash', 'gemini-3.5-flash-lite']);
       expect(res).toBe('{"name":"high-demand-failover-success"}');
     });
 
@@ -197,6 +197,34 @@ describe('AiParserGeneratorService & DynamicParserRegistry', () => {
 
       expect(attemptedModels).toEqual(['gemini-3.8-flash', 'gemini-3.5-flash-lite']);
       expect(res).toBe('{"name":"timeout-failover-success"}');
+    });
+
+    test('surfaces primary requested model error if all fallback models fail', async () => {
+      aiService.fetchFn = jest.fn((url, opts) => {
+        let model = '';
+        if (opts.body) {
+          const body = JSON.parse(opts.body);
+          model = body.model || (url.includes('models/') ? url.split('models/')[1].split(':')[0] : '');
+        }
+        if (model === 'gemini-3.8-flash') {
+          return Promise.resolve({
+            ok: false,
+            status: 503,
+            text: async () => '{"error":{"code":503,"message":"This model is currently experiencing high demand."}}'
+          });
+        }
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: async () => '{"error":{"code":404,"message":"Model not found"}}'
+        });
+      });
+
+      await expect(aiService.queryLlm({
+        prompt: 'test',
+        systemPrompt: 'sys',
+        config: { apiKey: 'AIzaSyExampleKey123', model: 'gemini-3.8-flash' }
+      })).rejects.toThrow(/gemini-3.8-flash/);
     });
 
     test('falls back to Gemini native generateContent if OpenAI endpoint fails', async () => {
