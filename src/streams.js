@@ -61,6 +61,12 @@ function isReplaySource(sourceName) {
   return KNOWN_REPLAY_SOURCES.includes(sourceName);
 }
 
+function isDynamicCustomSource(srcName) {
+  let dynamicParserRegistry = null;
+  try { dynamicParserRegistry = container.resolve('dynamicParserRegistry'); } catch (_) {}
+  return Boolean(dynamicParserRegistry && dynamicParserRegistry.activeProviders && dynamicParserRegistry.activeProviders.has(srcName));
+}
+
 function selectSources(matchSources, config, match = null) {
   const cleanSources = (matchSources || []).filter(src => !isEventStreamSource(src));
   const sortedSources = [...cleanSources].sort((a, b) => {
@@ -204,8 +210,19 @@ async function dispatchToProvider(sourceName, src, match) {
       resStreams = await provider.resolveStream(src.id, match.category, match.title);
     }
   } else {
-    // Unknown or unsupported source, ignore
-    resStreams = [];
+    // Check if source belongs to a dynamic custom AI provider
+    let dynamicParserRegistry = null;
+    try {
+      dynamicParserRegistry = container.resolve('dynamicParserRegistry');
+    } catch (_) {}
+    const dynamicProvider = dynamicParserRegistry && dynamicParserRegistry.activeProviders
+      ? dynamicParserRegistry.activeProviders.get(sourceName)
+      : null;
+    if (dynamicProvider && typeof dynamicProvider.resolveStream === 'function') {
+      resStreams = await dynamicProvider.resolveStream(src.id, match.category, match.title, src);
+    } else {
+      resStreams = [];
+    }
   }
 
   return resStreams;
@@ -1004,8 +1021,14 @@ async function handleStream(type, id, config) {
   try {
     const { isReplayMatch } = require('./catalog');
     if (isReplayMatch(match)) {
-      const REPLAY_SOURCES = new Set(['replayzone', 'livetv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive']);
-      const replaySources = candidateSources.filter(s => s && REPLAY_SOURCES.has(s.source));
+      const { REPLAY_SOURCES } = require('./catalog');
+      let dynamicParserRegistry = null;
+      try { dynamicParserRegistry = container.resolve('dynamicParserRegistry'); } catch (_) {}
+      const activeDynamic = dynamicParserRegistry ? dynamicParserRegistry.activeProviders : null;
+      const replaySources = candidateSources.filter(s => s && (
+        (REPLAY_SOURCES && REPLAY_SOURCES.has(s.source)) || 
+        (activeDynamic && activeDynamic.has(s.source))
+      ));
       if (replaySources.length > 0) {
         candidateSources = replaySources;
       }
@@ -1560,6 +1583,7 @@ function suppressPreMatchTeamChannels(streams, match) {
 }
 
 module.exports = {
+  KNOWN_FALLBACKS,
   handleStream,
   prewarmMatch,
   prewarmSkipProvidersSet,

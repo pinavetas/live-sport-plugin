@@ -99,9 +99,17 @@ class DynamicCustomProvider extends BaseProvider {
     return matches;
   }
 
-  async resolveStream(sourceId, matchCategory, matchTitle) {
+  /**
+   * Deep Multi-Hop Stream Resolution:
+   * 1. Navigates to match detail landing page.
+   * 2. Detects embedded SPA links (e.g. FootyBite/SoccerStreams) and server buttons.
+   * 3. Explores stream hosts concurrently to locate direct M3U8 HLS streams,
+   *    DaddyLive stream channels, or embed players.
+   */
+  async resolveStream(sourceId, matchCategory, matchTitle, src = {}) {
     const streams = [];
     const targetUrl = sourceId.startsWith('http') ? sourceId : `${this.baseUrl}/${sourceId.replace(/^\//, '')}`;
+    const container = require('../container');
 
     try {
       const res = await safeFetch(targetUrl, {
@@ -109,76 +117,257 @@ class DynamicCustomProvider extends BaseProvider {
           ...this.defaultHeaders,
           'Referer': this.baseUrl
         },
-        timeoutMs: 15000,
+        timeoutMs: 12000,
         attempts: 2
       });
 
       if (!res.ok) {
         return [new StreamEntity({
           name: this.name,
-          title: `${matchTitle || this.name} (Web Player)`,
+          title: `${matchTitle || this.name} (Source Web Player)`,
           externalUrl: targetUrl
         })];
       }
 
       const html = await res.text();
 
-      // 1. Check for direct M3U8/MP4 streams via built-in extraction chain
-      const chainMatch = extractChain(html, this.name);
-      if (chainMatch && chainMatch.url) {
-        streams.push(new StreamEntity({
+      // Hop 1 Check: Direct M3U8 on match landing page
+      const directChain = extractChain(html, this.name);
+      if (directChain && directChain.url) {
+        return [new StreamEntity({
           name: this.name,
-          title: `${matchTitle || this.name} (Direct Stream)`,
+          title: `${matchTitle || this.name} [Direct Stream]`,
           resolution: '1080p',
-          url: chainMatch.url,
+          url: directChain.url,
+          score: 100,
           behaviorHints: { notWebReady: false }
-        }));
-        return streams;
+        })];
       }
 
-      // 2. Check for OK.ru embed
-      const okMatch = html.match(/https?:\/\/(?:www\.)?ok\.ru\/videoembed\/(\d+)/i);
-      if (okMatch) {
-        streams.push(new StreamEntity({
-          name: this.name,
-          title: `${matchTitle || this.name} [OK.ru]`,
-          externalUrl: okMatch[0]
-        }));
-        return streams;
+      // Hop 2: Discover stream servers/links on the match page
+      const streamCandidates = [];
+
+      // A. Check for SPA embedded links (e.g. FootyBite / SoccerStreams ftbPageData.schedule)
+      const ftbMatch = html.match(/window\.ftbPageData\s*=\s*(\{[\s\S]*?\});\s*(?:window\.|\n|<\/script>)/);
+      if (ftbMatch) {
+        try {
+          const fn = new Function('return ' + ftbMatch[1]);
+          const data = fn();
+          const sched = data && data.schedule ? data.schedule : {};
+          for (const g of Object.values(sched)) {
+            if (g && g.links) {
+              const links = typeof g.links === 'string' ? JSON.parse(g.links) : g.links;
+              if (Array.isArray(links)) {
+                for (const l of links) {
+                  if (l && l.url) {
+                    streamCandidates.push({
+                      name: l.name || 'Stream Server',
+                      url: l.url.trim(),
+                      quality: l.quality || 'HD'
+                    });
+                  }
+                }
+              }
+            }
+          }
+        } catch (_) {}
       }
 
-      // 3. Check for general video iframes
+      // B. Custom or heuristic DOM scan for stream links/buttons
       const $ = cheerio.load(html);
-      const iframes = $('iframe[src]').map((_, el) => $(el).attr('src')).get();
-      for (const ifr of iframes) {
-        if (/dailymotion|streamwish|byse|sprintcdn|youtube/i.test(ifr)) {
-          const finalIfr = ifr.startsWith('//') ? `https:${ifr}` : ifr;
-          streams.push(new StreamEntity({
-            name: this.name,
-            title: `${matchTitle || this.name} (Player)`,
-            externalUrl: finalIfr
-          }));
-          return streams;
+      const customSelector = this.config.selectors && this.config.selectors.streamLinks;
+      if (customSelector) {
+        $(customSelector).each((_, el) => {
+          const href = $(el).attr('href');
+          const title = $(el).text().trim();
+          if (href) {
+            try {
+              streamCandidates.push({
+                name: title || 'Stream',
+                url: new URL(href, targetUrl).href,
+                quality: 'HD'
+              });
+            } catch (_) {}
+          }
+        });
+      }
+
+      $('a[href]').each((_, el) => {
+        const href = $(el).attr('href') || '';
+        const text = $(el).text().replace(/\s+/g, ' ').trim();
+        if (/stream|watch|live|play|server|channel/i.test(href) &&
+            !href.startsWith('#') && !href.includes('/sports/') && !href.includes('/league/')) {
+          try {
+            const fullUrl = new URL(href, targetUrl).href;
+            if (!streamCandidates.some(s => s.url === fullUrl)) {
+              streamCandidates.push({
+                name: text || 'Stream Server',
+                url: fullUrl,
+                quality: 'HD'
+              });
+            }
+          } catch (_) {}
+        }
+      });
+
+      // C. Direct iframes on match landing page
+      $('iframe[src]').each((_, el) => {
+        const srcAttr = $(el).attr('src') || '';
+        if (srcAttr && !srcAttr.startsWith('#')) {
+          try {
+            const fullIfr = new URL(srcAttr, targetUrl).href;
+            if (!streamCandidates.some(s => s.url === fullIfr)) {
+              streamCandidates.push({
+                name: 'Player Iframe',
+                url: fullIfr,
+                quality: 'HD',
+                isIframe: true
+              });
+            }
+          } catch (_) {}
+        }
+      });
+
+      // Hop 3: Deep Multi-Hop inspection across top stream candidates
+      const hopTargets = streamCandidates.slice(0, 6);
+      if (hopTargets.length > 0) {
+        const hopPromises = hopTargets.map(async (candidate, idx) => {
+          try {
+            // Check if candidate URL is directly a DaddyLive channel
+            const dliveMatch = candidate.url.match(/stream-(\d+)\.php/i);
+            if (dliveMatch) {
+              const channelId = dliveMatch[1];
+              try {
+                const daddyLiveProvider = container.resolve('daddyLiveProvider');
+                if (daddyLiveProvider) {
+                  const resolved = await daddyLiveProvider.resolveStream(channelId, matchCategory, matchTitle);
+                  if (resolved && resolved.length > 0) {
+                    return resolved.map(st => new StreamEntity({
+                      ...st,
+                      name: `${this.name} [${candidate.name}]`,
+                      title: `${matchTitle || this.name} - ${candidate.name} (Direct HLS)`,
+                      score: 95 - idx
+                    }));
+                  }
+                }
+              } catch (_) {}
+            }
+
+            // Fetch candidate stream host page
+            const hopRes = await safeFetch(candidate.url, {
+              headers: {
+                ...this.defaultHeaders,
+                'Referer': targetUrl
+              },
+              timeoutMs: 5000,
+              attempts: 1
+            });
+
+            if (!hopRes.ok) return null;
+            const hopHtml = await hopRes.text();
+
+            // Direct M3U8 on stream host page
+            const hopChain = extractChain(hopHtml, this.name);
+            if (hopChain && hopChain.url) {
+              return [new StreamEntity({
+                name: `${this.name} [${candidate.name}]`,
+                title: `${matchTitle || this.name} - ${candidate.name} (Direct Stream)`,
+                url: hopChain.url,
+                resolution: '1080p',
+                score: 90 - idx,
+                behaviorHints: { notWebReady: false }
+              })];
+            }
+
+            // Nested iframes inspection
+            const $hop = cheerio.load(hopHtml);
+            const nestedIframes = $hop('iframe[src]').map((_, el) => $hop(el).attr('src')).get();
+
+            for (const ifr of nestedIframes) {
+              const nestedDlive = ifr.match(/stream-(\d+)\.php/i);
+              if (nestedDlive) {
+                const channelId = nestedDlive[1];
+                try {
+                  const daddyLiveProvider = container.resolve('daddyLiveProvider');
+                  if (daddyLiveProvider) {
+                    const resolved = await daddyLiveProvider.resolveStream(channelId, matchCategory, matchTitle);
+                    if (resolved && resolved.length > 0) {
+                      return resolved.map(st => new StreamEntity({
+                        ...st,
+                        name: `${this.name} [${candidate.name}]`,
+                        title: `${matchTitle || this.name} - ${candidate.name} (Direct HLS)`,
+                        score: 95 - idx
+                      }));
+                    }
+                  }
+                } catch (_) {}
+              }
+
+              // Fetch player iframe to extract M3U8
+              try {
+                const ifrFull = ifr.startsWith('//') ? `https:${ifr}` : (ifr.startsWith('http') ? ifr : new URL(ifr, candidate.url).href);
+                const ifrRes = await safeFetch(ifrFull, {
+                  headers: { ...this.defaultHeaders, 'Referer': candidate.url },
+                  timeoutMs: 4000,
+                  attempts: 1
+                });
+                if (ifrRes.ok) {
+                  const ifrText = await ifrRes.text();
+                  const ifrChain = extractChain(ifrText, this.name);
+                  if (ifrChain && ifrChain.url) {
+                    return [new StreamEntity({
+                      name: `${this.name} [${candidate.name}]`,
+                      title: `${matchTitle || this.name} - ${candidate.name} (Direct Stream)`,
+                      url: ifrChain.url,
+                      resolution: '1080p',
+                      score: 88 - idx,
+                      behaviorHints: { notWebReady: false }
+                    })];
+                  }
+                }
+              } catch (_) {}
+            }
+
+            // Fallback: Embed server player
+            return [new StreamEntity({
+              name: `${this.name} [${candidate.name}]`,
+              title: `${matchTitle || this.name} - ${candidate.name} (Server Player)`,
+              externalUrl: candidate.url,
+              score: 50 - idx
+            })];
+          } catch (_) {
+            return null;
+          }
+        });
+
+        const settledHops = await Promise.allSettled(hopPromises);
+        for (const r of settledHops) {
+          if (r.status === 'fulfilled' && Array.isArray(r.value)) {
+            streams.push(...r.value);
+          }
         }
       }
 
-      // 4. Default fallback: Web Player at source URL
-      streams.push(new StreamEntity({
+      // Prioritize streams with direct playable URLs over external links
+      if (streams.length > 0) {
+        streams.sort((a, b) => (b.url ? 1 : 0) - (a.url ? 1 : 0));
+        return streams;
+      }
+
+      return [new StreamEntity({
         name: this.name,
         title: `${matchTitle || this.name} (External Player)`,
         externalUrl: targetUrl
-      }));
+      })];
 
     } catch (err) {
       console.warn(`[${this.name}] Stream resolution failed for ${sourceId}: ${err.message}`);
-      streams.push(new StreamEntity({
+      return [new StreamEntity({
         name: this.name,
         title: `${matchTitle || this.name} (Fallback)`,
         externalUrl: targetUrl
-      }));
+      })];
     }
-
-    return streams;
   }
 }
 

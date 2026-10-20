@@ -72,11 +72,14 @@ class DynamicParserRegistry {
       }
     } catch (_) {}
 
-    // 3. Add to KNOWN_REPLAY_SOURCES in streams.js
+    // 3. Add to KNOWN_REPLAY_SOURCES & KNOWN_FALLBACKS in streams.js
     try {
-      const { KNOWN_REPLAY_SOURCES } = require('../streams');
+      const { KNOWN_REPLAY_SOURCES, KNOWN_FALLBACKS } = require('../streams');
       if (Array.isArray(KNOWN_REPLAY_SOURCES) && !KNOWN_REPLAY_SOURCES.includes(sourceName)) {
         KNOWN_REPLAY_SOURCES.push(sourceName);
+      }
+      if (Array.isArray(KNOWN_FALLBACKS) && !KNOWN_FALLBACKS.includes(sourceName)) {
+        KNOWN_FALLBACKS.push(sourceName);
       }
     } catch (_) {}
 
@@ -116,10 +119,14 @@ class DynamicParserRegistry {
     } catch (_) {}
 
     try {
-      const { KNOWN_REPLAY_SOURCES } = require('../streams');
+      const { KNOWN_REPLAY_SOURCES, KNOWN_FALLBACKS } = require('../streams');
       if (Array.isArray(KNOWN_REPLAY_SOURCES)) {
         const idx = KNOWN_REPLAY_SOURCES.indexOf(sourceName);
         if (idx >= 0) KNOWN_REPLAY_SOURCES.splice(idx, 1);
+      }
+      if (Array.isArray(KNOWN_FALLBACKS)) {
+        const idx = KNOWN_FALLBACKS.indexOf(sourceName);
+        if (idx >= 0) KNOWN_FALLBACKS.splice(idx, 1);
       }
     } catch (_) {}
 
