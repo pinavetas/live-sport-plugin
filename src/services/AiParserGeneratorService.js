@@ -54,22 +54,158 @@ class AiParserGeneratorService {
   }
 
   /**
-   * Dispatches request to an OpenAI-compatible /chat/completions endpoint.
+   * Dispatches request to an LLM provider:
+   * - Google Gemini (auto-detected via AIza* key or googleapis URL): uses OpenAI compatibility
+   *   endpoint with automated multi-model cascade (gemini-2.5-flash -> gemini-2.0-flash -> etc.)
+   *   and fallback to native Gemini generateContent REST API.
+   * - OpenAI-compatible providers (OpenCode, Freebuff, OpenAI, Ollama, DeepSeek, vLLM).
    */
   async queryLlm({ prompt, systemPrompt, config = {} }) {
     const apiKey = config.apiKey !== undefined ? config.apiKey : this.defaultApiKey;
     let rawBaseUrl = config.baseUrl || this.defaultBaseUrl;
-    let model = config.model || this.defaultModel;
 
-    // Smart auto-detection: Google Gemini API keys start with "AIza"
-    if (apiKey && apiKey.startsWith('AIza') && (!config.baseUrl || config.baseUrl.includes('api.openai.com'))) {
-      rawBaseUrl = 'https://generativelanguage.googleapis.com/v1beta/openai';
-      if (!config.model || config.model === 'deepseek-chat') {
-        model = 'gemini-1.5-flash';
+    const isGemini = (apiKey && apiKey.startsWith('AIza')) || 
+                     (rawBaseUrl && rawBaseUrl.includes('generativelanguage.googleapis.com'));
+
+    if (isGemini) {
+      return this._queryGemini({ prompt, systemPrompt, apiKey, requestedModel: config.model });
+    }
+
+    return this._queryOpenAiCompatible({ 
+      prompt, 
+      systemPrompt, 
+      apiKey, 
+      rawBaseUrl, 
+      model: config.model || this.defaultModel 
+    });
+  }
+
+  /**
+   * Resilient Google Gemini handler with automatic model cascading and native API fallback.
+   */
+  async _queryGemini({ prompt, systemPrompt, apiKey, requestedModel }) {
+    // Models to attempt: prioritize active 2.5 / 2.0 generations since 1.5 was sunset by Google
+    const defaultGeminiCandidates = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
+    const candidates = [];
+
+    if (requestedModel && 
+        requestedModel !== 'deepseek-chat' && 
+        !requestedModel.startsWith('gemini-1.5')) {
+      candidates.push(requestedModel);
+    }
+    for (const c of defaultGeminiCandidates) {
+      if (!candidates.includes(c)) candidates.push(c);
+    }
+
+    let lastError = null;
+
+    // Strategy 1: Google Gemini OpenAI-compatible endpoint
+    const openaiEndpoint = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+    for (const modelCandidate of candidates) {
+      try {
+        const payload = {
+          model: modelCandidate,
+          temperature: 0.1,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: prompt }
+          ]
+        };
+
+        const res = await this.fetchFn(openaiEndpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+            'User-Agent': 'Nuvio-AI-Parser-Studio/1.0'
+          },
+          body: JSON.stringify(payload),
+          timeoutMs: 35000,
+          attempts: 1
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          const content = data?.choices?.[0]?.message?.content;
+          if (content) return content;
+        }
+
+        const errText = await res.text().catch(() => '');
+        // If 404 (model not found / deprecated), continue cascade to next model candidate
+        if (res.status === 404 || errText.includes('not found') || errText.includes('not supported')) {
+          lastError = new Error(`Gemini model '${modelCandidate}' 404: ${errText.slice(0, 150)}`);
+          continue;
+        }
+
+        // For non-404 errors (e.g. 400 invalid API key, 403 quota), throw immediately
+        throw new Error(`LLM API returned HTTP ${res.status}: ${errText.slice(0, 200)}`);
+      } catch (err) {
+        if (err.message && (err.message.includes('404') || err.message.includes('not found'))) {
+          lastError = err;
+          continue;
+        }
+        throw err;
       }
     }
 
-    const cleanBaseUrl = rawBaseUrl.replace(/\/+$/, '');
+    // Strategy 2: Google Gemini Native generateContent REST fallback
+    for (const modelCandidate of candidates) {
+      try {
+        const nativeEndpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelCandidate}:generateContent?key=${apiKey}`;
+        const nativePayload = {
+          contents: [
+            {
+              role: 'user',
+              parts: [{ text: `${systemPrompt}\n\n${prompt}` }]
+            }
+          ],
+          generationConfig: {
+            temperature: 0.1,
+            responseMimeType: 'application/json'
+          }
+        };
+
+        const res = await this.fetchFn(nativeEndpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Nuvio-AI-Parser-Studio/1.0'
+          },
+          body: JSON.stringify(nativePayload),
+          timeoutMs: 35000,
+          attempts: 1
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (content) return content;
+        }
+
+        const errText = await res.text().catch(() => '');
+        if (res.status === 404 || errText.includes('not found') || errText.includes('not supported')) {
+          lastError = new Error(`Gemini native '${modelCandidate}' 404: ${errText.slice(0, 150)}`);
+          continue;
+        }
+
+        throw new Error(`LLM API returned HTTP ${res.status}: ${errText.slice(0, 200)}`);
+      } catch (err) {
+        if (err.message && (err.message.includes('404') || err.message.includes('not found'))) {
+          lastError = err;
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    throw lastError || new Error('All Google Gemini candidate models returned 404 Not Found');
+  }
+
+  /**
+   * Standard OpenAI-compatible /chat/completions query.
+   */
+  async _queryOpenAiCompatible({ prompt, systemPrompt, apiKey, rawBaseUrl, model }) {
+    const cleanBaseUrl = (rawBaseUrl || this.defaultBaseUrl).replace(/\/+$/, '');
     const endpoint = cleanBaseUrl.endsWith('/chat/completions') 
       ? cleanBaseUrl 
       : `${cleanBaseUrl}/chat/completions`;

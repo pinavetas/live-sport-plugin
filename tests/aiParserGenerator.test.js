@@ -78,7 +78,7 @@ describe('AiParserGeneratorService & DynamicParserRegistry', () => {
   });
 
   describe('AiParserGeneratorService - JSON extraction from LLM response', () => {
-    test('auto-detects Google Gemini API key and points to Gemini OpenAI endpoint', async () => {
+    test('auto-detects Google Gemini API key and points to Gemini OpenAI endpoint with gemini-2.5-flash', async () => {
       let capturedUrl = null;
       let capturedBody = null;
       aiService.fetchFn = jest.fn((url, opts) => {
@@ -97,7 +97,64 @@ describe('AiParserGeneratorService & DynamicParserRegistry', () => {
       });
 
       expect(capturedUrl).toBe('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions');
-      expect(capturedBody.model).toBe('gemini-1.5-flash');
+      expect(capturedBody.model).toBe('gemini-2.5-flash');
+    });
+
+    test('cascades to next Gemini candidate model if first returns 404', async () => {
+      const attemptedModels = [];
+      aiService.fetchFn = jest.fn((url, opts) => {
+        const body = JSON.parse(opts.body);
+        attemptedModels.push(body.model);
+        if (body.model === 'gemini-2.5-flash') {
+          return Promise.resolve({
+            ok: false,
+            status: 404,
+            text: async () => '{"error":{"message":"models/gemini-2.5-flash is not found"}}'
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ choices: [{ message: { content: '{"name":"cascade-success"}' } }] })
+        });
+      });
+
+      const res = await aiService.queryLlm({
+        prompt: 'test',
+        systemPrompt: 'sys',
+        config: { apiKey: 'AIzaSyExampleKey123' }
+      });
+
+      expect(attemptedModels).toEqual(['gemini-2.5-flash', 'gemini-2.0-flash']);
+      expect(res).toBe('{"name":"cascade-success"}');
+    });
+
+    test('falls back to Gemini native generateContent if OpenAI endpoint fails', async () => {
+      aiService.fetchFn = jest.fn((url, opts) => {
+        if (url.includes('/openai/chat/completions')) {
+          return Promise.resolve({
+            ok: false,
+            status: 404,
+            text: async () => '{"error":{"message":"endpoint not found"}}'
+          });
+        }
+        if (url.includes(':generateContent')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              candidates: [{ content: { parts: [{ text: '{"name":"native-success"}' }] } }]
+            })
+          });
+        }
+        return Promise.resolve({ ok: false, status: 500, text: async () => 'err' });
+      });
+
+      const res = await aiService.queryLlm({
+        prompt: 'test',
+        systemPrompt: 'sys',
+        config: { apiKey: 'AIzaSyExampleKey123' }
+      });
+
+      expect(res).toBe('{"name":"native-success"}');
     });
 
     test('parses pure JSON string', () => {
