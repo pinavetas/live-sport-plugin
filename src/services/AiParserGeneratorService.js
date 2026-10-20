@@ -84,14 +84,24 @@ class AiParserGeneratorService {
    * Resilient Google Gemini handler with automatic model cascading and native API fallback.
    */
   async _queryGemini({ prompt, systemPrompt, apiKey, requestedModel }) {
-    // Models to attempt: prioritize active 2.5 / 2.0 generations since 1.5 was sunset by Google
-    const defaultGeminiCandidates = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
+    // Models to attempt: prioritize current 3.8 / 3.5 / 2.5 generations
+    const defaultGeminiCandidates = [
+      'gemini-3.8-flash',
+      'gemini-3.5-flash-lite',
+      'gemini-2.5-flash',
+      'gemini-2.0-flash'
+    ];
     const candidates = [];
 
-    if (requestedModel && 
-        requestedModel !== 'deepseek-chat' && 
-        !requestedModel.startsWith('gemini-1.5')) {
-      candidates.push(requestedModel);
+    let normalizedRequested = requestedModel ? String(requestedModel).trim().toLowerCase() : '';
+    if (normalizedRequested === '3.8 flash' || normalizedRequested === '3.8-flash' || normalizedRequested === 'gemini 3.8 flash' || normalizedRequested === '3.8') {
+      normalizedRequested = 'gemini-3.8-flash';
+    }
+
+    if (normalizedRequested && 
+        normalizedRequested !== 'deepseek-chat' && 
+        !normalizedRequested.startsWith('gemini-1.5')) {
+      candidates.push(normalizedRequested);
     }
     for (const c of defaultGeminiCandidates) {
       if (!candidates.includes(c)) candidates.push(c);

@@ -78,7 +78,7 @@ describe('AiParserGeneratorService & DynamicParserRegistry', () => {
   });
 
   describe('AiParserGeneratorService - JSON extraction from LLM response', () => {
-    test('auto-detects Google Gemini API key and points to Gemini OpenAI endpoint with gemini-2.5-flash', async () => {
+    test('auto-detects Google Gemini API key and points to Gemini OpenAI endpoint with gemini-3.8-flash', async () => {
       let capturedUrl = null;
       let capturedBody = null;
       aiService.fetchFn = jest.fn((url, opts) => {
@@ -97,7 +97,26 @@ describe('AiParserGeneratorService & DynamicParserRegistry', () => {
       });
 
       expect(capturedUrl).toBe('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions');
-      expect(capturedBody.model).toBe('gemini-2.5-flash');
+      expect(capturedBody.model).toBe('gemini-3.8-flash');
+    });
+
+    test('normalizes user shorthand "3.8 flash" to "gemini-3.8-flash"', async () => {
+      let capturedBody = null;
+      aiService.fetchFn = jest.fn((url, opts) => {
+        capturedBody = JSON.parse(opts.body);
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ choices: [{ message: { content: '{"name":"gemini-shorthand"}' } }] })
+        });
+      });
+
+      await aiService.queryLlm({
+        prompt: 'test',
+        systemPrompt: 'sys',
+        config: { apiKey: 'AIzaSyExampleKey123', model: '3.8 flash' }
+      });
+
+      expect(capturedBody.model).toBe('gemini-3.8-flash');
     });
 
     test('cascades to next Gemini candidate model if first returns 404', async () => {
@@ -105,11 +124,11 @@ describe('AiParserGeneratorService & DynamicParserRegistry', () => {
       aiService.fetchFn = jest.fn((url, opts) => {
         const body = JSON.parse(opts.body);
         attemptedModels.push(body.model);
-        if (body.model === 'gemini-2.5-flash') {
+        if (body.model === 'gemini-3.8-flash') {
           return Promise.resolve({
             ok: false,
             status: 404,
-            text: async () => '{"error":{"message":"models/gemini-2.5-flash is not found"}}'
+            text: async () => '{"error":{"message":"models/gemini-3.8-flash is not found"}}'
           });
         }
         return Promise.resolve({
@@ -124,7 +143,7 @@ describe('AiParserGeneratorService & DynamicParserRegistry', () => {
         config: { apiKey: 'AIzaSyExampleKey123' }
       });
 
-      expect(attemptedModels).toEqual(['gemini-2.5-flash', 'gemini-2.0-flash']);
+      expect(attemptedModels).toEqual(['gemini-3.8-flash', 'gemini-3.5-flash-lite']);
       expect(res).toBe('{"name":"cascade-success"}');
     });
 
