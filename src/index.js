@@ -53,6 +53,7 @@ builder.defineStreamHandler(({ type, id, config })         => handleStream(type,
 
 const app = express();
 
+app.set('container', container);
 app.set('trust proxy', true);
 app.use(cors());
 
@@ -790,6 +791,7 @@ app.get('/img', async (req, res) => {
 app.use(require('./routes/streamProxy'));
 app.use(require('./routes/manifest'));
 app.use(require('./routes/embed'));
+app.use('/api/parser', require('./routes/parserStudio'));
 // Mount the HLS Video Proxy (routes to the internal resolver on port RESOLVER_PORT)
 app.use('/api', createProxyMiddleware({
   target: `http://127.0.0.1:${RESOLVER_PORT}/api`,
@@ -1145,6 +1147,10 @@ app.use(getRouter(builder.getInterface()));
 app.use(require('./routes/watch'));
 app.use(require('./routes/health'));
 // ─── Start Server ─────────────────────────────────────────────────────────────
+
+// Initialize dynamic AI-generated parsers
+const dynamicParserRegistry = require('./services/DynamicParserRegistry');
+dynamicParserRegistry.init(container);
 
 // In cluster mode, only the primary worker instance runs background cron syncs
 if (workerOffset === 0) {

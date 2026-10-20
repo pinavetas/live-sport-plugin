@@ -839,6 +839,67 @@
         </div>
       </section>
 
+      <!-- AI Replay Parser Studio -->
+      <section class="panel" id="aiParserPanel">
+        <div class="panel-head">
+          <h2>🤖 AI Replay Parser Studio</h2>
+          <p>Generate, test, and mount custom web scrapers on any sports replay website in real time using AI (OpenCode, Freebuff, or OpenAI-compatible models).</p>
+        </div>
+
+        <div class="field">
+          <label for="aiTargetUrl">Replay Website URL</label>
+          <div style="display: flex; gap: 8px;">
+            <input type="url" id="aiTargetUrl" placeholder="https://example-sports-replays.com/football" style="flex: 1;" />
+            <button type="button" id="aiGenerateBtn" class="btn btn-primary" style="white-space: nowrap;">
+              <span id="aiGenerateBtnText">✨ Generar con IA</span>
+            </button>
+          </div>
+          <p class="hint">Enter the archive or listing URL of any sports replay website.</p>
+        </div>
+
+        <!-- Collapsible AI Provider Settings -->
+        <details style="margin-top: 10px; margin-bottom: 12px; font-size: 13px;">
+          <summary style="cursor: pointer; color: var(--muted); font-weight: 600;">⚙️ Configuración del Modelo / Endpoint IA (Opcional)</summary>
+          <div style="padding: 12px; background: rgba(255,255,255,0.03); border-radius: 8px; margin-top: 8px; display: grid; gap: 10px;">
+            <div>
+              <label for="aiBaseUrl" style="font-size: 12px;">Base URL / Endpoint</label>
+              <input type="text" id="aiBaseUrl" placeholder="https://api.openai.com/v1 (o endpoint de Freebuff / OpenCode / Ollama)" />
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+              <div>
+                <label for="aiApiKey" style="font-size: 12px;">API Key</label>
+                <input type="password" id="aiApiKey" placeholder="sk-... (o dejar en blanco para Freebuff/Ollama)" />
+              </div>
+              <div>
+                <label for="aiModel" style="font-size: 12px;">Modelo</label>
+                <input type="text" id="aiModel" placeholder="deepseek-chat / qwen2.5 / llama-3.3" />
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <!-- Preview & Validation Box (hidden initially) -->
+        <div id="aiPreviewBox" style="display: none; padding: 14px; background: rgba(0,255,100,0.04); border: 1px solid rgba(0,255,100,0.25); border-radius: 8px; margin-top: 14px;">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+            <strong id="aiPreviewTitle" style="color: #4ade80;">✓ Parser Validado con Éxito</strong>
+            <button type="button" id="aiSaveBtn" class="btn btn-primary" style="padding: 6px 14px; font-size: 13px;">
+              💾 Activar en Stremio
+            </button>
+          </div>
+          <div id="aiPreviewDetails" style="font-size: 13px; color: var(--muted); margin-bottom: 10px;"></div>
+          <div style="font-size: 12px; font-weight: 700; text-transform: uppercase; margin-bottom: 6px;">Partidos Detectados en Vivo:</div>
+          <ul id="aiPreviewList" style="margin: 0; padding-left: 18px; font-size: 13px; max-height: 160px; overflow-y: auto;"></ul>
+        </div>
+
+        <div id="aiStatusMsg" style="margin-top: 10px; font-size: 13px; display: none;"></div>
+
+        <!-- Active Custom Parsers List -->
+        <div id="activeParsersContainer" style="margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line);">
+          <div style="font-size: 13px; font-weight: 700; margin-bottom: 8px;">📦 Parsers Personalizados Activos:</div>
+          <div id="activeParsersList" style="font-size: 13px; color: var(--muted);">Cargando parsers...</div>
+        </div>
+      </section>
+
       <!-- 5 · Nuvio Sports Replay Connection -->
       <section class="panel" aria-labelledby="collections-h">
         <div class="panel-head">
@@ -1418,6 +1479,174 @@
         })
         .catch(() => {});
     }
+
+    // ─── AI Replay Parser Studio ──────────────────────────────────────────────
+    const aiTargetUrl = document.getElementById('aiTargetUrl');
+    const aiGenerateBtn = document.getElementById('aiGenerateBtn');
+    const aiGenerateBtnText = document.getElementById('aiGenerateBtnText');
+    const aiBaseUrl = document.getElementById('aiBaseUrl');
+    const aiApiKey = document.getElementById('aiApiKey');
+    const aiModel = document.getElementById('aiModel');
+    const aiPreviewBox = document.getElementById('aiPreviewBox');
+    const aiPreviewTitle = document.getElementById('aiPreviewTitle');
+    const aiPreviewDetails = document.getElementById('aiPreviewDetails');
+    const aiPreviewList = document.getElementById('aiPreviewList');
+    const aiSaveBtn = document.getElementById('aiSaveBtn');
+    const aiStatusMsg = document.getElementById('aiStatusMsg');
+    const activeParsersList = document.getElementById('activeParsersList');
+
+    let currentGeneratedConfig = null;
+
+    async function loadActiveParsers() {
+      if (!activeParsersList) return;
+      try {
+        const res = await fetch('/api/parser/list');
+        const data = await res.json();
+        if (data.success && Array.isArray(data.parsers) && data.parsers.length > 0) {
+          activeParsersList.innerHTML = data.parsers.map(p => `
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: rgba(255,255,255,0.03); border-radius: 6px; margin-bottom: 6px;">
+              <div>
+                <strong>${p.displayName || p.name}</strong> 
+                <span style="color: var(--muted); font-size: 11px;">(${p.category} · ${p.baseUrl})</span>
+              </div>
+              <button type="button" class="action-link" onclick="deleteCustomParser('${p.name}')" style="background: none; border: none; color: #f87171; cursor: pointer; font-size: 12px;">Eliminar 🗑️</button>
+            </div>
+          `).join('');
+        } else {
+          activeParsersList.innerHTML = '<span style="color: var(--muted);">No hay parsers personalizados creados aún.</span>';
+        }
+      } catch (_) {
+        activeParsersList.innerHTML = '<span style="color: var(--muted);">No se pudieron cargar los parsers.</span>';
+      }
+    }
+
+    window.deleteCustomParser = async function(name) {
+      if (!confirm(`¿Eliminar parser '${name}'?`)) return;
+      try {
+        const res = await fetch(`/api/parser/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.success) {
+          loadActiveParsers();
+        } else {
+          alert('Error: ' + data.error);
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    };
+
+    if (aiGenerateBtn) {
+      aiGenerateBtn.addEventListener('click', async () => {
+        const url = (aiTargetUrl ? aiTargetUrl.value : '').trim();
+        if (!url || !url.startsWith('http')) {
+          alert('Por favor introduce una URL válida que empiece por http:// o https://');
+          return;
+        }
+
+        aiGenerateBtn.disabled = true;
+        if (aiGenerateBtnText) aiGenerateBtnText.textContent = '⏳ Analizando con IA...';
+        if (aiStatusMsg) {
+          aiStatusMsg.style.display = 'block';
+          aiStatusMsg.style.color = 'var(--muted)';
+          aiStatusMsg.textContent = 'Descargando HTML, podando árbol DOM y deduciendo selectores CSS con IA...';
+        }
+        if (aiPreviewBox) aiPreviewBox.style.display = 'none';
+
+        try {
+          const aiConfig = {};
+          if (aiBaseUrl && aiBaseUrl.value.trim()) aiConfig.baseUrl = aiBaseUrl.value.trim();
+          if (aiApiKey && aiApiKey.value.trim()) aiConfig.apiKey = aiApiKey.value.trim();
+          if (aiModel && aiModel.value.trim()) aiConfig.model = aiModel.value.trim();
+
+          const res = await fetch('/api/parser/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, aiConfig })
+          });
+
+          const data = await res.json();
+          if (!data.success) {
+            throw new Error(data.error || 'La generación falló');
+          }
+
+          currentGeneratedConfig = data.providerConfig;
+          if (aiPreviewBox) aiPreviewBox.style.display = 'block';
+          if (aiStatusMsg) aiStatusMsg.style.display = 'none';
+
+          if (aiPreviewTitle) {
+            aiPreviewTitle.textContent = `✓ Parser Validado: ${currentGeneratedConfig.displayName || currentGeneratedConfig.name}`;
+          }
+          if (aiPreviewDetails) {
+            aiPreviewDetails.innerHTML = `<strong>Categoría:</strong> ${currentGeneratedConfig.category} · <strong>Tarjeta:</strong> <code>${currentGeneratedConfig.selectors.matches}</code> · <strong>Partidos encontrados:</strong> ${data.preview.totalFound}`;
+          }
+          if (aiPreviewList && Array.isArray(data.preview.sample)) {
+            aiPreviewList.innerHTML = data.preview.sample.map(m => `
+              <li style="margin-bottom: 4px;"><strong>${m.title}</strong> <a href="${m.link}" target="_blank" style="color: var(--brand); font-size: 11px;">[Enlace]</a></li>
+            `).join('');
+          }
+        } catch (err) {
+          if (aiStatusMsg) {
+            aiStatusMsg.style.display = 'block';
+            aiStatusMsg.style.color = '#f87171';
+            aiStatusMsg.textContent = `Error: ${err.message}`;
+          }
+        } finally {
+          aiGenerateBtn.disabled = false;
+          if (aiGenerateBtnText) aiGenerateBtnText.textContent = '✨ Generar con IA';
+        }
+      });
+    }
+
+    if (aiSaveBtn) {
+      aiSaveBtn.addEventListener('click', async () => {
+        if (!currentGeneratedConfig) return;
+        aiSaveBtn.disabled = true;
+        aiSaveBtn.textContent = 'Guardando...';
+
+        try {
+          const res = await fetch('/api/parser/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: currentGeneratedConfig })
+          });
+
+          const data = await res.json();
+          if (!data.success) throw new Error(data.error || 'Error al guardar');
+
+          aiSaveBtn.textContent = '✓ Guardado y Activo';
+          aiSaveBtn.style.background = '#10b981';
+          loadActiveParsers();
+
+          // Dynamically add a source chip to replaySourcesGrid if not present
+          const grid = document.getElementById('replaySourcesGrid');
+          const sourceSlug = (currentGeneratedConfig.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+          if (grid && !grid.querySelector(`input[value="${sourceSlug}"]`)) {
+            const label = document.createElement('label');
+            label.className = 'checkbox-label active';
+            label.innerHTML = `<input type="checkbox" value="${sourceSlug}" checked> ${currentGeneratedConfig.displayName || currentGeneratedConfig.name}`;
+            grid.appendChild(label);
+            label.querySelector('input').addEventListener('change', (e) => {
+              if (e.target.checked) label.classList.add('active');
+              else label.classList.remove('active');
+              updateLink();
+            });
+            updateLink();
+          }
+
+          setTimeout(() => {
+            aiSaveBtn.disabled = false;
+            aiSaveBtn.textContent = '💾 Activar en Stremio';
+            aiSaveBtn.style.background = '';
+          }, 2500);
+        } catch (err) {
+          alert('Error: ' + err.message);
+          aiSaveBtn.disabled = false;
+          aiSaveBtn.textContent = '💾 Activar en Stremio';
+        }
+      });
+    }
+
+    loadActiveParsers();
 
     window.copyCryptoAddr = function(text, btn) {
       const orig = btn.innerHTML;
