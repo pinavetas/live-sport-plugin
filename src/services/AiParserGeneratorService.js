@@ -117,13 +117,14 @@ class AiParserGeneratorService {
         const payload = {
           model: modelCandidate,
           temperature: 0.1,
+          max_tokens: 1500,
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: prompt }
           ]
         };
 
-        const res = await this.fetchFn(openaiEndpoint, {
+        const res = await this._fetchLlm(openaiEndpoint, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -131,7 +132,7 @@ class AiParserGeneratorService {
             'User-Agent': 'Nuvio-AI-Parser-Studio/1.0'
           },
           body: JSON.stringify(payload),
-          timeoutMs: 35000,
+          timeoutMs: 20000,
           attempts: 1
         });
 
@@ -142,7 +143,7 @@ class AiParserGeneratorService {
         }
 
         const errText = await res.text().catch(() => '');
-        // If transient error (503 high demand, 429 rate limit, 404 model not found), cascade to next candidate
+        // If transient error (503 high demand, 429 rate limit, 404 model not found, timeout), cascade to next candidate
         if (this._isModelCascadable(res.status, errText)) {
           console.warn(`[AiParserGenerator] Gemini model '${modelCandidate}' returned HTTP ${res.status}. Cascading to next candidate...`);
           lastError = new Error(`Gemini model '${modelCandidate}' HTTP ${res.status}: ${errText.slice(0, 150)}`);
@@ -153,6 +154,7 @@ class AiParserGeneratorService {
         throw new Error(`LLM API returned HTTP ${res.status}: ${errText.slice(0, 200)}`);
       } catch (err) {
         if (this._isModelCascadable(0, err.message)) {
+          console.warn(`[AiParserGenerator] Gemini model '${modelCandidate}' failed (${err.message}). Cascading to next candidate...`);
           lastError = err;
           continue;
         }
@@ -173,18 +175,19 @@ class AiParserGeneratorService {
           ],
           generationConfig: {
             temperature: 0.1,
+            maxOutputTokens: 1500,
             responseMimeType: 'application/json'
           }
         };
 
-        const res = await this.fetchFn(nativeEndpoint, {
+        const res = await this._fetchLlm(nativeEndpoint, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'User-Agent': 'Nuvio-AI-Parser-Studio/1.0'
           },
           body: JSON.stringify(nativePayload),
-          timeoutMs: 35000,
+          timeoutMs: 20000,
           attempts: 1
         });
 
@@ -204,6 +207,7 @@ class AiParserGeneratorService {
         throw new Error(`LLM API returned HTTP ${res.status}: ${errText.slice(0, 200)}`);
       } catch (err) {
         if (this._isModelCascadable(0, err.message)) {
+          console.warn(`[AiParserGenerator] Gemini native '${modelCandidate}' failed (${err.message}). Cascading to next candidate...`);
           lastError = err;
           continue;
         }
@@ -211,7 +215,44 @@ class AiParserGeneratorService {
       }
     }
 
-    throw lastError || new Error('All Google Gemini candidate models failed (High demand / Not Found)');
+    throw lastError || new Error('All Google Gemini candidate models failed (High demand / Not Found / Timeout)');
+  }
+
+  /**
+   * Dedicated fetcher for external LLM REST APIs:
+   * Uses standard native fetch (with AbortSignal.timeout) to avoid browser-impersonation
+   * (impit) timeouts and HTTP/2 proxy header delays on Google and OpenAI APIs.
+   */
+  async _fetchLlm(url, opts = {}) {
+    if (this.fetchFn && this.fetchFn !== safeFetch) {
+      return await this.fetchFn(url, opts);
+    }
+
+    const { timeoutMs = 20000, headers = {}, body, method = 'POST' } = opts;
+    const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+      ? AbortSignal.timeout(timeoutMs)
+      : undefined;
+
+    try {
+      const fetcher = globalThis.fetch || safeFetch;
+      if (fetcher === safeFetch) {
+        return await safeFetch(url, { ...opts, timeoutMs });
+      }
+
+      const res = await fetcher(url, { method, headers, body, signal });
+      return {
+        ok: res.ok,
+        status: res.status,
+        headers: res.headers,
+        text: async () => await res.text(),
+        json: async () => await res.json()
+      };
+    } catch (err) {
+      if (err.name === 'TimeoutError' || (err.message && err.message.toLowerCase().includes('aborted'))) {
+        throw new Error(`HTTP timeout after ${timeoutMs}ms querying LLM API`);
+      }
+      throw err;
+    }
   }
 
   /**
@@ -229,6 +270,11 @@ class AiParserGeneratorService {
            lower.includes('unavailable') || 
            lower.includes('resource_exhausted') || 
            lower.includes('rate limit') ||
+           lower.includes('timeout') ||
+           lower.includes('timed out') ||
+           lower.includes('abort') ||
+           lower.includes('econnreset') ||
+           lower.includes('etimedout') ||
            lower.includes('503');
   }
 
@@ -252,17 +298,18 @@ class AiParserGeneratorService {
     const payload = {
       model,
       temperature: 0.1,
+      max_tokens: 1500,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: prompt }
       ]
     };
 
-    const res = await this.fetchFn(endpoint, {
+    const res = await this._fetchLlm(endpoint, {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
-      timeoutMs: 35000,
+      timeoutMs: 25000,
       attempts: 1
     });
 

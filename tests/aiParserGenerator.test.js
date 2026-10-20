@@ -175,6 +175,30 @@ describe('AiParserGeneratorService & DynamicParserRegistry', () => {
       expect(res).toBe('{"name":"high-demand-failover-success"}');
     });
 
+    test('cascades to next Gemini candidate model if first encounters timeout or headers timeout', async () => {
+      const attemptedModels = [];
+      aiService.fetchFn = jest.fn((url, opts) => {
+        const body = JSON.parse(opts.body);
+        attemptedModels.push(body.model);
+        if (body.model === 'gemini-3.8-flash') {
+          return Promise.reject(new Error('HTTP/2: "headers timeout after 35000"'));
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ choices: [{ message: { content: '{"name":"timeout-failover-success"}' } }] })
+        });
+      });
+
+      const res = await aiService.queryLlm({
+        prompt: 'test',
+        systemPrompt: 'sys',
+        config: { apiKey: 'AIzaSyExampleKey123', model: '3.8 flash' }
+      });
+
+      expect(attemptedModels).toEqual(['gemini-3.8-flash', 'gemini-3.5-flash-lite']);
+      expect(res).toBe('{"name":"timeout-failover-success"}');
+    });
+
     test('falls back to Gemini native generateContent if OpenAI endpoint fails', async () => {
       aiService.fetchFn = jest.fn((url, opts) => {
         if (url.includes('/openai/chat/completions')) {
