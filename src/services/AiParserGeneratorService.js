@@ -57,13 +57,22 @@ class AiParserGeneratorService {
    * Dispatches request to an OpenAI-compatible /chat/completions endpoint.
    */
   async queryLlm({ prompt, systemPrompt, config = {} }) {
-    const rawBaseUrl = (config.baseUrl || this.defaultBaseUrl).replace(/\/+$/, '');
-    const endpoint = rawBaseUrl.endsWith('/chat/completions') 
-      ? rawBaseUrl 
-      : `${rawBaseUrl}/chat/completions`;
-
     const apiKey = config.apiKey !== undefined ? config.apiKey : this.defaultApiKey;
-    const model = config.model || this.defaultModel;
+    let rawBaseUrl = config.baseUrl || this.defaultBaseUrl;
+    let model = config.model || this.defaultModel;
+
+    // Smart auto-detection: Google Gemini API keys start with "AIza"
+    if (apiKey && apiKey.startsWith('AIza') && (!config.baseUrl || config.baseUrl.includes('api.openai.com'))) {
+      rawBaseUrl = 'https://generativelanguage.googleapis.com/v1beta/openai';
+      if (!config.model || config.model === 'deepseek-chat') {
+        model = 'gemini-1.5-flash';
+      }
+    }
+
+    const cleanBaseUrl = rawBaseUrl.replace(/\/+$/, '');
+    const endpoint = cleanBaseUrl.endsWith('/chat/completions') 
+      ? cleanBaseUrl 
+      : `${cleanBaseUrl}/chat/completions`;
 
     const headers = {
       'Content-Type': 'application/json',

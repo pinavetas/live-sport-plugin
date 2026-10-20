@@ -78,6 +78,28 @@ describe('AiParserGeneratorService & DynamicParserRegistry', () => {
   });
 
   describe('AiParserGeneratorService - JSON extraction from LLM response', () => {
+    test('auto-detects Google Gemini API key and points to Gemini OpenAI endpoint', async () => {
+      let capturedUrl = null;
+      let capturedBody = null;
+      aiService.fetchFn = jest.fn((url, opts) => {
+        capturedUrl = url;
+        capturedBody = JSON.parse(opts.body);
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ choices: [{ message: { content: '{"name":"gemini"}' } }] })
+        });
+      });
+
+      await aiService.queryLlm({
+        prompt: 'test',
+        systemPrompt: 'sys',
+        config: { apiKey: 'AIzaSyExampleKey123' }
+      });
+
+      expect(capturedUrl).toBe('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions');
+      expect(capturedBody.model).toBe('gemini-1.5-flash');
+    });
+
     test('parses pure JSON string', () => {
       const parsed = aiService.parseJsonFromResponse('{"name": "test", "category": "football"}');
       expect(parsed.name).toBe('test');
