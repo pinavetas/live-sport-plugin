@@ -1734,5 +1734,6 @@ module.exports = {
   sortCatalogMatches,
   SPORT_MAX_DURATION_MS,
   REPLAY_SPORTS,
+  REPLAY_SOURCES,
   getMatchTier
 };
