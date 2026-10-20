@@ -10,6 +10,7 @@
 
 const cheerio = require('cheerio');
 const { safeFetch } = require('../impitClient');
+const SpaHydrator = require('./SpaHydrator');
 
 class AiParserGeneratorService {
   constructor(opts = {}) {
@@ -23,9 +24,10 @@ class AiParserGeneratorService {
   /**
    * Prunes raw HTML down to a semantic structural skeleton to minimize token costs and eliminate ad noise.
    */
-  pruneHtml(rawHtml) {
+  pruneHtml(rawHtml, baseUrl = '') {
     if (!rawHtml || typeof rawHtml !== 'string') return '';
-    const $ = cheerio.load(rawHtml);
+    const hydrated = SpaHydrator.hydrate(rawHtml, baseUrl);
+    const $ = cheerio.load(hydrated);
 
     // Remove noise, scripts, ads, and layout boilerplate
     $('script, style, svg, iframe, noscript, nav, footer, header, form, input, button, select, [id*="cookie"], [class*="cookie"], [id*="banner"], [class*="ad-"]').remove();
@@ -347,7 +349,8 @@ class AiParserGeneratorService {
     }
 
     try {
-      const $ = cheerio.load(html);
+      const hydrated = SpaHydrator.hydrate(html, baseUrl);
+      const $ = cheerio.load(hydrated);
       const matchElements = $(selectors.matches);
       const count = matchElements.length;
 
@@ -435,7 +438,7 @@ class AiParserGeneratorService {
     }
 
     const rawHtml = await pageRes.text();
-    const prunedSnippet = this.pruneHtml(rawHtml);
+    const prunedSnippet = this.pruneHtml(rawHtml, url);
 
     if (!prunedSnippet || prunedSnippet.length < 50) {
       throw new Error('Target webpage returned an empty or unparseable HTML document');

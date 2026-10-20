@@ -6,6 +6,7 @@ const MatchEntity = require('../domain/MatchEntity');
 const StreamEntity = require('../domain/StreamEntity');
 const { safeFetch } = require('../impitClient');
 const { extract: extractChain } = require('./EmbedExtractorChain');
+const SpaHydrator = require('./SpaHydrator');
 
 class DynamicCustomProvider extends BaseProvider {
   constructor(config, opts = {}) {
@@ -36,7 +37,8 @@ class DynamicCustomProvider extends BaseProvider {
         return [];
       }
 
-      const html = await res.text();
+      const rawHtml = await res.text();
+      const html = SpaHydrator.hydrate(rawHtml, this.baseUrl);
       const $ = cheerio.load(html);
       const selectors = this.config.selectors || {};
 
