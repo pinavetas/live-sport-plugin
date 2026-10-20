@@ -53,35 +53,75 @@ const SOURCE_PRIORITY = {
   streamsports: 13
 };
 
-function selectSources(matchSources, config) {
+const KNOWN_REPLAY_SOURCES = ['replayzone', 'livetv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive'];
+const KNOWN_LIVE_SOURCES = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'damitv', 'sktech', 'vavoo', 'ak47live'];
+const KNOWN_FALLBACKS = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'replayzone', 'livetv', 'damitv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive', 'sktech', 'vavoo', 'ak47live'];
+
+function isReplaySource(sourceName) {
+  return KNOWN_REPLAY_SOURCES.includes(sourceName);
+}
+
+function selectSources(matchSources, config, match = null) {
   const cleanSources = (matchSources || []).filter(src => !isEventStreamSource(src));
   const sortedSources = [...cleanSources].sort((a, b) => {
     // Unknown sources that are not known fallback providers are likely new
     // Streamed.pk sources - priority 1.5 keeps them near the top.
-    const getPriority = (src) => SOURCE_PRIORITY[src] ?? (['daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'replayzone', 'livetv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive', 'sktech', 'vavoo', 'embedindia', 'embedst', 'streamedpk', 'ak47live'].includes(src) ? 99 : 1.5);
+    const getPriority = (src) => SOURCE_PRIORITY[src] ?? (KNOWN_FALLBACKS.includes(src) ? 99 : 1.5);
     const pa = getPriority(a.source);
     const pb = getPriority(b.source);
     if (pa !== pb) return pa - pb;
     return 0;
   });
 
-  if (config && typeof config.sources === 'string' && config.sources !== 'none') {
-    const enabled = config.sources.split(',');
-    // embedindia / embedst / streamedpk are the same embed chain — all three are
-    // controlled by the single 'streamedpk' toggle on the configure page.
-    const KNOWN_FALLBACKS = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'replayzone', 'livetv', 'damitv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive', 'sktech', 'vavoo', 'ak47live'];
+  const checkAllowed = (srcName, enabledList) => {
+    if (srcName.startsWith('yaml_')) return true;
+    if (srcName === 'embedindia' || srcName === 'embedst') return enabledList.includes('streamedpk');
+    return enabledList.includes(srcName);
+  };
+
+  // Case 1: Granular Live and/or Replay sources configuration
+  const hasLiveConfig = config && typeof config.liveSources === 'string';
+  const hasReplayConfig = config && typeof config.replaySources === 'string';
+
+  if (hasLiveConfig || hasReplayConfig) {
+    const liveAllowed = hasLiveConfig && config.liveSources !== 'none'
+      ? config.liveSources.split(',').map(s => s.trim())
+      : (hasLiveConfig && config.liveSources === 'none' ? [] : null);
+
+    const replayAllowed = hasReplayConfig && config.replaySources !== 'none'
+      ? config.replaySources.split(',').map(s => s.trim())
+      : (hasReplayConfig && config.replaySources === 'none' ? [] : null);
+
+    return sortedSources.filter(src => {
+      if (src.source.startsWith('yaml_')) return true;
+      const isReplay = isReplaySource(src.source);
+      if (isReplay) {
+        if (!hasReplayConfig) return KNOWN_FALLBACKS.includes(src.source);
+        if (config.replaySources === 'none') return false;
+        return checkAllowed(src.source, replayAllowed);
+      } else {
+        if (!hasLiveConfig) return KNOWN_FALLBACKS.includes(src.source);
+        if (config.liveSources === 'none') return false;
+        return checkAllowed(src.source, liveAllowed);
+      }
+    });
+  }
+
+  // Case 2: Legacy combined sources configuration (config.sources)
+  if (config && typeof config.sources === 'string') {
+    if (config.sources === 'none') {
+      return sortedSources.filter(src => src.source.startsWith('yaml_'));
+    }
+    const enabled = config.sources.split(',').map(s => s.trim());
     return sortedSources.filter(src => {
       if (src.source.startsWith('yaml_')) return true;
       const isFallback = KNOWN_FALLBACKS.includes(src.source);
       if (!isFallback) return false;
-      // embedindia and embedst are gated by the 'streamedpk' checkbox
-      if (src.source === 'embedindia' || src.source === 'embedst') return enabled.includes('streamedpk');
-      return enabled.includes(src.source);
+      return checkAllowed(src.source, enabled);
     });
   }
 
   // Default path (no config in URL) — allow all known active providers
-  const KNOWN_FALLBACKS = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'replayzone', 'livetv', 'damitv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive', 'sktech', 'vavoo', 'ak47live'];
   return sortedSources.filter(src => {
     if (src.source.startsWith('yaml_')) return true;
     return KNOWN_FALLBACKS.includes(src.source);
@@ -743,7 +783,7 @@ async function prewarmMatch(match, config, topN = Number.MAX_SAFE_INTEGER, opts 
   try {
     if (!match || !match.sources || !match.sources.length) return;
     const resolveCache = container.resolve('streamResolveCache');
-    const activeSources = selectSources(match.sources, config || null);
+    const activeSources = selectSources(match.sources, config || null, match);
     const skip = prewarmSkipProvidersSet();
     const eligible = skip.size ? activeSources.filter((s) => !skip.has(String(s.source || '').toLowerCase())) : activeSources;
     const targets = eligible.slice(0, topN);
@@ -972,7 +1012,7 @@ async function handleStream(type, id, config) {
     }
   } catch (_) {}
 
-  const activeSources = selectSources(candidateSources, config);
+  const activeSources = selectSources(candidateSources, config, match);
   const streamScorer = container.resolve('streamScorer');
 
   const resolveCache = container.resolve('streamResolveCache');
@@ -1533,5 +1573,7 @@ module.exports = {
   // Exported for direct unit testing of the resolution deduplication algorithm
   // without requiring a live container / IoC / match-cache setup.
   deduplicateResolutions,
-  formatChannelStreamTitle
+  formatChannelStreamTitle,
+  KNOWN_LIVE_SOURCES,
+  KNOWN_REPLAY_SOURCES
 };
