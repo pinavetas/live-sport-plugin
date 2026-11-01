@@ -310,7 +310,7 @@ export default {
       }
       
       // For Streamed.pk .image chunks, strip the 42-byte fake WebP header in flight
-      if (targetUrl.includes('.image') && (targetUrl.includes('strmd.st') || targetUrl.includes('streamed.pk'))) {
+      if (targetUrl.includes('.image') || /tiktokcdn|byteoversea|ibytedtos|strmd\.st|streamed\.pk|cowedd4855ws/i.test(targetUrl)) {
         let skipped = 0;
         const transformStream = new TransformStream({
           transform(chunk, controller) {

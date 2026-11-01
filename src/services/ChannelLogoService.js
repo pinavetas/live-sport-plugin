@@ -686,13 +686,24 @@ function getChannelLogo(title) {
   const key = String(title).trim();
   if (!key) return null;
 
-  if (_CHANNEL_LOGO_CACHE.has(key)) {
-    return _CHANNEL_LOGO_CACHE.get(key);
+  const cached = _CHANNEL_LOGO_CACHE.get(key);
+  if (cached !== undefined) {
+    // LRU promote on hit: Map preserves insertion order, so re-inserting moves
+    // the entry to the back and eviction below always drops the coldest key.
+    if (_CHANNEL_LOGO_CACHE.size > 1) {
+      _CHANNEL_LOGO_CACHE.delete(key);
+      _CHANNEL_LOGO_CACHE.set(key, cached);
+    }
+    return cached;
   }
 
   const result = _resolveChannelLogoDirect(title);
   if (_CHANNEL_LOGO_CACHE.size >= _CHANNEL_LOGO_CACHE_MAX) {
-    _CHANNEL_LOGO_CACHE.clear();
+    // Sliding-window eviction, one entry at a time. The previous .clear()
+    // dropped the whole 5,000-entry hot set at once, so the next catalog build
+    // re-ran the full resolution chain (including the fuzzy full-map scans)
+    // for every title — a CPU and GC spike exactly when a build was in flight.
+    _CHANNEL_LOGO_CACHE.delete(_CHANNEL_LOGO_CACHE.keys().next().value);
   }
   _CHANNEL_LOGO_CACHE.set(key, result);
   return result;

@@ -125,6 +125,30 @@ describe('MatchAggregator Broadcaster Fixture Enrichment', () => {
     expect(vavooSources[1].channelName).toBe('TNT SPORT 1');
   });
 
+  test('prioritizes Canal+ Live event channels and suppresses linear Canal+ Sport', () => {
+    const liveMatch = {
+      id: 'dlv_999_como-vs-manchester-united',
+      title: 'Como vs Manchester United',
+      category: 'football',
+      sources: [
+        { source: 'daddylive', id: '32', channelName: 'TNT Sports 2 UK' },
+        { source: 'daddylive', id: '122', channelName: 'Canal+ Sport France' },
+        { source: 'daddylive', id: '55', channelName: 'Canal+ Live 3 France' },
+        { source: 'daddylive', id: '984', channelName: 'Canal+ Extra 2 Poland' }
+      ]
+    };
+
+    aggregator._enrichMatchesWithBroadcasters([liveMatch]);
+
+    const vavooSources = liveMatch.sources.filter(s => s.source === 'vavoo');
+    const channelNames = vavooSources.map(s => s.channelName);
+
+    expect(channelNames).toContain('TNT SPORT 2');
+    expect(channelNames).toContain('CANAL+ LIVE 3');
+    expect(channelNames).toContain('CANAL+ EXTRA 2');
+    expect(channelNames).not.toContain('CANAL SPORT');
+  });
+
   test('does not enrich 24/7 channels or VOD replays', () => {
     const channelMatch = {
       id: 'vavoo_ch_123',

@@ -422,16 +422,14 @@ export default {
     // WebP/RIFF header, so a client asking for file bytes 0-1023 must ask
     // upstream for 42-1065. When we do that the returned body already starts
     // at payload byte 0 and must NOT be stripped again.
-    const isCloakedImage = targetUrl.includes('.image') && (targetUrl.includes('strmd.st') || targetUrl.includes('streamed.pk'));
+    const isCloakedImage = targetUrl.includes('.image') || /tiktokcdn|byteoversea|ibytedtos|strmd\.st|streamed\.pk|cowedd4855ws/i.test(targetUrl);
     const clientRange = request.headers.get('Range') || request.headers.get('range');
-    let shiftedRange = false;
     if (isCloakedImage && clientRange) {
       const m = /^bytes=(\d+)-(\d*)$/.exec(String(clientRange).trim());
       if (m) {
         const start = Number(m[1]);
         const endPart = m[2] ? String(Number(m[2]) + CLOAK_PREFIX_BYTES) : '';
         newHeaders.set('Range', `bytes=${start + CLOAK_PREFIX_BYTES}-${endPart}`);
-        shiftedRange = true;
       }
     }
     
@@ -513,6 +511,14 @@ export default {
       if (isCloakedImage) {
         responseHeaders.set('Accept-Ranges', 'bytes');
 
+        // Whether the body still starts at file byte 0 is a property of the
+        // RESPONSE, not of the Range header we sent. A CDN that honours the
+        // shifted range answers 206 with payload from byte 0 (nothing to
+        // strip); one that ignores it answers 200 with the whole file, prefix
+        // included. Deriving this from the request alone leaks the 42-byte
+        // fake WebP header into the payload and hands the player corrupt TS.
+        const bodyStartsAtFileZero = response.status !== 206;
+
         // Upstream answered in file coordinates (which include the +42 shift
         // we applied above); map them back to payload coordinates.
         const contentRange = responseHeaders.get('Content-Range');
@@ -528,14 +534,16 @@ export default {
 
         // Only a response that starts at file byte 0 carries the prefix, so
         // only that one is 42 bytes longer than the payload we hand over.
-        if (!shiftedRange) {
+        if (bodyStartsAtFileZero) {
           const contentLength = responseHeaders.get('Content-Length');
           if (contentLength) {
             responseHeaders.set('Content-Length', String(Math.max(0, Number(contentLength) - CLOAK_PREFIX_BYTES)));
           }
         }
 
-        const body = shiftedRange ? response.body : response.body.pipeThrough(new TransformStream({
+        // A HEAD probe has no body — piping null would throw and turn a valid
+        // cache probe into a 502.
+        const body = bodyStartsAtFileZero && response.body ? response.body.pipeThrough(new TransformStream({
           transform(chunk, controller) {
             if (this.skipped === undefined) this.skipped = 0;
             if (this.skipped < CLOAK_PREFIX_BYTES) {
@@ -550,7 +558,7 @@ export default {
               controller.enqueue(chunk);
             }
           }
-        }));
+        })) : response.body;
 
         return new Response(body, {
           status: response.status,

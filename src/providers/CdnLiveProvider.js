@@ -294,19 +294,20 @@ class CdnLiveProvider extends BaseProvider {
           let playerRes = await safeFetch(url, fetchOpts);
 
           if (playerRes.status === 429 || playerRes.status === 403) {
-            const { CF_IMAGE_WORKER_POOL } = require('../services/HlsRewriteService');
-            if (CF_IMAGE_WORKER_POOL && CF_IMAGE_WORKER_POOL.length > 0) {
-              // Shuffle and pick up to 3 workers to try in case some are exhausted
-              const workersToTry = [...CF_IMAGE_WORKER_POOL].sort(() => Math.random() - 0.5).slice(0, 3);
-              for (const cfProxy of workersToTry) {
-                const edgeUrl = `${cfProxy}/?action=cdnlive&playerUrl=${encodeURIComponent(url)}`;
-                playerRes = await safeFetch(edgeUrl, {
-                  headersTimeout: 10000,
-                  bodyTimeout: 10000,
-                  signal: AbortSignal.timeout(8000)
-                });
-                if (playerRes.ok) break;
-              }
+            const { workerPool } = require('../services/HlsRewriteService');
+            const tried = new Set();
+            for (let attempt = 0; attempt < 3; attempt++) {
+              const a = workerPool.pick(null, { exclude: tried });
+              if (!a || a.tier === 'paid') break;
+              tried.add(a.url);
+
+              const edgeUrl = `${a.url}/?action=cdnlive&playerUrl=${encodeURIComponent(url)}`;
+              playerRes = await safeFetch(edgeUrl, {
+                headersTimeout: 10000,
+                bodyTimeout: 10000,
+                signal: AbortSignal.timeout(8000)
+              });
+              if (playerRes.ok) break;
             }
           }
 
@@ -413,7 +414,7 @@ class CdnLiveProvider extends BaseProvider {
         title: `CDNLiveTV (${name})`,
         url: m3u8Url,
         behaviorHints: {
-          notWebReady: true,
+          notWebReady: false,
           proxyHeaders: {
             request: {
               'Origin': 'https://cdnlivetv.tv',

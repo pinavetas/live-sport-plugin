@@ -15,14 +15,28 @@ const {
 const {
   readRck, getRemintCacheKey, remintCache, mergeRemintedUrl, isExpiryStatus, attemptRemint
 } = require('../remint');
-const { rewriteHlsUri } = require('../services/HlsRewriteService');
+const { rewriteHlsUri, rewriteHlsPlaylist, preprobeManifestSegments } = require('../services/HlsRewriteService');
 const { safeFetch: _safeFetch } = require('../impitClient');
 const { getRequestBaseUrl } = require('../config');
 
-router.get('/api/manifest', async (req, res) => {
+// Variant BANDWIDTH declarations seen in master playlists, keyed by the
+// absolute upstream URL of the child media playlist. When that child is served
+// through this proxy, its byte-range length estimates start from the real
+// declared bitrate instead of SegmentLengthService's default (probes deliver
+// the true per-segment length moments later; this only shapes the estimate).
+const VARIANT_BITRATE_CACHE_MAX = 1000;
+const variantBitrateCache = new Map();
+
+router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
   const targetUrl = req.query.url;
-  const referer = req.query.referer || 'https://embed.st/';
-  const origin = req.query.origin || 'https://embed.st';
+  const isVavooTarget = Boolean(
+    (targetUrl && (targetUrl.includes('/sunshine/') || targetUrl.includes('vavoo.') || targetUrl.includes(':8008'))) ||
+    (req.query.referer && req.query.referer.includes('vavoo.'))
+  );
+  const defaultReferer = isVavooTarget ? 'https://vavoo.to/' : 'https://embed.st/';
+  const defaultOrigin = isVavooTarget ? 'https://vavoo.to' : 'https://embed.st';
+  const referer = req.query.referer || defaultReferer;
+  const origin = req.query.origin || defaultOrigin;
 
   if (!targetUrl) return res.status(400).send('Missing url');
   if (targetUrl.includes('.mpd')) return handleDashManifestProxy(req, res);
@@ -70,9 +84,26 @@ router.get('/api/manifest', async (req, res) => {
           if (!fresh || fresh === effectiveUrl) throw firstErr;
           
           console.log('[ManifestProxy] Upstream token expired — re-minted, retrying transparently');
+          let remintTtl = 150 * 1000;
+          try {
+            const uObj = new URL(fresh);
+            const token = uObj.searchParams.get('token');
+            if (token) {
+              const b64 = token.split('.')[0];
+              const decoded = Buffer.from(b64, 'base64').toString('utf8');
+              const parts = decoded.split('|');
+              if (parts.length >= 3 && /^\d+$/.test(parts[parts.length - 1])) {
+                const exp = parseInt(parts[parts.length - 1], 10);
+                const expMs = exp < 1e11 ? exp * 1000 : exp;
+                const rem = expMs - Date.now();
+                if (rem > 0) remintTtl = Math.min(remintTtl, Math.max(30000, rem - 30000));
+              }
+            }
+          } catch (_) {}
+          const remintExpiresAt = Date.now() + remintTtl;
           const subKey = getRemintCacheKey(rck, effectiveUrl || targetUrl);
-          if (subKey) remintCache.set(subKey, { freshUrl: fresh, expiresAt: Date.now() + 15 * 60 * 1000 });
-          remintCache.set(rck, { freshUrl: fresh, expiresAt: Date.now() + 15 * 60 * 1000 });
+          if (subKey) remintCache.set(subKey, { freshUrl: fresh, expiresAt: remintExpiresAt });
+          remintCache.set(rck, { freshUrl: fresh, expiresAt: remintExpiresAt });
           
           // Preserve the variant the player asked for (see mergeRemintedUrl).
           effectiveUrl = mergeRemintedUrl(targetUrl, fresh, rck);
@@ -100,6 +131,19 @@ router.get('/api/manifest', async (req, res) => {
           if (parser.manifest.targetDuration) {
             dynamicTtl = (parser.manifest.targetDuration * 1000) / 2;
           }
+          if (Array.isArray(parser.manifest.variants)) {
+            for (const v of parser.manifest.variants) {
+              const bw = v && v.attributes && v.attributes.BANDWIDTH;
+              if (!bw || !v.uri) continue;
+              try {
+                const abs = new URL(v.uri, effectiveUrl).toString();
+                variantBitrateCache.set(abs, bw);
+                if (variantBitrateCache.size > VARIANT_BITRATE_CACHE_MAX) {
+                  variantBitrateCache.delete(variantBitrateCache.keys().next().value);
+                }
+              } catch (_) {}
+            }
+          }
         } catch (e) {
           // Fallback to default TTL on parse error
         }
@@ -115,32 +159,17 @@ router.get('/api/manifest', async (req, res) => {
         }
         let injectedStart = out.includes('#EXT-X-START');
 
-        const lines = out.split('\n');
-        const rewritten = lines.map(line => {
-          const l = line.trim();
+        if (!isMaster) {
+          await preprobeManifestSegments(out, effectiveUrl, { referer, origin });
+        }
 
-          let resultLine = line;
-
-          if (!l) return resultLine;
-          
-          if (l.startsWith('#')) {
-              // Handle EXT-X-MAP:URI="relative.mp4"
-              if (l.startsWith('#EXT-X-MAP:')) {
-                  const uriMatch = l.match(/URI="([^"]+)"/);
-                  if (uriMatch) {
-                      try {
-                          const absUri = new URL(uriMatch[1], effectiveUrl).toString();
-                          resultLine = l.replace(uriMatch[1], absUri);
-                      } catch(e) {}
-                  }
-              }
-              return resultLine;
-          }
-
-          return rewriteHlsUri(l, effectiveUrl, { referer, origin, rckSuffix });
+        const rewrittenResult = rewriteHlsPlaylist(out, effectiveUrl, {
+          referer,
+          origin,
+          rckSuffix,
+          absoluteAddonBaseUrl: getRequestBaseUrl(req),
+          bitrate: out.includes('#EXT-X-STREAM-INF') ? undefined : variantBitrateCache.get(effectiveUrl)
         });
-
-        const rewrittenResult = rewritten.join('\n');
         manifestCacheSet(cacheKey, rewrittenResult, dynamicTtl);
         return rewrittenResult;
       })().finally(() => {

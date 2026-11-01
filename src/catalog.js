@@ -79,6 +79,36 @@ const REPLAY_SPORTS = [
 // Sources whose matches qualify for the replay retention window and replay hubs.
 const REPLAY_SOURCES = new Set(['replayzone', 'livetv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive']);
 
+// Static tables hoisted to module scope: mapMatchToMetaPreview runs per meta
+// per page, and allocating these per call churned ~7 RegExp objects + a 15-key
+// object on every invocation.
+const CATEGORY_COLORS = {
+  football: '10b981', // green
+  basketball: 'f97316', // orange
+  motorsport: 'ef4444', // red
+  cricket: '0ea5e9', // light blue
+  tennis: 'a3e635', // lime
+  rugby: '8b5cf6', // purple
+  american_football: '0369a1', // dark blue
+  baseball: 'f43f5e', // rose
+  hockey: '06b6d4', // cyan
+  golf: '22c55e', // emerald
+  darts: 'eab308', // yellow
+  mma: 'dc2626', // crimson red
+  networks: '64748b', // slate
+  college: 'd946ef' // fuchsia
+};
+
+const CHANNEL_THUMBNAIL_MAP = [
+  { rx: /\/thumbnails\/cricket_[a-f0-9-]+_willow/i, channel: 'willow' },
+  { rx: /\/thumbnails\/cricket_[a-f0-9-]+_sky.?cricket/i, channel: 'sky sports cricket' },
+  { rx: /\/thumbnails\/cricket_[a-f0-9-]+_fox.?cricket/i, channel: 'fox cricket' },
+  { rx: /\/thumbnails\/cricket_[a-f0-9-]+_astro.?cricket/i, channel: 'astro cricket' },
+  { rx: /\/thumbnails\/cricket_[a-f0-9-]+_supersport.?cricket/i, channel: 'supersport cricket' },
+  { rx: /\/thumbnails\/cricket_[a-f0-9-]+_star.?sports/i, channel: 'star sports' },
+  { rx: /\/thumbnails\/cricket_[a-f0-9-]+_sony.?sports/i, channel: 'sony sports' },
+];
+
 const GENRE_TO_CATEGORY = {
   'football': 'football',
   'soccer': 'football',
@@ -276,9 +306,17 @@ function parseFavoriteTeams(conf) {
   // A multi-word favourite only matches when every token is found, so
   // "man united" cannot be satisfied by "Manchester City".
   return raw.split(',')
-    .map(t => foldText(t.trim()))
+    .map(t => foldText(t.trim().replace(/[^a-zA-Z0-9\s]/g, ' ')))
     .filter(Boolean)
-    .map(phrase => ({ phrase, tokens: phrase.split(/\s+/).filter(Boolean) }));
+    .map(phrase => {
+      let tokens = phrase.split(/\s+/).filter(Boolean);
+      tokens = tokens.map(t => {
+        if (t === 'jrs' || t === 'jr') return 'juniors';
+        if (t === 'utd') return 'united';
+        return t;
+      });
+      return { phrase, tokens };
+    });
 }
 
 /**
@@ -286,22 +324,16 @@ function parseFavoriteTeams(conf) {
  */
 function isFavoriteMatch(match, favorites) {
   if (!favorites || favorites.length === 0) return false;
+  if (!match || match.category === 'networks' || match.isChannel) return false;
   const title = foldText(match && match.title);
   if (!title) return false;
 
-  // Match on WORD BOUNDARIES with prefix semantics, not raw substrings.
-  // Raw substring matching had two failure modes:
-  //   - "Atletico" missed "Atlético Goianiense" (did not know the accent
-  //     fold target existed) and shorter forms missed longer official names;
-  //   - "Real" wrongly matched "Montreal Canadiens" (substring mid-word).
-  // Prefix-on-token fixes both: "atletico" matches the token "atletico",
-  // while "real" no longer matches "montreal".
   const titleTokens = title.split(/[^a-z0-9]+/).filter(Boolean);
   if (titleTokens.length === 0) return false;
 
   return favorites.some(fav =>
     fav.tokens.length > 0 &&
-    fav.tokens.every(ft => titleTokens.some(tt => tt.startsWith(ft)))
+    fav.tokens.every(ft => titleTokens.some(tt => tt === ft || (ft === 'juniors' && (tt === 'jrs' || tt === 'jr')) || (ft === 'united' && tt === 'utd')))
   );
 }
 
@@ -456,23 +488,7 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
   const safeTitle = encodeURIComponent(Array.from(titleStr).slice(0, 30).join(''));
   
   // Dynamic Sport-Specific Posters
-  const categoryColors = {
-    football: '10b981', // green
-    basketball: 'f97316', // orange
-    motorsport: 'ef4444', // red
-    cricket: '0ea5e9', // light blue
-    tennis: 'a3e635', // lime
-    rugby: '8b5cf6', // purple
-    american_football: '0369a1', // dark blue
-    baseball: 'f43f5e', // rose
-    hockey: '06b6d4', // cyan
-    golf: '22c55e', // emerald
-    darts: 'eab308', // yellow
-    mma: 'dc2626', // crimson red
-    networks: '64748b', // slate
-    college: 'd946ef' // fuchsia
-  };
-  const color = categoryColors[match.category] || '333333';
+  const color = CATEGORY_COLORS[match.category] || '333333';
 
   // Competitor names, filled from the title when the provider omitted them.
   const cleanTeamName = (name) => {
@@ -485,8 +501,13 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
   const derivedTeams = extractTeamsFromTitle(match.title);
   const rawTeam1 = (match.team1 && match.team1.name) || (derivedTeams ? derivedTeams[0] : null);
   const rawTeam2 = (match.team2 && match.team2.name) || (derivedTeams ? derivedTeams[1] : null);
-  const team1Name = cleanTeamName(rawTeam1) || rawTeam1;
-  const team2Name = cleanTeamName(rawTeam2) || rawTeam2;
+  let team1Name = cleanTeamName(rawTeam1) || rawTeam1;
+  let team2Name = cleanTeamName(rawTeam2) || rawTeam2;
+  const isLaLiga = (match.league && /la\s*liga/i.test(match.league)) || (match.title && /la\s*liga/i.test(match.title));
+  if (isLaLiga || match.category === 'football') {
+    if (team1Name && /^deportivo$/i.test(team1Name.trim())) team1Name = 'Deportivo Alavés';
+    if (team2Name && /^deportivo$/i.test(team2Name.trim())) team2Name = 'Deportivo Alavés';
+  }
 
   // Channel logos come from the unified ChannelLogoService (tv-logos CDN + Wikimedia).
 
@@ -546,15 +567,7 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
   // ─── Upgrade low-quality provider thumbnails to hi-res channel logos ───
   // Providers often emit generic /thumbnails/..._Willow tiles. If we have a
   // high-res logo from ChannelLogoService for the same channel, prefer it.
-  const CHANNEL_THUMBNAIL_MAP = [
-    { rx: /\/thumbnails\/cricket_[a-f0-9-]+_willow/i, channel: 'willow' },
-    { rx: /\/thumbnails\/cricket_[a-f0-9-]+_sky.?cricket/i, channel: 'sky sports cricket' },
-    { rx: /\/thumbnails\/cricket_[a-f0-9-]+_fox.?cricket/i, channel: 'fox cricket' },
-    { rx: /\/thumbnails\/cricket_[a-f0-9-]+_astro.?cricket/i, channel: 'astro cricket' },
-    { rx: /\/thumbnails\/cricket_[a-f0-9-]+_supersport.?cricket/i, channel: 'supersport cricket' },
-    { rx: /\/thumbnails\/cricket_[a-f0-9-]+_star.?sports/i, channel: 'star sports' },
-    { rx: /\/thumbnails\/cricket_[a-f0-9-]+_sony.?sports/i, channel: 'sony sports' },
-  ];
+  // (CHANNEL_THUMBNAIL_MAP is a module-level constant.)
   const matchedChannelThumb = providerThumb ? CHANNEL_THUMBNAIL_MAP.find(m => m.rx.test(providerThumb)) : null;
   let isChannelThumbnail = !!matchedChannelThumb;
   const isMatchup = !!(team1Name && team2Name);
@@ -562,7 +575,7 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
   // Check if we have a locally defined, verified hi-res logo for this specific channel name.
   // ONLY for continuous 24/7 TV channels (e.g. networks catalog) — NEVER discard provider thumbnails
   // for sporting events, motorsport, or replays!
-  const is247Channel = match.category === 'networks' || match.isChannel || (match.id && (match.id.startsWith('dlv_ch_') || match.id.startsWith('cdn_ch_') || match.id.startsWith('sktech_ch_')));
+  const is247Channel = (match.category === 'networks' || match.isChannel || (match.id && (match.id.startsWith('dlv_ch_') || match.id.startsWith('cdn_ch_') || match.id.startsWith('sktech_ch_') || match.id.startsWith('vavoo_') || match.id.includes('_ch_')))) && !isMatchup;
   const customLogo = (is247Channel || (!isReplay && !isMotorsport)) ? getChannelLogo(match.title) : null;
   if (customLogo && !isMatchup && !isReplay && !isMotorsport) {
     isChannelThumbnail = false; // We want to use it as the main artwork, not a tiny badge
@@ -683,8 +696,8 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
       leagueBadge: leagueEmblem,
       channel: broadcasterName || (isChannelLike ? match.title : null),
       channelBadge: channelMark,
-      status: isReplay ? 'replay' : (isLive ? 'live' : ((match.category === 'networks' || !match.date || match.date === '0') ? '247' : 'upcoming')),
-      score: match.score,
+      status: isReplay ? 'replay' : (isLive ? 'live' : (is247Channel ? '247' : 'upcoming')),
+      score: isReplay ? null : match.score,
       time: formatKickoffForCard(match.date, config),
       shape: reqType === 'series' ? 'poster' : 'landscape'
     }) || fallbackPoster;
@@ -749,21 +762,27 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
     } catch (_) {}
   }
 
-  const is247 = !isReplay && (match.category === 'networks' || !match.date || match.date === '0');
+  const is247 = !isReplay && is247Channel;
 
   // ─── Enrich team logos via TeamLogoService (cricket, football, etc.) ───
+  // Build the projected team objects locally instead of writing them back to
+  // the shared read-only match: the old write-back violated the CacheService
+  // read-only contract and leaked one request's enrichment into every other
+  // consumer of the cached row.
   let teamLogoService = null;
   try { teamLogoService = container.resolve('teamLogoService'); } catch (_) {}
-  if (teamLogoService && team1Name) {
-    const existingLogo = match.team1 && match.team1.logo;
-    const logo1 = existingLogo || teamLogoService.getCachedLogo(team1Name);
-    match.team1 = { ...(match.team1 || {}), name: team1Name, logo: logo1 || null };
-  }
-  if (teamLogoService && team2Name) {
-    const existingLogo = match.team2 && match.team2.logo;
-    const logo2 = existingLogo || teamLogoService.getCachedLogo(team2Name);
-    match.team2 = { ...(match.team2 || {}), name: team2Name, logo: logo2 || null };
-  }
+  const team1Out = team1Name
+    ? {
+        name: team1Name,
+        logo: ((match.team1 && match.team1.logo) || (teamLogoService ? teamLogoService.getCachedLogo(team1Name) : null)) || null
+      }
+    : null;
+  const team2Out = team2Name
+    ? {
+        name: team2Name,
+        logo: ((match.team2 && match.team2.logo) || (teamLogoService ? teamLogoService.getCachedLogo(team2Name) : null)) || null
+      }
+    : null;
 
   // Providers only supply a score for a fixture that is under way or finished.
   const scoreSuffix = match.score ? ` (${match.score})` : '';
@@ -804,8 +823,8 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
     description: desc,
     cast: cast,
     // Include team1/team2 with logos for Stremio/Nuvio client-side rendering
-    team1: team1Name ? { name: team1Name, logo: (match.team1 && match.team1.logo) || null } : null,
-    team2: team2Name ? { name: team2Name, logo: (match.team2 && match.team2.logo) || null } : null,
+    team1: team1Out,
+    team2: team2Out,
     behaviorHints: {
       defaultVideoId: isSeriesReplay ? `nuvio_sport_${match.id}:1:1` : `nuvio_sport_${match.id}`
     }
@@ -891,35 +910,76 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
 // personalized request hits the VPS. This bounded in-process LRU absorbs
 // repeat clicks for the same match across both workers, solving the main cause
 // of perceived "meta loading" slowness.
-// Key: id + timezone + replayFilter (the only config fields that affect meta output).
+// Key: response type + id + timezone + replayFilter. Replay hubs always
+// produce series responses; individual matches vary by the requested type.
 // TTL: 30s for LIVE (so score changes propagate within 30s),
 //       5min for upcoming / 24-7 networks,
 //      30min for replay hubs (static archive content).
 const META_CACHE_MAX = 1000;
-const _metaCache = new Map(); // key → { data, expiresAt }
+const _metaCache = new Map(); // key → { data, expiresAt, revision }
 
-function _metaCacheKey(id, config) {
-  const tz = (config && config.timezone) || '';
-  const rf = (config && config.replayFilter) || '';
-  return `${id}|${tz}|${rf}`;
+// Replay-hub metas are 2.5 MB+ JSON payloads, so the 1000-entry count cap on
+// _metaCache is byte-blind for them — a sweep over hub ids could park hundreds
+// of MB in a "bounded" cache. Hubs get their own store with a small count cap
+// (~60 MB ceiling) and identical entry/eviction semantics.
+const HUB_META_CACHE_MAX = 24;
+const _hubMetaCache = new Map(); // key → { data, expiresAt, revision }
+
+function _metaCacheRevision() {
+  const cacheService = container.resolve('cacheService');
+  // Poll for cross-worker snapshots before trusting a memo hit. This returns
+  // the internal read-only array without cloning or projecting any matches.
+  if (typeof cacheService.getMatchesReadOnly === 'function') cacheService.getMatchesReadOnly();
+  return cacheService.rev || 0;
 }
 
-function _metaCacheGet(key) {
+function _metaCacheKey(id, config, responseType) {
+  const tz = (config && config.timezone) || '';
+  const rf = (config && config.replayFilter) || '';
+  return JSON.stringify([responseType, id, tz, rf]);
+}
+
+function _metaCacheGet(key, revision) {
   const entry = _metaCache.get(key);
   if (!entry) return null;
-  if (Date.now() > entry.expiresAt) { _metaCache.delete(key); return null; }
+  if (Date.now() > entry.expiresAt || entry.revision !== revision) {
+    _metaCache.delete(key);
+    return null;
+  }
   // Promote to end (keep-alive semantics on repeated access)
   _metaCache.delete(key);
   _metaCache.set(key, entry);
   return entry.data;
 }
 
-function _metaCacheSet(key, data, ttlMs) {
+function _metaCacheSet(key, data, ttlMs, revision) {
   if (_metaCache.size >= META_CACHE_MAX) {
     // Evict the oldest entry (Map preserves insertion order)
     _metaCache.delete(_metaCache.keys().next().value);
   }
-  _metaCache.set(key, { data, expiresAt: Date.now() + ttlMs });
+  // Keep the revision observed before building. A sync awaited by a hub
+  // may advance it; the next request will then rebuild instead of treating
+  // an older response as belonging to the new snapshot.
+  _metaCache.set(key, { data, expiresAt: Date.now() + ttlMs, revision });
+}
+
+function _hubMetaCacheGet(key, revision) {
+  const entry = _hubMetaCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt || entry.revision !== revision) {
+    _hubMetaCache.delete(key);
+    return null;
+  }
+  _hubMetaCache.delete(key);
+  _hubMetaCache.set(key, entry);
+  return entry.data;
+}
+
+function _hubMetaCacheSet(key, data, ttlMs, revision) {
+  if (_hubMetaCache.size >= HUB_META_CACHE_MAX) {
+    _hubMetaCache.delete(_hubMetaCache.keys().next().value);
+  }
+  _hubMetaCache.set(key, { data, expiresAt: Date.now() + ttlMs, revision });
 }
 
 // ─── Catalog page memo ────────────────────────────────────────────────────────
@@ -934,6 +994,11 @@ function _metaCacheSet(key, data, ttlMs) {
 const CATALOG_PAGE_CACHE_MAX = 150;
 const CATALOG_PAGE_TTL_MS = 5 * 60 * 1000; // safety net: never serve a page older than 5 min
 const _catalogPageCache = new Map(); // pageKey -> { gen, result, expiresAt }
+// Lazily-built search haystacks, keyed by match object. A WeakMap keeps the
+// memo per generation (matches are replaced wholesale each sync, aging old
+// entries out with the objects) WITHOUT pinning request-derived strings onto
+// the shared read-only cache rows the way the old m._searchHaystack did.
+const _searchHaystacks = new WeakMap();
 let _logoHookWired = false;
 
 function _wireLogoInvalidationHook() {
@@ -993,8 +1058,9 @@ async function handleCatalog(type, id, extra, config) {
 
 async function buildReplayHubMeta(id, config = {}) {
   // Replay hubs generate 2.5 MB+ JSON payloads — cache them for 30 minutes.
-  const _rhmCacheKey = _metaCacheKey(id, config);
-  const _rhmCached = _metaCacheGet(_rhmCacheKey);
+  const _rhmCacheKey = _metaCacheKey(id, config, 'series');
+  const _rhmRevision = _metaCacheRevision();
+  const _rhmCached = _hubMetaCacheGet(_rhmCacheKey, _rhmRevision);
   if (_rhmCached) return _rhmCached;
 
   const cacheService = container.resolve('cacheService');
@@ -1110,7 +1176,7 @@ async function buildReplayHubMeta(id, config = {}) {
       cacheMaxAge: 1800,
       staleRevalidate: 3600
     };
-    _metaCacheSet(_rhmCacheKey, _datehubResult, 30 * 60 * 1000);
+    _hubMetaCacheSet(_rhmCacheKey, _datehubResult, 30 * 60 * 1000, _rhmRevision);
     return _datehubResult;
   }
 
@@ -1227,7 +1293,7 @@ async function buildReplayHubMeta(id, config = {}) {
     cacheMaxAge: 1800,
     staleRevalidate: 3600
   };
-  _metaCacheSet(_rhmCacheKey, _sporthubResult, 30 * 60 * 1000);
+  _hubMetaCacheSet(_rhmCacheKey, _sporthubResult, 30 * 60 * 1000, _rhmRevision);
   return _sporthubResult;
 }
 
@@ -1264,11 +1330,13 @@ async function handleReplayCatalog(id, extra, config, reqType = 'tv') {
     if (m.sources.some(s => s.source === 'timstreams')) return false;
     if (!m.sources.some(s => REPLAY_SOURCES.has(s.source))) return false;
 
-    // Self-healing: if category is mistakenly football but title/league indicates basketball
+    // Self-healing: if category is mistakenly football but title/league indicates basketball.
+    // Local-only: the aggregator's _precompute performs and persists the same
+    // correction at sync time, so writing it back here only violated the
+    // read-only cache contract without adding information.
     let cat = m.category;
     if (cat === 'football' && /\b(?:euroleague|eurocup|fiba|eurobasket|adriatic league|b1\.league)\b/i.test(`${m.title || ''} ${m.league || ''}`)) {
       cat = 'basketball';
-      m.category = 'basketball';
     }
 
     if (targetSport === 'other') {
@@ -1416,7 +1484,15 @@ async function handleCatalogUncached(type, id, extra, config) {
     });
   } else if (categoryMatch === 'teams') {
     if (favoriteTeams.length) {
-      filteredMatches = matches.filter(m => isFavoriteMatch(m, favoriteTeams));
+      const now = Date.now();
+      filteredMatches = matches.filter(m => {
+        // Your Teams strictly takes from live and upcoming events only (no 24/7 channels)
+        if (m.category === 'networks' || m.isChannel) return false;
+        const isLive = isMatchLive(m);
+        const isUpcoming = !isLive && (getKickoff(m.date) || 0) > now;
+        if (!isLive && !isUpcoming) return false;
+        return isFavoriteMatch(m, favoriteTeams);
+      });
     } else {
       filteredMatches = []; // If no config, return empty
     }
@@ -1633,16 +1709,18 @@ async function handleCatalogUncached(type, id, extra, config) {
         if (title.includes(searchRaw) || league.includes(searchRaw)) return true;
 
         // Multi-token match: lazily memoized search haystack avoids repeated string join allocations
-        if (!m._searchHaystack) {
+        let haystack = _searchHaystacks.get(m);
+        if (haystack === undefined) {
           const baseTitle = (m.baseTitle || '').toLowerCase();
           const canonicalTitle = (m.canonicalTitle || '').toLowerCase();
           const sourceNames = (m.sources && Array.isArray(m.sources))
             ? m.sources.map(s => `${s.channelName || ''} ${s.canonicalChannel || ''}`).join(' ').toLowerCase()
             : '';
-          m._searchHaystack = `${title} ${baseTitle} ${canonicalTitle} ${league} ${sourceNames}`;
+          haystack = `${title} ${baseTitle} ${canonicalTitle} ${league} ${sourceNames}`;
+          _searchHaystacks.set(m, haystack);
         }
 
-        return tokens.every(tok => m._searchHaystack.includes(tok));
+        return tokens.every(tok => haystack.includes(tok));
       });
     }
   }
@@ -1704,12 +1782,15 @@ async function handleMeta(type, id, config) {
   // Cloudflare bypasses its edge cache for /:config/meta/... URLs (unique per
   // user), so every personalized click hits the VPS. This in-process LRU means
   // repeat requests for the same match return in < 5ms instead of ~800ms.
-  const _hmCacheKey = _metaCacheKey(id, config);
-  const _hmCached = _metaCacheGet(_hmCacheKey);
-  if (_hmCached) return _hmCached;
-
+  const effectiveType = type === 'series' ? 'series' : 'tv';
+  const _hmCacheKey = _metaCacheKey(id, config, id.startsWith('nuvio_sport_replay_') ? 'series' : effectiveType);
+  const _hmRevision = _metaCacheRevision();
   // Fire-and-forget stale-while-revalidate, same as handleCatalog.
+  // Run this before the memoized return so cache hits still trigger freshness checks.
   container.resolve('cronService').ensureFresh();
+
+  const _hmCached = _metaCacheGet(_hmCacheKey, _hmRevision);
+  if (_hmCached) return _hmCached;
 
   // Individual match meta or Replay Hub meta
   if (!id.startsWith('nuvio_sport_')) {
@@ -1757,12 +1838,12 @@ async function handleMeta(type, id, config) {
   //   - setImmediate defers the work one event-loop tick so the meta JSON is
   //     fully flushed to the socket before stream-token minting begins.
   try {
-    if (isMatchLive(match) && match.category !== 'networks' && !isReplayMatch(match)) {
+    const prewarmEnabled = Number(process.env.PREWARM_MAX_MATCHES !== undefined ? process.env.PREWARM_MAX_MATCHES : 12) > 0;
+    if (prewarmEnabled && isMatchLive(match) && match.category !== 'networks' && !isReplayMatch(match)) {
       setImmediate(() => prewarmMatch(match, config || {}, Number.MAX_SAFE_INTEGER).catch(() => {}));
     }
   } catch (_) {}
 
-  const effectiveType = type === 'series' ? 'series' : 'tv';
   const live = isMatchLive(match);
 
   // TTL: live 30s (score can change), upcoming/network 5min, everything else 10min
@@ -1772,7 +1853,7 @@ async function handleMeta(type, id, config) {
     cacheMaxAge: live ? 120 : 600,
     staleRevalidate: live ? 300 : 1800
   };
-  _metaCacheSet(_hmCacheKey, _hmResult, _hmTtl);
+  _metaCacheSet(_hmCacheKey, _hmResult, _hmTtl, _hmRevision);
   return _hmResult;
 }
 

@@ -35,6 +35,18 @@ function extractTokenExpiry(url) {
       const num = parseInt(e, 10);
       return num < 1e11 ? num * 1000 : num;
     }
+    const token = u.searchParams.get('token');
+    if (token) {
+      const b64 = token.split('.')[0];
+      try {
+        const decoded = Buffer.from(b64, 'base64').toString('utf8');
+        const parts = decoded.split('|');
+        if (parts.length >= 3 && /^\d+$/.test(parts[parts.length - 1])) {
+          const num = parseInt(parts[parts.length - 1], 10);
+          return num < 1e11 ? num * 1000 : num;
+        }
+      } catch (_) {}
+    }
   } catch (_) {}
   return 0;
 }
@@ -137,8 +149,8 @@ class DaddyLiveProvider extends BaseProvider {
     // even when the schedule fails, so 'did it return anything' is not a
     // usable health signal - fixtures and channels fail independently.
     this.lastScheduleOk = null;
-    this.baseDomains = ['https://dlive.sx', 'https://dlstreams.st'];
-    this.folders = ['cast', 'casting', 'watch', 'player', 'plus', 'stream'];
+    this.baseDomains = ['https://thedaddy.pk', 'https://dlive.sx', 'https://dlstreams.st'];
+    this.folders = ['player', 'stream', 'watch', 'plus', 'casting', 'cast', 'hub'];
     this._decoded = new Map(); // sourceId -> { streams, expiresAt }
 
     // Self-healing domain knowledge. The container injects `iframeDomainRegistry`
@@ -438,6 +450,9 @@ class DaddyLiveProvider extends BaseProvider {
         headers: {
           'User-Agent': UA,
           'Referer': referer,
+          'Sec-Fetch-Dest': 'iframe',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'cross-site',
           'Accept': 'text/html,application/xhtml+xml,application/json,*/*;q=0.8'
         },
         signal: AbortSignal.timeout(6000)
@@ -497,14 +512,7 @@ class DaddyLiveProvider extends BaseProvider {
       title: channelName ? `DaddyLive (${channelName})` : `DaddyLive Stream ${sourceId}`,
       url: `${BASE_URL}/api/manifest?url=${encodeURIComponent(m3u8Url)}&referer=${encodeURIComponent(referer)}&origin=${encodeURIComponent(origin)}`,
       behaviorHints: {
-        notWebReady: true,
-        proxyHeaders: {
-          request: {
-            'Referer': referer,
-            'Origin': origin,
-            'User-Agent': UA
-          }
-        }
+        notWebReady: false
       },
       resolution: 'HD'
     });
@@ -906,81 +914,86 @@ class DaddyLiveProvider extends BaseProvider {
           if (!res.ok) continue;
 
           const html = await res.text();
-          // Match iframe src (supports quoted and unquoted src)
-          const iframeMatch = html.match(/<iframe[^>]+src=["']?([^"'\s>]+)["']?/i);
-          if (!iframeMatch || !iframeMatch[1]) continue;
+          const allIframeMatches = [...html.matchAll(/<iframe[^>]+src=["']?([^"'\s>]+)["']?/gi)].map((m) => m[1]);
+          if (!allIframeMatches.length) continue;
 
-          let iframeUrl = iframeMatch[1];
-          if (iframeUrl.startsWith('//')) {
-            iframeUrl = 'https:' + iframeUrl;
-          } else if (iframeUrl.startsWith('/')) {
-            iframeUrl = new URL(iframeUrl, playerUrl).toString();
-          }
+          let candidateUrls = allIframeMatches.map((raw) => {
+            if (raw.startsWith('//')) return 'https:' + raw;
+            if (raw.startsWith('/')) { try { return new URL(raw, playerUrl).toString(); } catch (_) { return raw; } }
+            return raw;
+          }).filter((u) => !/daddyliveplayer\.st/i.test(u));
 
-          // Skip known TikTok CDN web player iframe to avoid resolving to cloaked PNG video
-          if (/daddyliveplayer\.st/i.test(iframeUrl)) continue;
-
-          let embedOrigin = '';
-          try {
-            embedOrigin = new URL(iframeUrl).origin;
-          } catch (_) {
-            embedOrigin = base;
-          }
-          let embedReferer = `${embedOrigin}/`;
-
-          // Fetch the embed page
-          const embedRes = await this.proxyFetch(iframeUrl, {
-            headers: {
-              'User-Agent': UA,
-              'Referer': playerUrl,
-              'Origin': base,
-              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-            },
-            signal: AbortSignal.timeout(6000)
-          });
-
-          if (!embedRes.ok) continue;
-
-          const embedHtml = await embedRes.text();
-          let m3u8Url = null;
-
-          // Resolve via the shared helper: _econfig -> chain -> direct m3u8
-          // -> JSON player hop -> nested iframe (recursive, up to 2 levels).
-          const resolved = await this._resolveFromHtml(embedHtml, iframeUrl, 0);
-          if (resolved && resolved.url && !isTikTokCloakedStream(resolved.url)) {
-            m3u8Url = resolved.url;
-            // The manifest may be served from a deeper page than the first
-            // iframe, so the Referer must match THAT page, not the wrapper.
+          // If domainRegistry is available, rank candidate iframes so registered hosts (e.g. wideiptv.top) are probed first
+          if (this.domainRegistry && candidateUrls.length > 1) {
             try {
-              embedOrigin = new URL(resolved.referer || iframeUrl).origin;
+              const hosts = candidateUrls.map((u) => { try { return new URL(u).hostname; } catch (_) { return ''; } });
+              const ranked = this.domainRegistry.rankCandidates(hosts);
+              if (ranked.length) {
+                candidateUrls = ranked
+                  .map((h) => candidateUrls.find((u) => { try { return new URL(u).hostname === h; } catch (_) { return false; } }))
+                  .filter(Boolean)
+                  .concat(candidateUrls.filter((u) => { try { return !ranked.includes(new URL(u).hostname); } catch (_) { return true; } }));
+              }
+            } catch (_) {}
+          }
+
+          for (const iframeUrl of candidateUrls.slice(0, 3)) {
+            let embedOrigin = '';
+            try {
+              embedOrigin = new URL(iframeUrl).origin;
             } catch (_) {
               embedOrigin = base;
             }
-            embedReferer = `${embedOrigin}/`;
-          }
+            let embedReferer = `${embedOrigin}/`;
 
-          if (m3u8Url) {
-            // The Referer the CDN will accept belongs to the MANIFEST's terminal
-            // host, not to whichever iframe happened to embed the decoder: on the
-            // "watch" fallback the iframe origin is an unauthorised family, so
-            // deriving the Referer from it makes every segment request 403. The
-            // registry holds the terminal host -> referer mapping, and is only
-            // consulted when it has an entry (a generic self-origin fallback is
-            // not knowledge).
-            const registryReferer = this._terminalRefererFor(m3u8Url);
-            const candidate = this._buildManifestStream(
-              m3u8Url,
-              registryReferer || embedReferer,
-              sourceId,
-              channelName
-            );
+            // Fetch the embed page
+            const embedRes = await this.proxyFetch(iframeUrl, {
+              headers: {
+                'User-Agent': UA,
+                'Referer': playerUrl,
+                'Origin': base,
+                'Sec-Fetch-Dest': 'iframe',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'cross-site',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+              },
+              signal: AbortSignal.timeout(6000)
+            });
 
-            if (registryReferer) {
-              streams.push(candidate);
-              foundDirect = true;
-              break;
+            if (!embedRes || !embedRes.ok) continue;
+
+            const embedHtml = typeof embedRes.text === 'function' ? await embedRes.text() : embedRes.text;
+            let m3u8Url = null;
+
+            // Resolve via the shared helper: _econfig -> chain -> direct m3u8
+            // -> JSON player hop -> nested iframe (recursive, up to 2 levels).
+            const resolved = await this._resolveFromHtml(embedHtml, iframeUrl, 0);
+            if (resolved && resolved.url && !isTikTokCloakedStream(resolved.url)) {
+              m3u8Url = resolved.url;
+              try {
+                embedOrigin = new URL(resolved.referer || iframeUrl).origin;
+              } catch (_) {
+                embedOrigin = base;
+              }
+              embedReferer = `${embedOrigin}/`;
             }
-            if (!fallbackStream) fallbackStream = candidate;
+
+            if (m3u8Url) {
+              const registryReferer = this._terminalRefererFor(m3u8Url);
+              const candidate = this._buildManifestStream(
+                m3u8Url,
+                registryReferer || embedReferer,
+                sourceId,
+                channelName
+              );
+
+              if (registryReferer) {
+                streams.push(candidate);
+                foundDirect = true;
+                break;
+              }
+              if (!fallbackStream) fallbackStream = candidate;
+            }
           }
         } catch (_) {
           // Continue trying next folder/domain
@@ -992,7 +1005,7 @@ class DaddyLiveProvider extends BaseProvider {
 
     // Web player fallback if no direct stream was decrypted
     if (streams.length === 0) {
-      const fallbackUrl = `https://dlive.sx/stream/stream-${sourceId}.php`;
+      const fallbackUrl = `${this.baseDomains[0]}/stream/stream-${sourceId}.php`;
       const label = channelName ? `DaddyLive (${channelName}) (Web Player)` : `DaddyLive Stream ${sourceId} (Web Player)`;
       streams.push(new StreamEntity({
         name: 'DaddyLive',
@@ -1002,18 +1015,22 @@ class DaddyLiveProvider extends BaseProvider {
       }));
     }
 
-    // Cache streams with TTL bounded by token expiry or default 5 minutes
-    const firstDirect = streams.find(s => s.url && s.url.includes('/api/manifest?'));
+    // Cache streams with TTL bounded by token expiry or default 2.5 minutes
+    const firstDirect = streams.find(s => s.url && (s.url.includes('/api/manifest?') || s.url.startsWith('http')));
     let tokenExp = 0;
     if (firstDirect) {
       try {
-        const uObj = new URL('http://localhost' + firstDirect.url);
-        tokenExp = extractTokenExpiry(uObj.searchParams.get('url'));
+        let target = firstDirect.url;
+        if (target.includes('/api/manifest?')) {
+          const uObj = new URL('http://localhost' + target);
+          target = uObj.searchParams.get('url') || target;
+        }
+        tokenExp = extractTokenExpiry(target);
       } catch (_) {}
     }
-    const defaultTtl = 5 * 60 * 1000;
+    const defaultTtl = 150 * 1000;
     const expiresAt = tokenExp && tokenExp > Date.now()
-      ? Math.min(tokenExp - 60000, Date.now() + defaultTtl)
+      ? Math.min(tokenExp - 45000, Date.now() + defaultTtl)
       : Date.now() + defaultTtl;
 
     if (this._decoded.size >= 500) {

@@ -68,6 +68,12 @@ describe('score reaches the composed match card', () => {
     expect(meta.poster).toContain('/img?url=');
     expect(meta.poster).not.toContain('sc=');
   });
+
+  test('replays omit score from /img/match to protect from spoilers', () => {
+    const meta = mapMatchToMetaPreview(liveMatch({ category: 'football', date: '2026-09-18', sources: [{ source: 'replayzone', id: 'https://ok.ru/video/1' }] }), {});
+    expect(meta.poster).toContain('/img/match?');
+    expect(new URL(meta.poster, 'http://x').searchParams.get('sc')).toBeNull();
+  });
 });
 
 describe('score reaches the description status line', () => {

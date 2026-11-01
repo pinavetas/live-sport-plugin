@@ -48,10 +48,20 @@ basketball, motorsport, cricket and networks catalogues:
 | Direct upstream CDN | 9 |
 | **VPS** | **0** |
 
-Latent risk: `src/services/HlsRewriteService.js` falls back to the VPS
-`/api/hlschunk` proxy for `.ts` and `.image` segments whenever
-`getCfImageWorker()` returns null. The pool currently holds five workers. **If
-that array is ever emptied, real video traffic starts flowing through the VPS.**
+Latent risk, now bounded: `src/services/HlsRewriteService.js` used to fall back
+to the VPS `/api/hlschunk` proxy for `.image` segments whenever
+`getCfImageWorker()` returned null, and the pool held seven interchangeable free
+workers that all exhausted at the same moment.
+
+The pool is now budgeted (`src/services/WorkerBudget.js`): six free workers
+(100k/day each, hard stop) are spent first, and the single paid worker on
+`nuvio-proxy2` (10M/month included, soft warning at 95%, hard ceiling at 20M/month)
+takes the overflow. The paid worker is filtered out of the free pool entirely, so it is
+unreachable by the random draw. Exhaustion occurs only when the free tier is spent AND
+the paid tier exceeds the hard ceiling. On exhaustion, `HLSCUNK_FALLBACK` defaults to `off`
+(production default), emitting the upstream CDN URL directly so video bytes never pass
+through the VPS (enforcing the Zero Server Bandwidth Bleed Policy). `HLSCUNK_FALLBACK=on`
+is available only as a temporary emergency escape hatch.
 
 ## The hub multiplier
 
@@ -199,3 +209,53 @@ inspection; no VPS access logs were available. Payload sizes, status codes and
 cache headers are **observed**. The attribution of the 68 GB to the image
 pipeline is **inferred** from those measurements and was not reconciled against
 `vnstat` or an access-log breakdown.
+
+## Worker Budget Calibration
+
+The allocator tracks segment rewrite emissions, which can run ahead of actual requests fetched by the player. Periodic calibration ensures local instance budgets accurately mirror Cloudflare's upstream counters without starving workers or prematurely leaking into the paid tier.
+
+### 1. Retrieve Upstream Worker Counts
+In the Cloudflare dashboard:
+- Navigate to: **Workers & Pages** → select **your worker** → **Metrics** → **Requests**.
+- Filter the time range to a single complete **UTC day** (matching the midnight-to-midnight UTC reset cycle).
+- Note the total requests handled by that specific worker.
+
+### 2. Read Addon Snapshot
+Fetch the process snapshot from the running instance:
+```bash
+curl -s http://127.0.0.1:7000/api/worker-budget | jq
+# If protected by token:
+# curl -s "http://127.0.0.1:7000/api/worker-budget?token=$WORKER_BUDGET_TOKEN" | jq
+```
+
+### 3. Compute Real-to-Emission Ratio
+Multiply the local worker used count by the cluster instance multiplier (`WORKER_INSTANCE_COUNT`, typically 2 in PM2 cluster mode) to determine the cluster-wide emission total:
+```text
+Cluster Total = snapshot.used * WORKER_INSTANCE_COUNT
+Ratio = Cloudflare Requests / Cluster Total
+```
+
+- **Ratio < 0.85:** Emissions significantly outpace playback requests (e.g. users closing streams quickly). The dedupe window (`CF_DEDUPE_TTL_MS`) may be increased, or `CF_FREE_CAP_RATIO` relaxed.
+- **Ratio > 1.05:** Cloudflare received more traffic than recorded (e.g. edge-scrapes or direct hits). Tighten `CF_FREE_CAP_RATIO`.
+
+### 4. Configuration Knobs
+- `CF_FREE_CAP_RATIO` (default `0.9`): Fractional daily cap (e.g. 90k of 100k) per free worker.
+- `CF_PAID_SOFT_STOP_RATIO` (default `0.95`, alias `CF_PAID_CAP_RATIO`): Ratio of 10M included requests at which a warning is emitted.
+- `CF_PAID_HARD_LIMIT` (default `20000000`): Absolute monthly request cap before halting paid tier allocation.
+- `CF_PROBE_THRESHOLD` (default `0.8`): Threshold fraction of daily cap at which a background HEAD probe verifies worker availability. `>=1.0` disables probing.
+
+### 5. Calibration Log
+
+| Date | Worker | CF dashboard (req) | snapshot() used | Ratio | Action taken |
+|---|---|---|---|---|---|
+| 2026-10-23 | baseline | not yet measured | — | — | baseline — not yet measured |
+
+## Session Changes (2026-10-23)
+
+Hardened Cloudflare worker pool budget allocation and exhaustion protections:
+1. **Edge-scrape retry routing**: `CdnLiveProvider` 429/403 fallback routed through `workerPool.pick(null, { exclude: tried })` (up to 3 distinct free workers); paid worker strictly excluded from edge scraping.
+2. **Paid tier soft warning + hard ceiling**: Replaced rigid 95% paid cut with a soft warning threshold (`CF_PAID_SOFT_STOP_RATIO=0.95`, keeping `CF_PAID_CAP_RATIO` alias) and an absolute ceiling (`CF_PAID_HARD_LIMIT=20000000`), ensuring playback resilience without unbounded overage risk.
+3. **Zero server bandwidth enforcement**: Flipped `HLSCUNK_FALLBACK` default to `off` across code, docs, and `.env.example`, ensuring exhaustion emits direct CDN URLs and never relays video bytes through the VPS.
+4. **Spent worker active probing**: Added detached background `HEAD <worker>/` probing triggered at `CF_PROBE_THRESHOLD` (0.8 of daily cap). HTTP 403, 429, or 503 response marks that worker spent for the UTC day and immediately filters it out of `pick()`.
+5. **Observability endpoint**: Exposed `GET /api/worker-budget` mounted ahead of `/api` proxy middleware, returning process snapshot with optional `WORKER_BUDGET_TOKEN` gating.
+6. **Dead code removal**: Purged unused `getCfImageWorker()` and `CF_IMAGE_WORKER_POOL` export from `HlsRewriteService.js`.

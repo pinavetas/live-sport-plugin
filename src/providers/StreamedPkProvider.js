@@ -3,7 +3,7 @@ const MatchEntity = require('../domain/MatchEntity');
 const StreamEntity = require('../domain/StreamEntity');
 
 class StreamedPkProvider extends BaseProvider {
-  constructor(opts) {
+  constructor(opts = {}) {
     super(opts);
     this.name = 'StreamedPk';
     this.embedStProvider = opts.embedStProvider;
@@ -56,24 +56,18 @@ class StreamedPkProvider extends BaseProvider {
         this.fetchLiveMatches.fire().catch(() => [])
       ]);
 
-      // Verify which live matches actually have active stream URLs
+      // O(1) live match indexing without spamming stream probe endpoints
       const liveVerifiedIds = new Set();
       const liveVerifiedSourceIds = new Set();
       if (Array.isArray(liveData) && liveData.length > 0) {
-        await Promise.all(
-          liveData.map(async (m) => {
-            const src = (m.sources && m.sources[0]) || { source: 'admin', id: m.id };
-            try {
-              const streams = await this.fetchStreams.fire(src.source || 'admin', src.id || m.id);
-              if (Array.isArray(streams) && streams.length > 0) {
-                liveVerifiedIds.add(m.id);
-                (m.sources || []).forEach(s => liveVerifiedSourceIds.add(s.id));
-              }
-            } catch (e) {
-              // Stream endpoint error or empty
+        for (const m of liveData) {
+          if (m && m.id) liveVerifiedIds.add(m.id);
+          if (m && Array.isArray(m.sources)) {
+            for (const s of m.sources) {
+              if (s && s.id) liveVerifiedSourceIds.add(s.id);
             }
-          })
-        );
+          }
+        }
       }
 
       if (Array.isArray(allData)) {
@@ -107,15 +101,6 @@ class StreamedPkProvider extends BaseProvider {
             });
           }
 
-          const posterUrl = item.poster ? new URL(item.poster, 'https://streamed.pk').toString() : '';
-          const homeBadge = item.teams && item.teams.home && item.teams.home.badge ? `https://streamed.pk/api/images/proxy/${item.teams.home.badge}` : '';
-          const awayBadge = item.teams && item.teams.away && item.teams.away.badge ? `https://streamed.pk/api/images/proxy/${item.teams.away.badge}` : '';
-
-          // 24/7 channels are dedicated network streams, not fixtures. They are
-          // always live, so if they were re-tagged with a sport they would flood
-          // that sport's Live row with channel entries that are not events.
-          // Keep them all under 'networks' (the Live/Upcoming rows already
-          // separate real fixtures from network channels).
           const finalCategory = is247Channel ? 'networks' : this.normalizeCategory(item.category);
 
           matches.push(new MatchEntity({
@@ -151,60 +136,66 @@ class StreamedPkProvider extends BaseProvider {
         // Sort streams by viewer count (descending)
         streamList.sort((a, b) => (b.viewers || 0) - (a.viewers || 0));
 
-        // Resolve the stream variants in bounded batches.
-        //
-        // This used to be a hardcoded 3, chosen for Render's 512MB free tier when
-        // each variant spawns a WASM child process. We no longer run on Render, so
-        // that ceiling is unnecessarily conservative and serialises the resolve
-        // into several sequential rounds (12 variants = 4 rounds at 3/batch).
-        // Default is now 5, tunable via STREAMEDPK_CHUNK without a rebuild. The
-        // batch is still bounded so a machine with little RAM is not overwhelmed.
-        const CHUNK_SIZE = Math.max(1, Number(process.env.STREAMEDPK_CHUNK || 5));
-        for (let i = 0; i < streamList.length; i += CHUNK_SIZE) {
-          const chunk = streamList.slice(i, i + CHUNK_SIZE);
-          
-          const resolvePromises = chunk.map(async (streamItem) => {
-            if (!streamItem.embedUrl) return [];
-            
-            const viewersText = streamItem.viewers != null ? `👥 ${streamItem.viewers} Viewers` : '';
-            const baseLabel = streamItem.language ? `${matchTitle} (${streamItem.language})` : `${matchTitle} Stream ${streamItem.streamNo || 1}`;
-            const label = viewersText ? `${baseLabel} | ${viewersText}` : baseLabel;
-            
-            if (streamItem.embedUrl.includes('embedindia') && this.embedIndiaProvider) {
-              return await this.embedIndiaProvider.resolveStream(
-                streamItem.embedUrl,
-                matchCategory,
-                label,
-                { embedUrl: streamItem.embedUrl }
-              );
-            } else if (this.embedStProvider) {
-              return await this.embedStProvider.resolveStream(
-                streamItem.embedUrl,
-                matchCategory,
-                label,
-                { embedUrl: streamItem.embedUrl }
-              );
-            } else {
-              return [new StreamEntity({
-                name: 'StreamedPk',
-                title: `${label} (Web Player)`,
-                externalUrl: `/watch?url=${encodeURIComponent(streamItem.embedUrl)}&title=${encodeURIComponent(matchTitle || 'Live Event')}`
-              })];
-            }
-          });
+        // Prioritize top-viewed variants for active decryption (default top 4)
+        const MAX_EAGER_DECRYPT = Math.max(2, Number(process.env.STREAMEDPK_MAX_EAGER || 4));
+        const eagerTargets = streamList.slice(0, MAX_EAGER_DECRYPT);
+        const fallbackTargets = streamList.slice(MAX_EAGER_DECRYPT);
 
-          const results = await Promise.allSettled(resolvePromises);
-          for (const result of results) {
-            if (result.status === 'fulfilled' && Array.isArray(result.value)) {
-              for (const s of result.value) {
-                if (s) {
-                  s._streamSource = streamSource;
-                  s.streamSource = streamSource;
-                }
-              }
-              streams.push(...result.value);
-            }
+        const resolvePromises = eagerTargets.map(async (streamItem) => {
+          if (!streamItem.embedUrl) return [];
+          
+          const viewersText = streamItem.viewers != null ? `👥 ${streamItem.viewers} Viewers` : '';
+          const baseLabel = streamItem.language ? `${matchTitle} (${streamItem.language})` : `${matchTitle} Stream ${streamItem.streamNo || 1}`;
+          const label = viewersText ? `${baseLabel} | ${viewersText}` : baseLabel;
+          
+          if (streamItem.embedUrl.includes('embedindia') && this.embedIndiaProvider) {
+            return await this.embedIndiaProvider.resolveStream(
+              streamItem.embedUrl,
+              matchCategory,
+              label,
+              { embedUrl: streamItem.embedUrl }
+            );
+          } else if (this.embedStProvider) {
+            return await this.embedStProvider.resolveStream(
+              streamItem.embedUrl,
+              matchCategory,
+              label,
+              { embedUrl: streamItem.embedUrl }
+            );
+          } else {
+            return [new StreamEntity({
+              name: 'StreamedPk',
+              title: `${label} (Web Player)`,
+              externalUrl: `/watch?url=${encodeURIComponent(streamItem.embedUrl)}&title=${encodeURIComponent(matchTitle || 'Live Event')}`
+            })];
           }
+        });
+
+        const results = await Promise.allSettled(resolvePromises);
+        for (const result of results) {
+          if (result.status === 'fulfilled' && Array.isArray(result.value)) {
+            for (const s of result.value) {
+              if (s) {
+                s._streamSource = streamSource;
+                s.streamSource = streamSource;
+              }
+            }
+            streams.push(...result.value);
+          }
+        }
+
+        // Append remaining variants as fast Web Player fallbacks
+        for (const streamItem of fallbackTargets) {
+          if (!streamItem.embedUrl) continue;
+          const viewersText = streamItem.viewers != null ? `👥 ${streamItem.viewers} Viewers` : '';
+          const baseLabel = streamItem.language ? `${matchTitle} (${streamItem.language})` : `${matchTitle} Stream ${streamItem.streamNo || 1}`;
+          const label = viewersText ? `${baseLabel} | ${viewersText}` : baseLabel;
+          
+          streams.push(new StreamEntity({
+            name: 'StreamedPk',
+            title: `${label} (Web Player)`,
+            externalUrl: `/watch?url=${encodeURIComponent(streamItem.embedUrl)}&title=${encodeURIComponent(matchTitle || 'Live Event')}`
+          }));
         }
       }
     } catch (err) {

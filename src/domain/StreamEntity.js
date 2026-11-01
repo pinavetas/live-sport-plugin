@@ -59,6 +59,15 @@ class StreamEntity {
     if (data.isTikTok !== undefined) {
       this.isTikTok = data.isTikTok;
     }
+    if (data.cluster !== undefined) {
+      this.cluster = data.cluster;
+    }
+    if (data.serverCluster !== undefined) {
+      this.serverCluster = data.serverCluster;
+    }
+    if (data._streamSource !== undefined) {
+      this._streamSource = data._streamSource;
+    }
   }
 }
 

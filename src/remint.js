@@ -45,11 +45,12 @@ function mergeRemintedUrl(heldUrl, freshUrl, rck = '') {
     const fresh = new URL(freshUrl);
     const provider = rck ? String(rck).split(':')[0]?.toLowerCase() : '';
 
-    // 1. DaddyLive: Query-token replacement mechanism (?s=...&e=...)
-    if (provider === 'daddylive' || fresh.searchParams.has('s') || held.pathname.includes('/hls/')) {
+    // 1. DaddyLive: Query-token replacement mechanism (?s=...&e=..., ?token=..., etc.)
+    if (provider === 'daddylive' || fresh.searchParams.has('s') || fresh.searchParams.has('token') || held.pathname.includes('/hls/')) {
       const merged = new URL(heldUrl);
-      if (fresh.searchParams.has('s')) merged.searchParams.set('s', fresh.searchParams.get('s'));
-      if (fresh.searchParams.has('e')) merged.searchParams.set('e', fresh.searchParams.get('e'));
+      for (const p of ['s', 'e', 'token', 't', 'auth', 'expires', 'exp', 'sig', 'signature', 'wmsAuthSign']) {
+        if (fresh.searchParams.has(p)) merged.searchParams.set(p, fresh.searchParams.get(p));
+      }
       merged.host = fresh.host;
       merged.protocol = fresh.protocol;
       return merged.toString();
@@ -124,6 +125,8 @@ function getRemintCacheKey(rck, url) {
     if (provider === 'daddylive' || u.pathname.includes('/hls/')) {
       const dl = u.pathname.match(/\/hls\/([^/.]+)/i);
       if (dl) return `${rck}:${dl[1]}`;
+      const bt = u.pathname.match(/^\/([^/]+)\//);
+      if (bt) return `${rck}:${bt[1].toLowerCase()}`;
     }
 
     // 3. Streamed.pk / embed.st: Stable key based on stream number
@@ -180,21 +183,41 @@ async function attemptRemint(rck, heldUrl = '') {
     const candidates = rckCandidates(rck);
     if (candidates.length === 0) return null;
 
-    const matches = container.resolve('cacheService').getMatches();
+    // Read-only lookup (find by id, no mutation, no sort): the defensive
+    // clone inside getMatches() is unnecessary churn on this hot path.
+    const _cs = container.resolve('cacheService');
+    const matches = _cs.getMatchesReadOnly ? _cs.getMatchesReadOnly() : _cs.getMatches();
     let resolved = null;
     for (const c of candidates) {
       const match = matches.find(m => m && m.id === c.matchId);
       if (!match) continue;
-      const src = (match.sources || []).find(s => s && s.id === c.srcId);
+      const src = (match.sources || []).find(s => {
+        if (!s) return false;
+        const sId = String(s.id);
+        const cId = String(c.srcId);
+        if (sId === cId) return true;
+        if (cId.startsWith(sId + ':')) return true;
+        if (s.streamId && String(s.streamId) === cId) return true;
+        return false;
+      });
       if (!src) continue;
-      resolved = { match, src };
+      let remintSrcCandidate = { ...src };
+      const sId = String(src.id);
+      const cId = String(c.srcId);
+      if (cId.startsWith(sId + ':')) {
+        const subParts = cId.slice(sId.length + 1).split(':');
+        if (subParts[0]) remintSrcCandidate.streamSource = subParts[0];
+        if (subParts[1]) remintSrcCandidate.streamId = subParts[1];
+      }
+      resolved = { match, src: remintSrcCandidate };
       break;
     }
     if (!resolved) return null;
 
     const { resolveSource } = require('./streams');
+    const remintSrc = { ...resolved.src, forceRefresh: true, skipCache: true };
     const minted = await Promise.race([
-      resolveSource(resolved.src, resolved.match, null),
+      resolveSource(remintSrc, resolved.match, null),
       new Promise((_, rej) =>
         setTimeout(() => rej(new Error('re-mint timeout')), REMINT_TIMEOUT_MS)),
     ]);
@@ -204,7 +227,7 @@ async function attemptRemint(rck, heldUrl = '') {
     const freshUrls = [];
     for (const s of minted) {
       if (s && typeof s.url === 'string') {
-        if (s.url.includes('/api/manifest?')) {
+        if (s.url.includes('/api/manifest?') || s.url.includes('/api/manifest.m3u8?')) {
           const inner = new URL('http://localhost' + s.url).searchParams.get('url');
           if (inner) freshUrls.push(inner);
         } else if (s.url.startsWith('http')) {
@@ -244,6 +267,12 @@ async function attemptRemint(rck, heldUrl = '') {
           if (dlMatch) {
             const channelKey = dlMatch[1];
             const matched = freshUrls.find(u => new URL(u).pathname.includes(`/hls/${channelKey}`));
+            if (matched) return matched;
+          }
+          const btMatch = heldPath.match(/^\/([^/]+)\//);
+          if (btMatch) {
+            const channelKey = btMatch[1].toLowerCase();
+            const matched = freshUrls.find(u => new URL(u).pathname.toLowerCase().includes(`/${channelKey}/`));
             if (matched) return matched;
           }
         }

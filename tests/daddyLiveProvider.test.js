@@ -217,9 +217,8 @@ describe('DaddyLiveProvider', () => {
       expect(stream.name).toBe('DaddyLive');
       expect(stream.title).toContain('A&E USA');
       expect(stream.url).toContain('/api/manifest?url=' + encodeURIComponent(mockStreamUrl));
-      expect(stream.behaviorHints.notWebReady).toBe(true);
-      expect(stream.behaviorHints.proxyHeaders.request.Referer).toBe('https://tiestep.top/');
-      expect(stream.behaviorHints.proxyHeaders.request.Origin).toBe('https://tiestep.top');
+      expect(stream.behaviorHints.notWebReady).toBe(false);
+      expect(stream.behaviorHints.proxyHeaders).toBeUndefined();
     });
 
     test('falls back to EmbedExtractorChain if _econfig is not present', async () => {
@@ -320,7 +319,7 @@ describe('DaddyLiveProvider', () => {
       // First domain fails, second domain succeeds
       provider.proxyFetch = jest.fn()
         .mockRejectedValueOnce(new Error('primary domain timeout'))
-        .mockResolvedValueOnce({ ok: true, json: async () => mockSchedule });
+        .mockResolvedValueOnce({ ok: true, text: async () => '<div class="schedule__day"><div class="schedule__dayTitle">Friday</div><div class="schedule__category"><div class="schedule__categoryTitle">Soccer</div><div class="schedule__event"><div class="schedule__eventTime">20:00</div><div class="schedule__eventTitle">Arsenal vs Chelsea</div><div class="schedule__channels"><a href="/watch.php?id=35">Sky Sports</a></div></div></div></div>', json: async () => mockSchedule });
 
       const data = await provider.fetchSchedule.fire();
       expect(data).toBeDefined();

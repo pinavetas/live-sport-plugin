@@ -172,7 +172,9 @@ describe('VavooProvider & Dual-Ping Architecture', () => {
       const stream = streams[0];
       expect(stream).toBeInstanceOf(StreamEntity);
       expect(stream.name).toBe('Vavoo');
-      expect(stream.url).toBe(fakeCdnUrl);
+      expect(stream.url).toContain('/api/manifest?url=');
+      expect(stream.url).toContain(encodeURIComponent(fakeCdnUrl));
+      expect(stream.url).toContain('referer=' + encodeURIComponent('https://vavoo.to/'));
       expect(stream.resolution).toBe('1080p');
       expect(stream.behaviorHints).toBeDefined();
       expect(stream.behaviorHints.notWebReady).toBe(true);
@@ -180,10 +182,6 @@ describe('VavooProvider & Dual-Ping Architecture', () => {
         'User-Agent': 'MediaHubMX/2',
         'Referer': 'https://vavoo.to/'
       });
-
-      // Crucial: No localhost or internal proxy routes emitted (0 server bandwidth)
-      expect(stream.url).not.toContain('localhost');
-      expect(stream.url).not.toContain('/api/manifest');
     });
 
     it('properly formats 4K resolution and high priority score for 4K channels', async () => {
@@ -295,7 +293,7 @@ describe('VavooProvider & Dual-Ping Architecture', () => {
       );
 
       expect(streams.length).toBe(1);
-      expect(streams[0].url).toBe(fakeCdnUrl);
+      expect(streams[0].url).toContain(encodeURIComponent(fakeCdnUrl));
       expect(provider.baseIndex).toBe(1); // Rotated to kool.to
     });
 

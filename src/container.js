@@ -22,6 +22,7 @@ const DamiTvProvider = require('./providers/DamiTvProvider');
 const TeamLogoService = require('./services/TeamLogoService');
 const YamlProviderBuilder = require('./services/YamlProviderBuilder');
 const StreamResolveCache = require('./services/StreamResolveCache');
+const StreamedWasmPool = require('./services/StreamedWasmPool');
 const IframeDomainRegistry = require('./services/IframeDomainRegistry');
 const PpvStProvider = require('./providers/PpvStProvider');
 const SoccerFullProvider = require('./providers/SoccerFullProvider');
@@ -33,8 +34,10 @@ const HockeyReplaysProvider = require('./providers/HockeyReplaysProvider');
 const MlbLiveProvider = require('./providers/MlbLiveProvider');
 const VavooProvider = require('./providers/VavooProvider');
 const Ak47LiveProvider = require('./providers/Ak47LiveProvider');
+const LeafProvider = require('./providers/LeafProvider');
 const ProviderHealthService = require('./services/ProviderHealthService');
 const BroadcasterMatchService = require('./services/BroadcasterMatchService');
+const DashToHlsService = require('./services/DashToHlsService');
 const adaptiveDnsResolver = require('./services/AdaptiveDnsResolver');
 const dynamicParserRegistry = require('./services/DynamicParserRegistry');
 const AiParserGeneratorService = require('./services/AiParserGeneratorService');
@@ -46,13 +49,15 @@ const container = createContainer({
 // Register Core Services
 container.register({
   replayzoneProvider: asClass(ReplayZoneProvider).singleton(),
-    cacheService: asClass(CacheService).singleton(),
+  cacheService: asClass(CacheService).singleton(),
   circuitBreaker: asClass(CircuitBreakerService).singleton(),
   m3u8Parser: asClass(M3U8ParserService).singleton(),
   cronService: asClass(CronService).singleton(),
   matchAggregator: asClass(MatchAggregator).singleton(),
   streamScorer: asClass(StreamScoringService).singleton(),
   streamResolveCache: asValue(new StreamResolveCache()),
+  streamedWasmPool: asValue(StreamedWasmPool),
+  dashToHlsService: asClass(DashToHlsService).singleton(),
   providerHealthService: asClass(ProviderHealthService).singleton(),
   teamLogoService: asClass(TeamLogoService).singleton(),
   broadcasterMatchService: asValue(new BroadcasterMatchService()),
@@ -91,6 +96,7 @@ container.register({
   mlbLiveProvider: asClass(MlbLiveProvider).singleton(),
   vavooProvider: asClass(VavooProvider).singleton(),
   ak47LiveProvider: asClass(Ak47LiveProvider).singleton(),
+  leafProvider: asClass(LeafProvider).singleton(),
   yamlProviders: asValue(yamlProviders)
 });
 

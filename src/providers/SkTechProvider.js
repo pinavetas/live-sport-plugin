@@ -24,6 +24,16 @@ class SkTechProvider extends BaseProvider {
     this.name = 'SkTech';
     this.matchResolver = matchResolver;
     this.channelResolver = channelResolver;
+    this._cachedChannelEntities = null;
+    this._cachedChannelEntitiesTime = 0;
+  }
+
+  clearCache() {
+    this._cachedChannelEntities = null;
+    this._cachedChannelEntitiesTime = 0;
+    if (this.channelResolver && typeof this.channelResolver.clearCache === 'function') {
+      this.channelResolver.clearCache();
+    }
   }
 
   /**
@@ -40,8 +50,12 @@ class SkTechProvider extends BaseProvider {
       const liveMatches = await this.matchResolver.fetchLiveMatches();
       for (const m of liveMatches) {
         if (/namibia\s*(?:vs?\.?|@|-)\s*uganda/i.test(m.title)) continue;
-        const isLive = m.kickoff && m.kickoff <= Date.now() && m.kickoff >= (Date.now() - 4 * 3600 * 1000);
-        const status = isLive ? 'live' : ((m.kickoff && m.kickoff > Date.now()) ? 'upcoming' : 'live');
+        const now = Date.now();
+        if (m.endDate && now > m.endDate + 30 * 60 * 1000) continue;
+        if (m.kickoff && m.kickoff > 0 && (now - m.kickoff) > 4 * 3600 * 1000) continue;
+
+        const isLive = m.kickoff && m.kickoff <= now && (now - m.kickoff) <= 4 * 3600 * 1000;
+        const status = isLive ? 'live' : ((m.kickoff && m.kickoff > now) ? 'upcoming' : 'live');
 
         matches.push(new MatchEntity({
           id: `sktech_${m.id}`,
@@ -68,11 +82,17 @@ class SkTechProvider extends BaseProvider {
     }
 
     // ──────────────────────────────────────────────────────────────────────────
-    // Pillar 2: 24/7 Continuous TV Networks
+    // Pillar 2: 24/7 Continuous TV Networks (Dual-tiered cache: 5 minutes)
     // ──────────────────────────────────────────────────────────────────────────
     try {
-      const channels = await this.channelResolver.fetchChannels();
-      for (const ch of channels) {
+      const now = Date.now();
+      const CHANNEL_CACHE_TTL = 5 * 60 * 1000;
+      if (this._cachedChannelEntities && (now - this._cachedChannelEntitiesTime < CHANNEL_CACHE_TTL)) {
+        matches.push(...this._cachedChannelEntities);
+      } else {
+        const channelEntities = [];
+        const channels = await this.channelResolver.fetchChannels();
+        for (const ch of channels) {
         const ident = ChannelIdentityService.parseChannel(ch.title, {
           group: ch.group,
           logo: ch.logo
@@ -116,9 +136,13 @@ class SkTechProvider extends BaseProvider {
         entity.channelIdentityKey = identityKey;
         entity.channelNumber = channelNumber;
         entity.canonicalTitle = canonicalTitle;
-        matches.push(entity);
+        channelEntities.push(entity);
       }
-    } catch (err) {
+      this._cachedChannelEntities = channelEntities;
+      this._cachedChannelEntitiesTime = now;
+      matches.push(...channelEntities);
+    }
+  } catch (err) {
       console.warn(`[${this.name}] Failed to fetch 24/7 channels:`, err.message);
     }
 
@@ -188,8 +212,10 @@ class SkTechProvider extends BaseProvider {
     for (const s of rawCandidates) {
       if (!s.url) continue;
 
-      // Filter out any internal proxy routes if accidentally emitted
-      if (s.url.includes('localhost') || s.url.includes('/api/manifest')) {
+      // Filter out any internal proxy routes if accidentally emitted.
+      // /api/dash URLs are intentional zero-bandwidth DASH→HLS endpoints — keep them.
+      const isDashHlsStream = s.url.includes('/api/dash/');
+      if (!isDashHlsStream && (s.url.includes('localhost') || s.url.includes('/api/manifest'))) {
         continue;
       }
 
@@ -199,12 +225,14 @@ class SkTechProvider extends BaseProvider {
         url: s.url,
         resolution: s.resolution || 'HD',
         score: s.score || 85,
-        behaviorHints: {
-          notWebReady: true,
-          proxyHeaders: s.behaviorHints?.proxyHeaders || {
-            request: s.headers || {}
-          }
-        },
+        behaviorHints: isDashHlsStream
+          ? { notWebReady: false }
+          : {
+              notWebReady: true,
+              proxyHeaders: s.behaviorHints?.proxyHeaders || {
+                request: s.headers || {}
+              }
+            },
         clearkey: s.clearkey || undefined,
         language: s.language || src.language || undefined
       }));

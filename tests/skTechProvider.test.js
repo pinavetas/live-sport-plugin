@@ -120,7 +120,7 @@ describe('SK Tech TV Dual-Pillar Resolver & Provider', () => {
       expect(epoch).toBe(expectedUtc);
     });
 
-    test('resolves match streams prioritizing direct HLS over DASH ClearKey', async () => {
+    test('resolves match streams prioritizing direct HLS over converted DASH HLS', async () => {
       const mockRawOptions = [
         {
           name: 'Server 1 DASH',
@@ -146,21 +146,25 @@ describe('SK Tech TV Dual-Pillar Resolver & Provider', () => {
       const streams = await matchResolver.resolveMatchStreams('pro/test.txt', 'Arsenal vs Chelsea');
       expect(streams).toHaveLength(3);
 
-      // Verify Priority Order: Direct HLS & R2 first, DASH ClearKey last
+      // Verify Priority Order: Direct HLS & R2 first, converted DASH HLS last
       expect(streams[0].title).toContain('Server 2 HLS');
       expect(streams[0].url).toContain('amagi.tv');
       expect(streams[1].title).toContain('Server 3 R2');
       expect(streams[2].title).toContain('Server 1 DASH');
-      expect(streams[2].clearkey).toEqual({
-        keyId: 'FO6r8wwUt_vzAIwDCZzgEQ',
-        key: 'F9KsjbxUKb1wrzQzqhIVjQ'
-      });
 
-      // Verify Zero Server Bandwidth: URLs are direct CDNs with proxyHeaders
+      // DASH entries now route through the zero-bandwidth /api/dash converter
+      // with the ClearKey embedded in the base64url payload
+      expect(streams[2].url).toMatch(/\/api\/dash\/index\.m3u8\?d=.+$/);
+      const payload = JSON.parse(Buffer.from(streams[2].url.split('d=')[1], 'base64url').toString('utf8'));
+      expect(payload.mpdUrl).toBe('https://otte.cache.aiv-cdn.net/live/cenc.mpd');
+      expect(payload.key).toBe('17d2ac8dbc5429bd70af3433aa12158d');
+      expect(payload.kid).toBe('14eeabf30c14b7fbf3008c03099ce011');
+      expect(streams[2].behaviorHints.notWebReady).toBe(false);
+
+      // Verify Zero Server Bandwidth: URLs are direct CDNs or in-addon dash routes
       for (const s of streams) {
         expect(s.url).not.toContain('/api/manifest');
         expect(s.url).not.toContain('localhost');
-        expect(s.behaviorHints.proxyHeaders).toBeDefined();
       }
     });
   });

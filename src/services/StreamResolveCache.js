@@ -19,13 +19,30 @@ const NEGATIVE_TTL_MS = 30 * 1000;
 const MAX_ENTRIES = 200;
 const CHANNEL_MATCH_ID = '__channel__'; // evergreen 24/7 keys survive pruneEnded
 
+// behaviorHints are small plain-JSON trees; a tight recursive copy beats V8's
+// generic structuredClone serializer by 5-15x on these shapes, and cloneStream
+// runs per stream on every cache read.
+function _cloneHints(v) {
+  if (Array.isArray(v)) {
+    const out = new Array(v.length);
+    for (let i = 0; i < v.length; i++) out[i] = _cloneHints(v[i]);
+    return out;
+  }
+  if (v !== null && typeof v === 'object') {
+    const out = {};
+    for (const k in v) out[k] = _cloneHints(v[k]);
+    return out;
+  }
+  return v;
+}
+
 function cloneStream(stream) {
   const copy = { ...stream };
   // streams.js changes bingeGroup, notWebReady and proxyHeaders per request.
   // Copy the entire hints tree, including request/response headers, both when
   // storing provider results and when handing them to individual callers.
   if (stream && stream.behaviorHints && typeof stream.behaviorHints === 'object') {
-    copy.behaviorHints = structuredClone(stream.behaviorHints);
+    copy.behaviorHints = _cloneHints(stream.behaviorHints);
   }
   return copy;
 }
@@ -100,8 +117,96 @@ class StreamResolveCache {
     this.statsCounters = { hits: 0, misses: 0, negativeHits: 0, evictions: 0 };
   }
 
+  _extractTokenRemainingMs(url) {
+    if (!url || typeof url !== 'string') return 0;
+    try {
+      let target = url;
+      if (target.includes('/api/manifest?') || target.includes('/api/manifest.m3u8?')) {
+        const u = new URL(target, 'http://localhost');
+        target = u.searchParams.get('url') || target;
+      }
+      const u = new URL(target, 'http://localhost');
+      const e = u.searchParams.get('e') || u.searchParams.get('exp') || u.searchParams.get('expires');
+      if (e && /^\d+$/.test(e)) {
+        const exp = parseInt(e, 10);
+        const expMs = exp < 1e11 ? exp * 1000 : exp;
+        return expMs - Date.now();
+      }
+      const token = u.searchParams.get('token');
+      if (token) {
+        const b64 = token.split('.')[0];
+        const decoded = Buffer.from(b64, 'base64').toString('utf8');
+        const parts = decoded.split('|');
+        if (parts.length >= 3 && /^\d+$/.test(parts[parts.length - 1])) {
+          const exp = parseInt(parts[parts.length - 1], 10);
+          const expMs = exp < 1e11 ? exp * 1000 : exp;
+          return expMs - Date.now();
+        }
+      }
+    } catch (_) {}
+    return 0;
+  }
+
   _ttlFor(sourceName) {
-    return this.ttl.get(sourceName) || this.defaultTtlMs;
+    const val = this.ttl.get(sourceName) || this.defaultTtlMs;
+    if (sourceName === 'daddylive') {
+      return Math.min(val, 150 * 1000);
+    }
+    return val;
+  }
+
+  /**
+   * Canonical cache key constructor shared by streams.js, CronService, and resolvers.
+   * Format: key = source:matchId:srcId (+ :streamSource[:streamId] when present).
+   */
+  static resolveKey(src, matchId) {
+    if (!src) return '';
+    const mId = (matchId && typeof matchId === 'object') ? matchId.id : (matchId || src.matchId || '');
+    const subKey = src.streamSource ? ':' + src.streamSource + (src.streamId ? ':' + src.streamId : '') : '';
+    return src.source + ':' + mId + ':' + src.id + subKey;
+  }
+
+  resolveKey(src, matchId) {
+    return StreamResolveCache.resolveKey(src, matchId);
+  }
+
+  /**
+   * O(1) check if a key has a fresh, positive (status === 'ok') entry.
+   * Avoids cloning stream arrays or mutating LRU access order.
+   */
+  has(key, minRemainingMs = 0) {
+    const e = this.entries.get(key);
+    if (!e) return false;
+    const now = Date.now();
+    if (now + minRemainingMs >= e.expiresAt) {
+      if (now >= e.expiresAt) this.entries.delete(key);
+      return false;
+    }
+    return e.status === 'ok';
+  }
+
+  /**
+   * O(1) check if a key is currently resolved (positive 'ok' OR negative 'failed')
+   * and unexpired — prevents duplicate prewarm re-minting of processed sources.
+   */
+  isResolved(key, minRemainingMs = 0) {
+    const e = this.entries.get(key);
+    if (!e) return false;
+    const now = Date.now();
+    if (now + minRemainingMs >= e.expiresAt) {
+      if (now >= e.expiresAt) this.entries.delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Remaining TTL in milliseconds for an entry, or 0 if missing/expired.
+   */
+  getRemainingTtl(key) {
+    const e = this.entries.get(key);
+    if (!e) return 0;
+    return Math.max(0, e.expiresAt - Date.now());
   }
 
   /** Fresh positive entry? Returns streams with isolated behavior hints, else null. */
@@ -257,6 +362,14 @@ class StreamResolveCache {
         if (Array.isArray(streams) && streams.length > 0) {
           status = 'ok';
           ttl = this._ttlFor(sourceName);
+          for (const s of streams) {
+            if (s && s.url) {
+              const rem = this._extractTokenRemainingMs(s.url);
+              if (rem > 0) {
+                ttl = Math.min(ttl, Math.max(30000, rem - 45000));
+              }
+            }
+          }
           this._set(key, sourceName, matchId, streams, 'ok', ttl);
         } else {
           this._set(key, sourceName, matchId, [], 'failed', ttl);
@@ -307,7 +420,8 @@ class StreamResolveCache {
   noteSuccess(key) {
     if (!key) return;
     const sourceName = key.split(':')[0];
-    const next = Math.min(this._ttlFor(sourceName) * 2, this.maxTtlMs);
+    const maxTtl = sourceName === 'daddylive' ? 150 * 1000 : this.maxTtlMs;
+    const next = Math.min(this._ttlFor(sourceName) * 2, maxTtl);
     this.ttl.set(sourceName, next);
     const e = this.entries.get(key);
     if (e && e.status === 'ok') {

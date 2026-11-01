@@ -191,7 +191,7 @@ class StreamSports99Provider extends BaseProvider {
                         title: ch.channel_name || `VIP Stream ${idx + 1}`,
                         url: m3u8Url,
                         behaviorHints: {
-                          notWebReady: true,
+                          notWebReady: false,
                           proxyHeaders: {
                             request: {
                               "Origin": "https://streamsports99.fun",

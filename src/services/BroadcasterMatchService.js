@@ -208,12 +208,18 @@ class BroadcasterMatchService {
     // 3. Whole-word prefix check (e.g. "TNT Sports 1 (HD)" -> starts with "tnt sport 1 ")
     for (const [key, ch] of this._aliasIndex.entries()) {
       if (key.length >= 4 && (norm === key || norm.startsWith(key + ' '))) {
+        // Prevent generic unnumbered placeholders like "sky sport" from matching numbered channels like "sky sport 253"
+        const remainder = norm.slice(key.length).trim();
+        if (/\b\d+\b/.test(remainder) && !/\b\d+\b/.test(key)) continue;
         return ch;
       }
     }
 
     for (const [key, ch] of this._channelIndex.entries()) {
       if (key.length >= 5 && (norm === key || norm.startsWith(key + ' '))) {
+        // Prevent generic unnumbered placeholders like "sky sport" from matching numbered channels like "sky sport 253"
+        const remainder = norm.slice(key.length).trim();
+        if (/\b\d+\b/.test(remainder) && !/\b\d+\b/.test(key)) continue;
         return ch;
       }
     }

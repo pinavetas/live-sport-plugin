@@ -117,12 +117,9 @@ describe('score is the hero, centred and large', () => {
     expect(svg).toContain('<text x="400"');
   });
 
-  test('a finished/replay match with a score is also a hero', () => {
-    // With real upstream data every score sits on a finished match, so a
-    // live-only hero would never actually be seen.
+  test('a finished/replay match never shows a score to protect from spoilers', () => {
     const hero = heroScore(generateMatchCardSvg({ ...base, status: 'replay', score: '3:1' }));
-    expect(hero).not.toBeNull();
-    expect(hero.text).toBe('3 \u2013 1');
+    expect(hero).toBeNull();
   });
 
   test('the colon becomes an en dash so it reads as a score, not a clock', () => {

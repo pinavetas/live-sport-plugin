@@ -325,9 +325,17 @@ class DamiTvProvider extends BaseProvider {
         console.warn(`[${this.name}] API extraction failed for ${matchId}, falling back to embed chain...`);
       }
 
+      const UA_CHROME131 = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
       const referer = 'https://damitv.st/';
       const origin = 'https://damitv.st';
-      const proxy = (upstream) => `${BASE_URL}/api/manifest?url=${encodeURIComponent(upstream)}&referer=${encodeURIComponent(referer)}&origin=${encodeURIComponent(origin)}`;
+      const proxy = (upstream) => `${BASE_URL}/api/manifest?url=${encodeURIComponent(upstream)}&referer=${encodeURIComponent(referer)}&origin=${encodeURIComponent(origin)}&ua=${encodeURIComponent(UA_CHROME131)}`;
+      const proxyHeaders = {
+        request: {
+          'Referer': referer,
+          'Origin': origin,
+          'User-Agent': UA_CHROME131
+        }
+      };
 
       if (extractData && extractData.success) {
         if (extractData.hlsUrl) {
@@ -336,7 +344,7 @@ class DamiTvProvider extends BaseProvider {
             name: this.name,
             title: matchTitle,
             url: proxy(extractData.hlsUrl),
-            behaviorHints: { notWebReady: true },
+            behaviorHints: { notWebReady: true, proxyHeaders },
             resolution: 'HD'
           });
           if (isTikTokStream) {
@@ -351,7 +359,7 @@ class DamiTvProvider extends BaseProvider {
             name: this.name,
             title: matchTitle,
             url: proxy(extractData.sdUrl),
-            behaviorHints: { notWebReady: true },
+            behaviorHints: { notWebReady: true, proxyHeaders },
             resolution: 'SD'
           });
           if (isTikTokStream) {
@@ -367,7 +375,7 @@ class DamiTvProvider extends BaseProvider {
         try {
           const msRes = await this.proxyFetch('https://damitv.st/data/manual-sources.json?t=' + Date.now(), {
             headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+              'User-Agent': UA_CHROME131,
               'Referer': 'https://damitv.st/'
             },
             timeoutMs: 5000
@@ -381,7 +389,7 @@ class DamiTvProvider extends BaseProvider {
                         name: this.name,
                         title: matchTitle,
                         url: proxy(st.url),
-                        behaviorHints: { notWebReady: true },
+                        behaviorHints: { notWebReady: true, proxyHeaders },
                         resolution: 'HD'
                       }));
                    }

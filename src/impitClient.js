@@ -35,9 +35,7 @@ function getImpit() {
   if (_impitInstance && Date.now() - _impitBornAt > IMPIT_RECYCLE_MS) {
     console.log('[impitClient] recycling impit instance (native memory hygiene)');
     _impitInstance = undefined;
-    if (typeof global.gc === 'function') {
-      try { global.gc(); } catch (_) {}
-    }
+    // global.gc omitted during active traffic to prevent SIGBUS/SIGSEGV race
   }
   if (_impitInstance !== undefined) return _impitInstance;
   try {
@@ -61,9 +59,7 @@ function getProxyImpit(proxyUrl) {
   if (_impitProxyInstance && (_impitProxyUrl !== proxyUrl || Date.now() - _impitProxyBornAt > IMPIT_RECYCLE_MS)) {
     console.log('[impitClient] recycling proxy impit instance');
     _impitProxyInstance = undefined;
-    if (typeof global.gc === 'function') {
-      try { global.gc(); } catch (_) {}
-    }
+    // global.gc omitted during active traffic to prevent SIGBUS/SIGSEGV race
   }
   if (_impitProxyInstance !== undefined) return _impitProxyInstance;
   try {
@@ -79,9 +75,77 @@ function getProxyImpit(proxyUrl) {
   return _impitProxyInstance;
 }
 
+let _impitVanillaInstance;
+let _impitVanillaBornAt = 0;
+
+function getVanillaImpit() {
+  if (_impitVanillaInstance && Date.now() - _impitVanillaBornAt > IMPIT_RECYCLE_MS) {
+    console.log('[impitClient] recycling vanilla impit instance');
+    _impitVanillaInstance = undefined;
+    // global.gc omitted during active traffic to prevent SIGBUS/SIGSEGV race
+  }
+  if (_impitVanillaInstance !== undefined) return _impitVanillaInstance;
+  try {
+    const { Impit } = require('impit');
+    _impitVanillaInstance = new Impit();
+    _impitVanillaBornAt = Date.now();
+    console.log('[impitClient] vanilla impit client loaded successfully.');
+  } catch (e) {
+    _impitVanillaInstance = null;
+    console.warn(`[impitClient] vanilla impit unavailable (${e.message}).`);
+  }
+  return _impitVanillaInstance;
+}
+
 function isDamitvTarget(url) {
   if (!url || typeof url !== 'string') return false;
   return url.includes('damitv.st');
+}
+
+function isDembedTarget(url) {
+  if (!url || typeof url !== 'string') return false;
+  return url.includes('dembed.st');
+}
+
+// -- impit TLS skip list ------------------------------------------------------
+// rustls (impit's TLS) validates certificates against a curated root store and
+// deterministically rejects some sites Node accepts (livetv.sx serves a chain
+// rustls flags as UnknownIssuer on every handshake). That failure cannot
+// change on retry, yet every new request still paid one doomed TLS handshake
+// plus a warn log before the undici fallback succeeded. Remember such hosts
+// for a cooldown window and route them straight to undici; the TTL self-heals
+// when the site rotates its certificate or impit updates its root store.
+const IMPIT_TLS_SKIP_TTL_MS = Math.max(60 * 1000, Number(process.env.IMPIT_TLS_SKIP_TTL_MS) || 30 * 60 * 1000);
+const IMPIT_TLS_SKIP_MAX = 64;
+const _impitTlsSkipHosts = new Map(); // lowercase hostname -> expiresAt
+
+function isTlsValidationError(errMsg) {
+  return errMsg.includes('InvalidCertificate') || errMsg.includes('UnknownIssuer') || errMsg.includes('certificate has expired');
+}
+
+function impitTlsBlocked(url) {
+  let host;
+  try { host = new URL(url).hostname.toLowerCase(); } catch (_) { return false; }
+  const until = _impitTlsSkipHosts.get(host);
+  if (until === undefined) return false;
+  if (Date.now() > until) {
+    _impitTlsSkipHosts.delete(host);
+    return false;
+  }
+  return true;
+}
+
+function recordImpitTlsFailure(url) {
+  let host;
+  try { host = new URL(url).hostname.toLowerCase(); } catch (_) { return; }
+  const isNew = !_impitTlsSkipHosts.has(host);
+  if (isNew && _impitTlsSkipHosts.size >= IMPIT_TLS_SKIP_MAX) {
+    _impitTlsSkipHosts.delete(_impitTlsSkipHosts.keys().next().value);
+  }
+  _impitTlsSkipHosts.set(host, Date.now() + IMPIT_TLS_SKIP_TTL_MS);
+  if (isNew) {
+    console.warn(`[impitClient] impit TLS validation deterministically fails for ${host}; using undici directly for ~${Math.round(IMPIT_TLS_SKIP_TTL_MS / 60000)} min`);
+  }
 }
 
 // -- Shared undici keep-alive agent -------------------------------------------
@@ -103,19 +167,152 @@ try {
 // redirect loop costs about what a single timed-out request costs.
 const MAX_REDIRECT_HOPS = 5;
 
+/**
+ * Read at most maxBytes from a Fetch-style or Undici response body.
+ * The caller can distinguish a complete body from a prefix sample.
+ */
+async function readLimitedBody(body, maxBytes) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new TypeError('maxBytes must be a positive safe integer');
+  }
+  if (!body) return { buffer: Buffer.alloc(0), truncated: false };
+  const chunks = [];
+  let total = 0;
+  let truncated = false;
+
+  if (typeof body.getReader === 'function') {
+    const reader = body.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value || value.byteLength === 0) continue;
+        // Keep a view while inspecting the chunk; copy only the accepted prefix
+        // if one transport chunk is larger than the remaining budget.
+        const chunk = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+        const remaining = maxBytes - total;
+        if (chunk.byteLength > remaining) {
+          if (remaining > 0) chunks.push(Buffer.from(chunk.subarray(0, remaining)));
+          total += Math.max(0, remaining);
+          truncated = true;
+          try { await reader.cancel(); } catch (_) {}
+          break;
+        }
+        chunks.push(chunk);
+        total += chunk.byteLength;
+      }
+    } finally {
+      try { reader.releaseLock(); } catch (_) {}
+    }
+  } else if (body[Symbol.asyncIterator]) {
+    for await (const value of body) {
+      if (!value || value.byteLength === 0) continue;
+      const chunk = Buffer.isBuffer(value)
+        ? value
+        : Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+      const remaining = maxBytes - total;
+      if (chunk.byteLength > remaining) {
+        if (remaining > 0) chunks.push(Buffer.from(chunk.subarray(0, remaining)));
+        total += Math.max(0, remaining);
+        truncated = true;
+        if (typeof body.destroy === 'function') {
+          try { body.destroy(); } catch (_) {}
+        }
+        break;
+      }
+      chunks.push(chunk);
+      total += chunk.byteLength;
+    }
+  } else {
+    throw new TypeError('Response body is not a readable stream');
+  }
+  return { buffer: Buffer.concat(chunks, total), truncated };
+}
+
 // -- Core helper --------------------------------------------------------------
 /**
  * safeFetch - fetches a URL using impit when available, falls back to undici.
  *
  * @param {string} url
- * @param {object} opts   - { method, headers, body, signal, timeoutMs, attempts, proxyUrl }
+ * @param {object} opts   - { method, headers, body, signal, timeoutMs, attempts, proxyUrl, maxBodyBytes }
  *   attempts: how many times to try the impit path before falling back to
- *   undici (default 3). Callers that run their own retry policy should pass 1,
- *   so the two layers do not multiply: three impit tries at a 5s timeout plus
- *   backoff is ~17s inside a call the caller believes is bounded by timeoutMs.
- * @returns {{ ok, status, text: () => string, json: () => object }}
+ *   undici (default 3). timeoutMs is one total budget across headers, body,
+ *   retries, backoff and fallback. External retry policies still add calls;
+ *   those callers should pass attempts: 1 and retain their own outer deadline.
+ * @returns {{ ok, status, bodyTruncated: boolean, text: () => string, json: () => object }}
  */
+// -- Dead-host blocklist -------------------------------------------------------
+// Hosts confirmed dead in production: prewarm / verify / re-mint fetched them
+// on every cycle and they can never answer.
+const DEAD_HOSTS = new Set([
+  'welovetocare.shop',
+  'ksohls.ru',
+]);
+for (const extra of String(process.env.DEAD_HOSTS || '').split(',')) {
+  const host = extra.trim().toLowerCase();
+  if (host) DEAD_HOSTS.add(host);
+}
+
+function isDeadHost(url) {
+  if (!url || typeof url !== 'string') return null;
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    const parts = host.split('.');
+    for (let i = 0; i < parts.length; i++) {
+      const candidate = parts.slice(i).join('.');
+      if (DEAD_HOSTS.has(candidate)) return candidate;
+    }
+  } catch (_) {}
+  return null;
+}
+
 async function safeFetch(url, opts = {}) {
+  const deadMatch = isDeadHost(url);
+  if (deadMatch) {
+    return {
+      ok: false,
+      status: 410,
+      bodyTruncated: false,
+      text: async () => '',
+      json: async () => ({})
+    };
+  }
+
+  const { signal: callerSignal, timeoutMs = 15000 } = opts;
+  const abortReason = () => callerSignal.reason instanceof Error ? callerSignal.reason :
+    Object.assign(new Error('safeFetch aborted'), { name: 'AbortError', cause: callerSignal.reason });
+  if (callerSignal?.aborted) throw abortReason();
+  const controller = new AbortController();
+  const deadlineAt = performance.now() + timeoutMs;
+  let rejectCancelled;
+  const cancelled = new Promise((_, reject) => { rejectCancelled = reject; });
+  const cancel = reason => { controller.abort(reason); rejectCancelled(reason); };
+  const onCallerAbort = () => cancel(abortReason());
+  callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
+  const timer = setTimeout(() => cancel(Object.assign(
+    new Error('safeFetch timeout ' + timeoutMs + 'ms'), { name: 'TimeoutError', code: 'ETIMEDOUT' }
+  )), timeoutMs);
+  try {
+    return await Promise.race([
+      fetchWithinDeadline(url, { ...opts, signal: controller.signal }, deadlineAt),
+      cancelled,
+    ]);
+  } finally {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener('abort', onCallerAbort);
+  }
+}
+
+function abortableDelay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const onAbort = () => { clearTimeout(timer); reject(signal.reason); };
+    const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(); }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function fetchWithinDeadline(url, opts, deadlineAt) {
   const { signal, timeoutMs = 15000, attempts = 3 } = opts;
   // Method, headers and body are reassigned per redirect hop on the undici path
   // (see the redirect loop below), so they cannot be destructured as const.
@@ -124,17 +321,35 @@ async function safeFetch(url, opts = {}) {
   // Selective proxying: route DamiTV requests through local WARP SOCKS5 proxy if configured
   const warpProxyUrl = process.env.WARP_PROXY_URL || process.env.DAMITV_PROXY_URL;
   const isDamitv = isDamitvTarget(url);
+  const isDembed = isDembedTarget(url);
   const proxyUrl = opts.proxyUrl || (isDamitv && warpProxyUrl ? warpProxyUrl : null);
-  const impit = proxyUrl ? getProxyImpit(proxyUrl) : getImpit();
+  // Direct (non-proxied) requests to hosts whose certificate chain impit
+  // deterministically rejects skip the doomed TLS handshake entirely and go
+  // straight to the undici path below.
+  const impit = proxyUrl ? getProxyImpit(proxyUrl)
+    : (isDamitv ? (getVanillaImpit() || getImpit()) : (impitTlsBlocked(url) ? null : getImpit()));
   const maxAttempts = Math.max(1, attempts);
 
   if (isDamitv) {
     const headerKeys = Object.keys(headers || {});
-    const hasUa = headerKeys.some(k => k.toLowerCase() === 'user-agent');
+    const uaKey = headerKeys.find(k => k.toLowerCase() === 'user-agent');
+    const currentUa = uaKey ? headers[uaKey] : '';
+    const hasValidUa = currentUa && !currentUa.includes('Chrome/127');
     const hasRef = headerKeys.some(k => k.toLowerCase() === 'referer');
     headers = {
-      ...(hasUa ? {} : { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' }),
+      ...headers,
+      ...(hasValidUa ? {} : { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' }),
       ...(hasRef ? {} : { 'Referer': 'https://damitv.st/' }),
+    };
+  } else if (isDembed) {
+    const headerKeys = Object.keys(headers || {});
+    const hasUa = headerKeys.some(k => k.toLowerCase() === 'user-agent');
+    const hasRef = headerKeys.some(k => k.toLowerCase() === 'referer');
+    const hasDest = headerKeys.some(k => k.toLowerCase() === 'sec-fetch-dest');
+    headers = {
+      ...(hasUa ? {} : { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' }),
+      ...(hasRef ? {} : { 'Referer': 'https://dlive.sx/' }),
+      ...(hasDest ? {} : { 'Sec-Fetch-Dest': 'iframe', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Site': 'cross-site' }),
       ...headers,
     };
   }
@@ -154,16 +369,15 @@ async function safeFetch(url, opts = {}) {
     let lastErr = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       // The caller gave up (deadline hit upstream); stop burning its budget.
-      if (signal && signal.aborted) throw Object.assign(new Error('aborted before impit attempt'), { name: 'AbortError' });
-      let timer = null;
+      if (signal.aborted) throw signal.reason;
       try {
-        const res = await Promise.race([
-          impit.fetch(url, { method, headers, body }),
-          new Promise((_, rej) => {
-            timer = setTimeout(() => rej(new Error(`impit timeout ${timeoutMs}ms`)), timeoutMs);
-          }),
-        ]);
-        const buf = await res.arrayBuffer();
+        const res = await impit.fetch(url, {
+          method, headers, body, signal,
+          timeout: Math.max(1, Math.ceil(deadlineAt - performance.now())),
+        });
+        const { buffer: buf, truncated: bodyTruncated } = Number.isSafeInteger(opts.maxBodyBytes) && opts.maxBodyBytes > 0
+          ? await readLimitedBody(res.body, opts.maxBodyBytes)
+          : { buffer: await res.arrayBuffer(), truncated: false };
         if (res.status === 400 && url.includes('ok.ru')) {
            throw new Error('ok.ru blocked impit');
         }
@@ -180,9 +394,10 @@ async function safeFetch(url, opts = {}) {
             ok: false,
             status: res.status,
             headers: res.headers,
+            bodyTruncated,
             text: async () => Buffer.from(buf).toString('utf8'),
             json: async () => JSON.parse(Buffer.from(buf).toString('utf8')),
-            arrayBuffer: async () => buf,
+            arrayBuffer: async () => Buffer.isBuffer(buf) ? buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) : buf,
           };
           if (proxyUrl) {
             // Proxied requests must never fall back to undici (which bypasses proxy)
@@ -191,7 +406,8 @@ async function safeFetch(url, opts = {}) {
           console.warn(`[impitClient] impit got 403, trying undici once for: ${url.slice(0, 90)}`);
           try {
             return await undiciPath(method, headers, body, url, signal, timeoutMs);
-          } catch (_) {
+          } catch (err) {
+            if (signal.aborted) throw signal.reason || err;
             return impit403;
           }
         }
@@ -199,15 +415,22 @@ async function safeFetch(url, opts = {}) {
           ok: res.status >= 200 && res.status < 300,
           status: res.status,
           headers: res.headers,
+          bodyTruncated,
           text: async () => Buffer.from(buf).toString('utf8'),
           json: async () => JSON.parse(Buffer.from(buf).toString('utf8')),
-          arrayBuffer: async () => buf,
+          arrayBuffer: async () => Buffer.isBuffer(buf) ? buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) : buf,
         };
       } catch (impitErr) {
+        if (signal.aborted) throw signal.reason || impitErr;
         lastErr = impitErr;
         const errMsg = String(impitErr);
-        if (errMsg.includes('InvalidCertificate') || errMsg.includes('UnknownIssuer') || errMsg.includes('certificate has expired')) {
-           break;
+        if (isTlsValidationError(errMsg)) {
+          // Deterministic failure: the same handshake cannot succeed on retry.
+          // Record the host for direct requests only — a proxied failure may
+          // be the proxy's fault, and the proxied path must never fall back
+          // to undici anyway (it would bypass the proxy).
+          if (!proxyUrl) recordImpitTlsFailure(url);
+          break;
         }
         // If impit failed because of connection refused to loopback (127.0.0.1) or DNS failure,
         // trip the circuit breaker immediately and fall back to undici without further retries.
@@ -216,12 +439,8 @@ async function safeFetch(url, opts = {}) {
           break;
         }
         if (attempt < maxAttempts) {
-           await new Promise(r => setTimeout(r, 800 * attempt));
+           await abortableDelay(800 * attempt, signal);
         }
-      } finally {
-        // Always clear the timeout so a fast response does not leave a pending
-        // timer holding the event loop (timer churn under load).
-        if (timer) clearTimeout(timer);
       }
     }
     if (proxyUrl) {
@@ -256,12 +475,11 @@ async function safeFetch(url, opts = {}) {
   //   - the hop count is bounded, and the timeoutMs budget covers the WHOLE
   //     chain (each hop only gets the time left), so a redirect loop cannot
   //     multiply the caller's deadline.
-  const deadlineAt = Date.now() + timeoutMs;
   let currentUrl = url;
   let res;
   for (let hop = 0; ; hop++) {
-    const remainingMs = deadlineAt - Date.now();
-    if (remainingMs <= 0) throw new Error(`undici timeout ${timeoutMs}ms (redirect chain)`);
+    const remainingMs = Math.ceil(deadlineAt - performance.now());
+    if (remainingMs <= 0) throw Object.assign(new Error(`safeFetch timeout ${timeoutMs}ms (redirect chain)`), { name: 'TimeoutError', code: 'ETIMEDOUT' });
     res = await undiciRequest(currentUrl, {
       method,
       headers,
@@ -301,14 +519,17 @@ async function safeFetch(url, opts = {}) {
     }
     currentUrl = nextUrl.toString();
   }
-  const buf = await res.body.arrayBuffer();
+  const { buffer: buf, truncated: bodyTruncated } = Number.isSafeInteger(opts.maxBodyBytes) && opts.maxBodyBytes > 0
+    ? await readLimitedBody(res.body, opts.maxBodyBytes)
+    : { buffer: await res.body.arrayBuffer(), truncated: false };
   return {
     ok: res.statusCode >= 200 && res.statusCode < 300,
     status: res.statusCode,
     headers: res.headers,
+    bodyTruncated,
     text: async () => Buffer.from(buf).toString('utf8'),
     json: async () => JSON.parse(Buffer.from(buf).toString('utf8')),
-    arrayBuffer: async () => buf,
+    arrayBuffer: async () => Buffer.isBuffer(buf) ? buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) : buf,
   };
   };
 
@@ -322,4 +543,4 @@ function isImpitAvailable() {
   return getImpit() !== null;
 }
 
-module.exports = { safeFetch, isImpitAvailable, getImpit, isDamitvTarget };
+module.exports = { safeFetch, isImpitAvailable, getImpit, isDamitvTarget, isDembedTarget, readLimitedBody };

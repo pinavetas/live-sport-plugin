@@ -821,7 +821,7 @@ function generateMatchCardSvg(spec = {}) {
   const scoreDisplay = isCricket ? scoreText : (scoreBits.length === 2 ? scoreBits[0] + ' \u2013 ' + scoreBits[1] : scoreText);
   // A live fixture's score IS the headline, so it takes the hero slot instead of
   // being reduced to a footnote in the status pill.
-  const scoreHero = !!scoreText && (status === 'live' || status === 'replay');
+  const scoreHero = !!scoreText && status === 'live';
   // League chrome follows the sport identity, but stays bright enough to read
   // on the dark base.
   const leagueAccent = accent;

@@ -839,67 +839,7 @@
         </div>
       </section>
 
-      <!-- AI Replay Parser Studio -->
-      <section class="panel" id="aiParserPanel">
-        <div class="panel-head">
-          <h2>🤖 AI Replay Parser Studio</h2>
-          <p>Generate, test, and mount custom web scrapers on any sports replay website in real time using AI (OpenCode, Freebuff, or OpenAI-compatible models).</p>
-        </div>
-
-        <div class="field">
-          <label for="aiTargetUrl">Replay Website URL</label>
-          <div style="display: flex; gap: 8px;">
-            <input type="url" id="aiTargetUrl" placeholder="https://example-sports-replays.com/football" style="flex: 1;" />
-            <button type="button" id="aiGenerateBtn" class="btn btn-primary" style="white-space: nowrap;">
-              <span id="aiGenerateBtnText">✨ Generar con IA</span>
-            </button>
-          </div>
-          <p class="hint">Enter the archive or listing URL of any sports replay website.</p>
-        </div>
-
-        <!-- Collapsible AI Provider Settings -->
-        <details style="margin-top: 10px; margin-bottom: 12px; font-size: 13px;">
-          <summary style="cursor: pointer; color: var(--muted); font-weight: 600;">⚙️ Configuración del Modelo / Endpoint IA (Opcional)</summary>
-          <div style="padding: 12px; background: rgba(255,255,255,0.03); border-radius: 8px; margin-top: 8px; display: grid; gap: 10px;">
-            <div>
-              <label for="aiBaseUrl" style="font-size: 12px;">Base URL / Endpoint</label>
-              <input type="text" id="aiBaseUrl" placeholder="https://api.openai.com/v1 (o endpoint de Freebuff / OpenCode / Ollama)" />
-            </div>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-              <div>
-                <label for="aiApiKey" style="font-size: 12px;">API Key</label>
-                <input type="password" id="aiApiKey" placeholder="AIza... (Gemini) o sk-... (OpenAI/DeepSeek)" />
-              </div>
-              <div>
-                <label for="aiModel" style="font-size: 12px;">Modelo</label>
-                <input type="text" id="aiModel" placeholder="gemini-3.8-flash / deepseek-chat / qwen2.5" />
-              </div>
-            </div>
-          </div>
-        </details>
-
-        <!-- Preview & Validation Box (hidden initially) -->
-        <div id="aiPreviewBox" style="display: none; padding: 14px; background: rgba(0,255,100,0.04); border: 1px solid rgba(0,255,100,0.25); border-radius: 8px; margin-top: 14px;">
-          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-            <strong id="aiPreviewTitle" style="color: #4ade80;">✓ Parser Validado con Éxito</strong>
-            <button type="button" id="aiSaveBtn" class="btn btn-primary" style="padding: 6px 14px; font-size: 13px;">
-              💾 Activar en Stremio
-            </button>
-          </div>
-          <div id="aiPreviewDetails" style="font-size: 13px; color: var(--muted); margin-bottom: 10px;"></div>
-          <div style="font-size: 12px; font-weight: 700; text-transform: uppercase; margin-bottom: 6px;">Partidos Detectados en Vivo:</div>
-          <ul id="aiPreviewList" style="margin: 0; padding-left: 18px; font-size: 13px; max-height: 160px; overflow-y: auto;"></ul>
-        </div>
-
-        <div id="aiStatusMsg" style="margin-top: 10px; font-size: 13px; display: none;"></div>
-
-        <!-- Active Custom Parsers List -->
-        <div id="activeParsersContainer" style="margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line);">
-          <div style="font-size: 13px; font-weight: 700; margin-bottom: 8px;">📦 Parsers Personalizados Activos:</div>
-          <div id="activeParsersList" style="font-size: 13px; color: var(--muted);">Cargando parsers...</div>
-        </div>
-      </section>
-
+\r
       <!-- 5 · Nuvio Sports Replay Connection -->
       <section class="panel" aria-labelledby="collections-h">
         <div class="panel-head">

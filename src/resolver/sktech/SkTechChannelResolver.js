@@ -8,6 +8,13 @@ const BASE_API_URL = 'https://dk01-64n.pages.dev/';
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+// Precompiled Schwartzian Regexes
+const VS_REGEX = /\b(?:vs|v)\b/i;
+const VERSUS_REGEX = /\bversus\b/i;
+const TEST_DEMO_REGEX = /^test\b|^demo\b|^placeholder\b/i;
+const USA_SPORTS_REGEX = /sport|espn|btn|ncaa|peacock|ppv|nhl|ahl|mlb|nba|nfl|mls|fight/i;
+const USA_NETWORKS_REGEX = /network|premium|news/i;
+
 class SkTechChannelResolver {
   constructor(options = {}) {
     this.baseUrl = options.baseUrl || BASE_API_URL;
@@ -15,6 +22,17 @@ class SkTechChannelResolver {
     this._customCacheTime = new Map();
     this._m3uCache = new Map();
     this._m3uCacheTime = new Map();
+    this._channelsCache = null;
+    this._channelsCacheTime = 0;
+  }
+
+  clearCache() {
+    this._customCache.clear();
+    this._customCacheTime.clear();
+    this._m3uCache.clear();
+    this._m3uCacheTime.clear();
+    this._channelsCache = null;
+    this._channelsCacheTime = 0;
   }
 
   /**
@@ -25,9 +43,16 @@ class SkTechChannelResolver {
    * - Encrypted dynamic M3U playlists (BIG BOSS -> Cricket + Reality)
    * - Multi-channel M3U bouquets (SUN NXT with ClearKey, CRIC HD, USA/UK TV)
    *
+   * @param {Object} [options={}]
+   * @param {boolean} [options.forceRefresh=false]
    * @returns {Promise<Array<Object>>} Normalized 24/7 channel items
    */
-  async fetchChannels() {
+  async fetchChannels(options = {}) {
+    const now = Date.now();
+    if (!options.forceRefresh && this._channelsCache && (now - this._channelsCacheTime < CACHE_TTL_MS)) {
+      return this._channelsCache;
+    }
+
     let rawCategories = [];
     try {
       const url = `${this.baseUrl}categories.txt`;
@@ -45,22 +70,29 @@ class SkTechChannelResolver {
       return [];
     }
 
-    const channels = [];
-
-    for (let i = 0; i < rawCategories.length; i++) {
-      const entry = rawCategories[i];
+    // Parallelize bouquet ingestion using bounded Promise.allSettled
+    const bouquetTasks = rawCategories.map(async (entry, i) => {
       const item = typeof entry.cat === 'string' ? JSON.parse(entry.cat) : entry.cat;
-      if (!item || item.visible === false) continue;
+      if (!item || item.visible === false) return [];
 
       const name = (item.name || `Channel ${i + 1}`).trim();
-      if (/^test$/i.test(name) || /^demo$/i.test(name)) continue;
-      if (/jtv|jiostar|play\s*tata|vzy/i.test(name)) continue;
+      if (/^test$/i.test(name) || /^demo$/i.test(name)) return [];
+      if (/jtv|jiostar|play\s*tata|vzy/i.test(name)) return [];
       const logo = item.logo || '';
       const type = item.type || 'm3u';
       const api = item.api || '';
 
       // Skip public iptv-org country bouquets and dead FAST servers to eliminate clutter and timeouts
-      if (api.includes('iptv-org.github.io') || api.includes('apsattv.com')) continue;
+      if (api.includes('iptv-org.github.io') || api.includes('apsattv.com')) return [];
+
+      // Skip known dead/dummy worker endpoints that host zero playable streams
+      if (api.includes('thanks-to-veer.saqlainhaider8198.workers.dev') ||
+          api.includes('dehkho24h.alpha-circuit.workers.dev') ||
+          api.includes('cloud-hatchh.workers.dev') ||
+          api.includes('data-vortex.workers.dev') ||
+          api.includes('dishtv.m3u')) return [];
+
+      const categoryChannels = [];
 
       // ────────────────────────────────────────────────────────────────────────
       // Tier 1: Custom channel group definitions (channels/<id>.txt)
@@ -75,10 +107,10 @@ class SkTechChannelResolver {
             for (let j = 0; j < subChannels.length; j++) {
               const sub = subChannels[j];
               const subTitle = (sub.title || '').trim();
-              if (/^test\b|^demo\b|^placeholder\b/i.test(subTitle)) continue;
+              if (TEST_DEMO_REGEX.test(subTitle)) continue;
               if (/test/i.test(sub.links || '')) continue;
-              if (/\b(?:vs|v)\b/i.test(subTitle) && !/\bversus\b/i.test(subTitle)) continue;
-              channels.push({
+              if (VS_REGEX.test(subTitle) && !VERSUS_REGEX.test(subTitle)) continue;
+              categoryChannels.push({
                 id: `sktech_ch_cust_${i}_${j}`,
                 title: sub.title || `${name} - ${j + 1}`,
                 category: 'networks',
@@ -116,9 +148,9 @@ class SkTechChannelResolver {
               const otherClean = [];
               for (const sub of subChannels) {
                 const grp = (sub.group || '').toLowerCase();
-                if (/sport|espn|btn|ncaa|peacock|ppv|nhl|ahl|mlb|nba|nfl|mls|fight/i.test(grp)) {
+                if (USA_SPORTS_REGEX.test(grp)) {
                   sports.push(sub);
-                } else if (/network|premium|news/i.test(grp)) {
+                } else if (USA_NETWORKS_REGEX.test(grp)) {
                   networks.push(sub);
                 } else {
                   otherClean.push(sub);
@@ -132,17 +164,17 @@ class SkTechChannelResolver {
             for (let j = 0; j < selectedChannels.length; j++) {
               const sub = selectedChannels[j];
               if (sub.drmScheme || (sub.url && sub.url.includes('.mpd'))) continue;
-              if (/\b(?:vs|v)\b/i.test(sub.title || '') && !/\bversus\b/i.test(sub.title || '')) continue;
+              if (VS_REGEX.test(sub.title || '') && !VERSUS_REGEX.test(sub.title || '')) continue;
               let channelGroup = sub.group || defaultGroup;
               if (defaultGroup === 'USA TV') {
-                if (/sport|espn|btn|ncaa|peacock|ppv|nhl|ahl|mlb|nba|nfl|mls|fight/i.test(sub.group || '')) {
+                if (USA_SPORTS_REGEX.test(sub.group || '')) {
                   channelGroup = 'Sports Channels';
                 } else {
                   channelGroup = 'USA TV';
                 }
               }
 
-              channels.push({
+              categoryChannels.push({
                 id: `sktech_ch_m3u_${i}_${j}`,
                 title: sub.title,
                 category: 'networks',
@@ -161,8 +193,20 @@ class SkTechChannelResolver {
           }
         } catch (_) {}
       }
+
+      return categoryChannels;
+    });
+
+    const results = await Promise.allSettled(bouquetTasks);
+    const channels = [];
+    for (const res of results) {
+      if (res.status === 'fulfilled' && Array.isArray(res.value)) {
+        channels.push(...res.value);
+      }
     }
 
+    this._channelsCache = channels;
+    this._channelsCacheTime = now;
     return channels;
   }
 

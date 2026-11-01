@@ -284,6 +284,32 @@ function streamFormatTier(stream) {
 }
 
 /**
+ * Cluster reliability tier for Vavoo feeds:
+ * 6: Server C (.c cloud cluster)
+ * 5: Server S (.s direct satellite/origin cluster)
+ * 4: Server B (.b)
+ * 3: HEVC
+ * 2: RAW
+ * 1: Backup
+ */
+function getVavooClusterRank(stream) {
+  if (!stream) return 0;
+  const isVavoo = stream._source === 'vavoo' ||
+    stream.cluster !== undefined ||
+    stream.serverCluster !== undefined ||
+    /\bvavoo\b/i.test(`${stream.name || ''} ${stream.title || ''}`);
+  if (!isVavoo) return 0;
+  const cluster = (stream.cluster || stream.serverCluster || stream.title || '').toLowerCase();
+  if (cluster.includes('backup') || stream.isBackup) return 1;
+  if (cluster.includes('raw')) return 2;
+  if (cluster.includes('hevc') || cluster.includes('h265')) return 3;
+  if (cluster.includes('server b') || cluster === 'b' || /\.b\b/.test(cluster)) return 4;
+  if (cluster.includes('server s') || cluster === 's' || /\.s\b/.test(cluster)) return 5;
+  if (cluster.includes('server c') || cluster === 'c' || /\.c\b/.test(cluster)) return 6;
+  return 3.5;
+}
+
+/**
  * The comparator handleStream applies to its assembled stream list.
  * `priorities` is the parsed list; pass parseLanguagePriority(config).
  *
@@ -293,9 +319,10 @@ function streamFormatTier(stream) {
  *   3. Feed type: Standard/current feed before backup feed
  *   4. Timeshift: Current feed before timeshift feed (+1 / +2)
  *   5. Resolution / Quality tier: 4K > 1080p60 > 1080p > 720p > HD > SD
- *   6. Format tier: plain HLS before DASH DRM
- *   7. CDN tier: clean direct CDN before cloaked/worker streams
- *   8. rankScore = score*0.8 + speedScore*0.2
+ *   6. Vavoo cluster reliability tier: Server C > Server B > HEVC/RAW > Backup
+ *   7. Format tier: plain HLS before DASH DRM
+ *   8. CDN tier: clean direct CDN before cloaked/worker streams
+ *   9. rankScore = score*0.8 + speedScore*0.2
  */
 function compareStreams(a, b, priorities) {
   try {
@@ -321,6 +348,16 @@ function compareStreams(a, b, priorities) {
     // Prefer highest quality / resolution
     const qualityDelta = getResolutionRank(b) - getResolutionRank(a);
     if (qualityDelta) return qualityDelta;
+
+    // Cluster reliability tier for Vavoo feeds:
+    // Only compare cluster reliability when BOTH feeds are Vavoo streams.
+    // 1080p Server C (.c cloud cluster) on top, followed by 1080p Server B (.b), HEVC/RAW, and Backup at bottom
+    const aCluster = getVavooClusterRank(a);
+    const bCluster = getVavooClusterRank(b);
+    if (aCluster > 0 && bCluster > 0) {
+      const clusterDelta = bCluster - aCluster;
+      if (clusterDelta) return clusterDelta;
+    }
 
     const formatDelta = streamFormatTier(a) - streamFormatTier(b);
     if (formatDelta) return formatDelta;
@@ -351,6 +388,7 @@ module.exports = {
   streamRankScore,
   streamFormatTier,
   getResolutionRank,
+  getVavooClusterRank,
   compareStreams,
   // Exported for tests: the fold is the single place the matching semantics of
   // every alias lookup are defined.

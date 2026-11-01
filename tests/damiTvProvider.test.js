@@ -444,6 +444,10 @@ describe('DamiTvProvider.resolveStream — proxied direct streams', () => {
     expect(q.get('url')).toBe(EXTRACT_OK.hlsUrl);
     expect(q.get('referer')).toBe('https://damitv.st/');
     expect(q.get('origin')).toBe('https://damitv.st');
+    expect(q.get('ua')).toContain('Chrome/131');
+    expect(streams[0].behaviorHints.proxyHeaders.request['User-Agent']).toContain('Chrome/131');
+    expect(streams[0].behaviorHints.proxyHeaders.request['Referer']).toBe('https://damitv.st/');
+    expect(streams[0].behaviorHints.proxyHeaders.request['Origin']).toBe('https://damitv.st');
   });
 
   test('titles carry no parenthesised suffix that would read as a channel name', async () => {

@@ -1,4 +1,5 @@
 const cron = require('node-cron');
+const StreamResolveCache = require('../services/StreamResolveCache');
 
 // Catalog stale-while-revalidate window: once the cache is older than this,
 // the next catalog/meta request triggers a background re-sync (see ensureFresh).
@@ -193,11 +194,20 @@ class CronService {
   async prewarmPopular() {
     try {
       const PREWARM_MAX = Number(process.env.PREWARM_MAX_MATCHES || 12);
+      if (PREWARM_MAX <= 0) return; // master switch: 0 disables every prewarm path
       const { isMatchLive, isReplayMatch } = require('../catalog');
       const { prewarmMatch, prewarmSkipProvidersSet } = require('../streams');
       const resolveCache = this.streamResolveCache;
       const skip = prewarmSkipProvidersSet();
-      const matches = this.cacheService ? this.cacheService.getMatches() : [];
+      // Filtering/sorting below only reads, so the defensive deep clone of
+      // getMatches() is pure GC churn on this 3-minute tick. Use the internal
+      // read-only array and slice() so the in-place sort reorders our copy,
+      // not the master catalog. Only the matches actually prewarmed get
+      // cloned (in the loop below) since resolve paths may mutate them.
+      const roMatches = this.cacheService
+        ? (this.cacheService.getMatchesReadOnly ? this.cacheService.getMatchesReadOnly() : this.cacheService.getMatches())
+        : [];
+      const matches = Array.isArray(roMatches) ? roMatches.slice() : roMatches;
 
       const live = matches.filter((m) => {
         if (!m || !m.sources || m.sources.length === 0) return false;
@@ -228,9 +238,9 @@ class CronService {
         if (resolveCache) {
           const prioritySources = m.sources.filter(s => ['daddylive', 'ppvst'].includes(s.source) && !skip.has(String(s.source || '').toLowerCase()));
           if (prioritySources.length > 0) {
-            warm = prioritySources.every(s => resolveCache.get(`${s.source}:${m.id}:${s.id}`));
+            warm = prioritySources.every(s => resolveCache.isResolved(StreamResolveCache.resolveKey(s, m.id)));
           } else {
-            warm = m.sources.some((s) => !skip.has(String(s.source || '').toLowerCase()) && resolveCache.get(`${s.source}:${m.id}:${s.id}`));
+            warm = m.sources.some((s) => !skip.has(String(s.source || '').toLowerCase()) && resolveCache.isResolved(StreamResolveCache.resolveKey(s, m.id)));
           }
         }
         if (!warm) todo.push(m);
@@ -242,7 +252,10 @@ class CronService {
       // (Heavy embed-family sources are excluded upstream via
       // PREWARM_SKIP_PROVIDERS in prewarmMatch — see streams.js.)
       for (const m of todo) {
-        await prewarmMatch(m, null, Number.MAX_SAFE_INTEGER).catch(() => {});
+        // Deep-clone only the handful of selected matches (plain JSON shapes;
+        // see CacheService._cloneMatch) — resolve paths may mutate sources.
+        const clone = JSON.parse(JSON.stringify(m));
+        await prewarmMatch(clone, null, Number.MAX_SAFE_INTEGER).catch(() => {});
       }
     } catch (err) {
       console.error('[CronService] Prewarm failed:', err.message);

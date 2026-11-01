@@ -79,12 +79,9 @@ describe('DaddyLiveProvider — Referer comes from the iframe-domain registry', 
     expect(q.origin).toBe('https://assetrage.net');
     expect(q.referer).not.toBe(IFRAME_REFERER);
 
-    // The query string and the behaviour hints carry the same pair: the CDN sees
-    // the query on the manifest request and the header on every segment request.
-    expect(stream.behaviorHints.proxyHeaders.request.Referer).toBe(REGISTRY_REFERER);
-    expect(stream.behaviorHints.proxyHeaders.request.Origin).toBe('https://assetrage.net');
-    expect(q.referer).toBe(stream.behaviorHints.proxyHeaders.request.Referer);
-    expect(q.origin).toBe(stream.behaviorHints.proxyHeaders.request.Origin);
+    // Manifest proxy stream is web-ready (notWebReady: false) with no redundant proxyHeaders
+    expect(stream.behaviorHints.notWebReady).toBe(false);
+    expect(stream.behaviorHints.proxyHeaders).toBeUndefined();
 
     // A registry-known terminal host is taken as final, so the folder scan stops
     // there instead of walking the rest of the matrix (one player + one embed).
@@ -104,7 +101,8 @@ describe('DaddyLiveProvider — Referer comes from the iframe-domain registry', 
     // Referer would still be the wrong family.
     expect(q.referer).toBe(REGISTRY_REFERER);
     expect(q.referer).not.toBe(KNOWN_WRAPPER_REFERER);
-    expect(streams[0].behaviorHints.proxyHeaders.request.Referer).toBe(REGISTRY_REFERER);
+    expect(streams[0].behaviorHints.notWebReady).toBe(false);
+    expect(streams[0].behaviorHints.proxyHeaders).toBeUndefined();
   });
 
   test('falls back to the iframe-origin Referer when the registry does not know the terminal host', async () => {
@@ -119,8 +117,8 @@ describe('DaddyLiveProvider — Referer comes from the iframe-domain registry', 
     expect(q.target).toBe(UNKNOWN_MANIFEST);
     expect(q.referer).toBe(IFRAME_REFERER);
     expect(q.origin).toBe('https://tiestep.top');
-    expect(stream.behaviorHints.proxyHeaders.request.Referer).toBe(IFRAME_REFERER);
-    expect(q.referer).toBe(stream.behaviorHints.proxyHeaders.request.Referer);
+    expect(stream.behaviorHints.notWebReady).toBe(false);
+    expect(stream.behaviorHints.proxyHeaders).toBeUndefined();
 
     // The unknown case is held as a fallback rather than scanning every
     // remaining folder/mirror, so resolution stays bounded.

@@ -129,11 +129,40 @@ async function harvestAll() {
   for (const item of allRawItems) {
     if (!item || !item.url || !item.name) continue;
 
-    const group = item.group || 'Live TV';
-    const cleanName = cleanChannelName(item.name);
-    if (!cleanName) continue;
+    // Filter out ephemeral event-only pop-up feeds while preserving continuous 24/7 channels on Server S
+    if (/live during events only/i.test(item.name) || /\(event only\)/i.test(item.name)) {
+      continue;
+    }
 
-    const slug = makeChannelSlug(cleanName, group);
+    const group = item.group || 'Live TV';
+    const cleanBaseName = cleanChannelName(item.name);
+    if (!cleanBaseName) continue;
+
+    // Preserve multi-cluster mirrors (.b, .c, .s, HEVC, RAW, Backup) as separate entries
+    let clusterSuffix = 'main';
+    const isB = /\.b\b|server\s*b/i.test(item.name);
+    const isC = /\.c\b|server\s*c/i.test(item.name);
+    const isS = !isC && !isB && (/\.s\b|server\s*s/i.test(item.name));
+    const isBkp = /\b(?:backup(?:\s*\d+)?)\b/i.test(item.name);
+    const isHvc = /\bhevc\b|\bh265\b/i.test(item.name);
+    const isRw = /\braw\b/i.test(item.name);
+
+    if (isBkp) {
+      clusterSuffix = isC ? 'c-backup' : (isS ? 's-backup' : (isB ? 'b-backup' : 'backup'));
+    } else if (isHvc) {
+      clusterSuffix = isC ? 'c-hevc' : (isS ? 's-hevc' : (isB ? 'b-hevc' : 'hevc'));
+    } else if (isRw) {
+      clusterSuffix = isC ? 'c-raw' : (isS ? 's-raw' : (isB ? 'b-raw' : 'raw'));
+    } else if (isC) {
+      clusterSuffix = 'c';
+    } else if (isS) {
+      clusterSuffix = 's';
+    } else if (isB) {
+      clusterSuffix = 'b';
+    }
+
+    const baseSlug = makeChannelSlug(cleanBaseName, group);
+    const slug = `${baseSlug}-${clusterSuffix}`;
     const is4K = /4k|uhd/i.test(item.name) || /4k|uhd/i.test(group);
     const groupDef = GROUPS.find(g => g.group.toLowerCase() === group.toLowerCase());
     const language = groupDef ? groupDef.lang : 'en';
@@ -141,7 +170,7 @@ async function harvestAll() {
     if (!channelMap.has(slug)) {
       channelMap.set(slug, {
         id: slug,
-        name: cleanName,
+        name: item.name.replace(/\s*\[live during events only\]\s*/i, '').trim(),
         group,
         language,
         is4k: is4K,
@@ -149,12 +178,8 @@ async function harvestAll() {
         logo: item.logo || undefined
       });
     } else {
-      // If channel is already mapped, prioritize direct .s or non-backup feeds
       const existing = channelMap.get(slug);
-      if (item.name.includes('.s') && !existing.name.includes('.s')) {
-        existing.vavooUrl = item.url;
-        if (item.logo) existing.logo = item.logo;
-      }
+      if (item.logo && !existing.logo) existing.logo = item.logo;
     }
   }
 

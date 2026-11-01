@@ -4,6 +4,24 @@ const path = require('path');
 
 const CACHE_SCHEMA_VERSION = 4;
 
+// behaviorHints subtrees are plain JSON (provider literals or disk-cache
+// parses) at most a few levels deep. V8's generic structuredClone serializer
+// costs 5-15x a tight recursive copy on these shapes, and _cloneMatch runs it
+// for every source of every match on each full-catalog clone.
+function _cloneHints(v) {
+  if (Array.isArray(v)) {
+    const out = new Array(v.length);
+    for (let i = 0; i < v.length; i++) out[i] = _cloneHints(v[i]);
+    return out;
+  }
+  if (v !== null && typeof v === 'object') {
+    const out = {};
+    for (const k in v) out[k] = _cloneHints(v[k]);
+    return out;
+  }
+  return v;
+}
+
 function diskSignature(stats) {
   // Atomic replacements can share a timestamp or move it backwards. Compare
   // file identity and metadata rather than requiring a newer wall-clock mtime.
@@ -59,7 +77,7 @@ class CacheService {
     if (Array.isArray(m.aliasIds)) c.aliasIds = [...m.aliasIds];
     if (Array.isArray(m.sources)) {
       c.sources = m.sources.map((s) => (s && typeof s === 'object'
-        ? { ...s, behaviorHints: s.behaviorHints ? structuredClone(s.behaviorHints) : s.behaviorHints }
+        ? { ...s, behaviorHints: s.behaviorHints ? _cloneHints(s.behaviorHints) : s.behaviorHints }
         : s));
     }
     if (m.team1 && typeof m.team1 === 'object') c.team1 = { ...m.team1 };
@@ -121,7 +139,11 @@ class CacheService {
           return false;
         }
 
-        this.cachedMatches = this._clone(parsed.matches);
+        // The parsed tree is freshly allocated by JSON.parse above and no other
+        // reference holds it, so adopting it (minus null rows, matching the old
+        // _clone's .filter(Boolean)) is observationally identical and skips one
+        // full-catalog clone per disk reload.
+        this.cachedMatches = parsed.matches.filter(Boolean);
         this.lastFetchTime = parsed.timestamp || stats.mtimeMs;
         this.lastDiskMtime = stats.mtimeMs;
         this._hasDiskSnapshot = true;

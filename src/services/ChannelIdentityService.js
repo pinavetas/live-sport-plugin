@@ -235,11 +235,16 @@ class ChannelIdentityService {
     // Strip bracketed metadata: (Backup), [Backup 1], (4K), (HD), (+1), (UK), (France), (EN), (RAW), (MATCH TIME), (LOCAL), etc.
     clean = clean.replace(/\[\s*(?:backup(?:\s*\d+)?|bkp|alternate|alt)\s*\]/gi, ' ');
     clean = clean.replace(/\(\s*(?:backup(?:\s*\d+)?|bkp|alternate|alt)\s*\)/gi, ' ');
-    clean = clean.replace(/\[\s*(?:4k|uhd|fhd|1080p|720p|hd|sd|hevc|h\.?26[45]|50fps|60fps|raw|feed|local|match\s*time)\s*\]/gi, ' ');
-    clean = clean.replace(/\(\s*(?:4k|uhd|fhd|1080p|720p|hd|sd|hevc|h\.?26[45]|50fps|60fps|raw|feed|local|match\s*time)\s*\)/gi, ' ');
+    clean = clean.replace(/\[\s*(?:4k|uhd|fhd|1080p|720p|hd|sd|hevc|h\.?26[45]|50fps|60fps|raw|feed|local|match\s*time|live\s*during\s*events\s*only|sat)\s*\]/gi, ' ');
+    clean = clean.replace(/\(\s*(?:4k|uhd|fhd|1080p|720p|hd|sd|hevc|h\.?26[45]|50fps|60fps|raw|feed|local|match\s*time|live\s*during\s*events\s*only|sat)\s*\)/gi, ' ');
+    clean = clean.replace(/\[\s*\]/g, ' ');
+    clean = clean.replace(/\(\s*\)/g, ' ');
     clean = clean.replace(/\(\s*(?:\+\s*\d{1,2}|\btime\s*shift\b|\bdelay\b)\s*\)/gi, ' ');
     clean = clean.replace(/\(\s*(?:uk|usa?|united\s*kingdom|united\s*states|france|germany|deutschland|italy|italia|spain|espana|portugal|poland|polska|netherlands|turkey|turkiye|albania|arabic|arab|malaysia|canada|australia|new\s*zealand|ireland|austria|switzerland|india|south\s*africa|latam|balkan|argentina|chile|brazil|de|nz|ar|cl|br|pt|es|it|fr|nl|pl|tr)\s*\)/gi, ' ');
     clean = clean.replace(/\(\s*(?:en|eng|english|fr|fra|french|de|deu|ger|german|es|spa|spanish|it|ita|italian|pt|por|portuguese|pl|pol|polish|tr|tur|turkish|ar|ara|arabic|hi|hin|hindi|ru|rus|russian)\s*\)/gi, ' ');
+
+    // Strip server/cluster suffix (e.g. .b, .c, .s, .a, etc.)
+    clean = clean.replace(/\s*\.[a-z]\b/gi, ' ');
 
     // Strip quality, feed, and stream modifiers outside brackets
     clean = clean.replace(/\b(?:4k|uhd|fhd|full\s*hd|1080p|720p|hd|sd|hevc|h\.?26[45]|50fps|60fps|raw|feed)\b/gi, ' ');

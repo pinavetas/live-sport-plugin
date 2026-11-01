@@ -4,6 +4,7 @@ const BaseProvider = require('./BaseProvider');
 const MatchEntity = require('../domain/MatchEntity');
 const StreamEntity = require('../domain/StreamEntity');
 const ChannelIdentityService = require('../services/ChannelIdentityService');
+const { getRequestBaseUrl } = require('../config');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -240,8 +241,10 @@ function getVavooCatalog() {
 function getVavooChannelKey(channel) {
   const name = String(channel && channel.name || '')
     .toLowerCase()
+    .replace(/\s*\.[a-z]\b/g, ' ')
     .replace(/\b(?:4k|uhd|fhd|full\s*hd|hd|sd)\b/g, ' ')
-    .replace(/\(\s*backup\s*\d*\s*\)/g, ' ')
+    .replace(/\(\s*backup(?:\s*\d+)?\s*\)/g, ' ')
+    .replace(/\[[^\]]*\]/g, ' ')
     .replace(/[^a-z0-9]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -490,19 +493,36 @@ class VavooProvider extends BaseProvider {
             continue;
           }
 
-          if (!resolveRes.ok) {
+          let j = null;
+          if (resolveRes.ok) {
+            try { j = await resolveRes.json(); } catch (_) {}
+            if (Array.isArray(j) && j[0]?.url) {
+              streamUrl = String(j[0].url);
+            } else if (j?.url) {
+              streamUrl = String(j.url);
+            } else if (j?.data?.url) {
+              streamUrl = String(j.data.url);
+            }
+          } else {
+            try { j = await resolveRes.json(); } catch (_) {}
+          }
+
+          const isNotFound = resolveRes.status === 404 || resolveRes.status === 410;
+          const hasNotFoundErr = j && typeof j.error === 'string' && /not found|no resolver/i.test(j.error);
+
+          // Dynamic Real-Time Fallback: if play ID fails with 404/410 or "Not found" error, query catalog
+          if (!streamUrl && (isNotFound || hasNotFoundErr)) {
+            console.warn(`[${this.name}] Play ID failed for "${matchTitle}" (${resolveRes.status}${j?.error ? ': ' + j.error : ''}), attempting catalog fallback...`);
+            const fallbackUrl = await this._fallbackResolveFromCatalog(matchTitle, src, baseSite, sig);
+            if (fallbackUrl) {
+              streamUrl = fallbackUrl;
+            }
+          }
+
+          if (!streamUrl && !resolveRes.ok) {
             lastErr = new Error(`HTTP ${resolveRes.status} on ${baseSite}`);
             console.warn(`[${this.name}] Resolve failed on ${baseSite} for "${matchTitle}": HTTP ${resolveRes.status}`);
             continue;
-          }
-
-          const j = await resolveRes.json();
-          if (Array.isArray(j) && j[0]?.url) {
-            streamUrl = String(j[0].url);
-          } else if (j?.url) {
-            streamUrl = String(j.url);
-          } else if (j?.data?.url) {
-            streamUrl = String(j.data.url);
           }
 
           if (streamUrl) {
@@ -531,14 +551,82 @@ class VavooProvider extends BaseProvider {
         .replace(/\s*[-–—]{1,3}\s*(?:Poland|Germany|UK|USA?|France|Spain|Italy|Portugal|Turkey|Netherlands|Canada|Australia|Austria|Switzerland|India|Argentina|Chile|Brazil|[A-Za-z]{2,})\s*$/i, '')
         .replace(/\s*[-–—]{2,}\s*/g, ' ')
         .replace(/\s*[–—]\s*/g, ' ')
+        .replace(/\s*\.[a-z]\b/gi, ' ')
+        .replace(/\s*\[live during events only\]\s*/gi, ' ')
+        .replace(/\s*[\[\(]\s*(?:backup(?:\s*\d+)?|bkp|alternate|alt)\s*[\]\)]/gi, ' ')
+        .replace(/\b(?:backup(?:\s*\d+)?|bkp)\b/gi, ' ')
+        .replace(/\b(?:hevc|h\.?265)\b/gi, ' ')
+        .replace(/\s*\[\s*raw\s*\]/gi, ' ')
+        .replace(/\braw\b/gi, ' ')
+        .replace(/\s*\[\s*sat\s*\]/gi, ' ')
+        .replace(/\s+/g, ' ')
         .trim() || rawChannelName;
+
+      const isBackup = Boolean(src.isBackup || /\bbackup\b|\(backup\)/i.test(rawChannelName));
+      const isHevc = Boolean(/\b(?:hevc|h\.?265)\b/i.test(rawChannelName));
+      const isRaw = Boolean(/\braw\b/i.test(rawChannelName));
+      const isServerC = Boolean(/\.c\b|server\s*c/i.test(rawChannelName));
+      const isServerS = Boolean(!isServerC && (/\.s\b|server\s*s/i.test(rawChannelName)));
+      const isServerB = Boolean(!isServerC && !isServerS && (/\.b\b|server\s*b/i.test(rawChannelName)));
+
+      let serverTag = '';
+      let clusterKey = 'main';
+      let clusterScore = 85;
+
+      if (isBackup) {
+        if (isServerC) {
+          serverTag = '[Server C - Backup]';
+          clusterKey = 'c-backup';
+          clusterScore = 72;
+        } else if (isServerS) {
+          serverTag = '[Server S - Backup]';
+          clusterKey = 's-backup';
+          clusterScore = 71;
+        } else {
+          serverTag = '[Backup]';
+          clusterKey = 'backup';
+          clusterScore = 70;
+        }
+      } else if (isHevc) {
+        serverTag = '[HEVC]';
+        clusterKey = 'hevc';
+        clusterScore = 80;
+      } else if (isRaw) {
+        serverTag = '[RAW]';
+        clusterKey = 'raw';
+        clusterScore = 79;
+      } else if (isServerC) {
+        serverTag = `[Server C - ${resolution}]`;
+        clusterKey = 'c';
+        clusterScore = is4K ? 96 : 90;
+      } else if (isServerS) {
+        serverTag = `[Server S - ${resolution}]`;
+        clusterKey = 's';
+        clusterScore = is4K ? 95 : 88;
+      } else if (isServerB) {
+        serverTag = `[Server B - ${resolution}]`;
+        clusterKey = 'b';
+        clusterScore = is4K ? 94 : 85;
+      } else {
+        serverTag = `[${resolution}]`;
+        clusterKey = 'main';
+        clusterScore = is4K ? 95 : 85;
+      }
+
+      const BASE_URL = getRequestBaseUrl();
+      const proxyUrl = streamUrl.includes('/api/manifest?url=')
+        ? streamUrl
+        : `${BASE_URL}/api/manifest?url=${encodeURIComponent(streamUrl)}&referer=${encodeURIComponent('https://vavoo.to/')}&origin=${encodeURIComponent('https://vavoo.to')}`;
 
       return [new StreamEntity({
         name: 'Vavoo',
-        title: `Vavoo (${channelLabel}) [${resolution}]`,
-        url: streamUrl,
+        title: `Vavoo (${channelLabel}) ${serverTag}`,
+        url: proxyUrl,
         resolution: is4K ? '4K' : '1080p',
-        score: is4K ? 95 : 85,
+        score: clusterScore,
+        cluster: clusterKey,
+        serverCluster: serverTag.replace(/^\[|\]$/g, ''),
+        _streamSource: isServerC ? 'Server C' : (isServerS ? 'Server S' : (isServerB ? 'Server B' : (isHevc ? 'HEVC' : (isRaw ? 'RAW' : (isBackup ? 'Backup' : undefined))))),
         language: src.language || undefined,
         channelName: channelLabel,
         canonicalChannel: src.canonicalChannel || channelLabel,
@@ -547,6 +635,7 @@ class VavooProvider extends BaseProvider {
         countryFlag: src.countryFlag,
         group: src.group,
         is4k: is4K,
+        isBackup,
         behaviorHints: {
           notWebReady: true,
           proxyHeaders: {
@@ -561,6 +650,155 @@ class VavooProvider extends BaseProvider {
       console.warn(`[${this.name}] Stream resolution failed for "${matchTitle}":`, err.message);
       return [];
     }
+  }
+
+  /**
+   * Real-time dynamic fallback query against mediahubmx-catalog.json
+   * when static play ID returns 404/410/Not found.
+   */
+  async _fallbackResolveFromCatalog(matchTitle, src = {}, baseSite, sig) {
+    try {
+      const channelName = src.canonicalChannel || src.channelName || matchTitle || '';
+      const cleanSearch = channelName
+        .replace(/\s*[-–—].*$/, '')
+        .replace(/\s*\.[a-z]\b/gi, '')
+        .replace(/\[[^\]]*\]/g, '')
+        .replace(/\([^)]*\)/g, '')
+        .replace(/\b(?:4k|uhd|fhd|1080p|720p|hd|sd|hevc|raw|backup)\b/gi, '')
+        .trim();
+
+      if (!cleanSearch) return null;
+
+      const catalogEndpoint = `${baseSite}/mediahubmx-catalog.json`;
+      const catalogRes = await this.proxyFetch(catalogEndpoint, {
+        method: 'POST',
+        headers: {
+          'user-agent': 'MediaHubMX/2',
+          'accept': 'application/json',
+          'content-type': 'application/json; charset=utf-8',
+          'mediahubmx-signature': sig,
+          'origin': baseSite,
+          'referer': `${baseSite}/`
+        },
+        body: JSON.stringify({
+          language: src.language || 'de',
+          region: 'AT',
+          catalogId: 'iptv',
+          id: 'iptv',
+          adult: false,
+          search: cleanSearch,
+          sort: 'name',
+          filter: src.group ? { group: src.group } : {},
+          cursor: 0,
+          clientVersion: '3.1.0'
+        }),
+        timeoutMs: 6000
+      });
+
+      let catData = null;
+      let items = [];
+      if (catalogRes.ok) {
+        try {
+          catData = await catalogRes.json();
+          items = Array.isArray(catData?.items) ? catData.items : [];
+        } catch (_) {}
+      }
+
+      if (items.length === 0 && src.group) {
+        try {
+          const fallbackRes = await this.proxyFetch(catalogEndpoint, {
+            method: 'POST',
+            headers: {
+              'user-agent': 'MediaHubMX/2',
+              'accept': 'application/json',
+              'content-type': 'application/json; charset=utf-8',
+              'mediahubmx-signature': sig,
+              'origin': baseSite,
+              'referer': `${baseSite}/`
+            },
+            body: JSON.stringify({
+              language: src.language || 'de',
+              region: 'AT',
+              catalogId: 'iptv',
+              id: 'iptv',
+              adult: false,
+              search: cleanSearch,
+              sort: 'name',
+              cursor: 0,
+              clientVersion: '3.1.0'
+            }),
+            timeoutMs: 6000
+          });
+          if (fallbackRes.ok) {
+            const fbData = await fallbackRes.json();
+            items = Array.isArray(fbData?.items) ? fbData.items : [];
+          }
+        } catch (_) {}
+      }
+
+      if (items.length === 0) return null;
+
+      const targetName = (src.channelName || src.name || matchTitle || '').toLowerCase();
+      const wantsC = /\.c\b|server\s*c/i.test(targetName);
+      const wantsB = /\.b\b|server\s*b/i.test(targetName);
+      const wantsHevc = /\bhevc\b|\bh265\b/i.test(targetName);
+      const wantsRaw = /\braw\b/i.test(targetName);
+      const wantsBackup = /\bbackup\b/i.test(targetName);
+
+      const nonEventItems = items.filter(it => !/\.s\b|live during events only/i.test(it.name || ''));
+      const candidateList = nonEventItems.length > 0 ? nonEventItems : items;
+
+      let matchedItem = null;
+      if (wantsBackup) {
+        matchedItem = candidateList.find(it => /\bbackup\b/i.test(it.name || ''));
+      } else if (wantsHevc) {
+        matchedItem = candidateList.find(it => /\bhevc\b|\bh265\b/i.test(it.name || ''));
+      } else if (wantsRaw) {
+        matchedItem = candidateList.find(it => /\braw\b/i.test(it.name || ''));
+      } else if (wantsC) {
+        matchedItem = candidateList.find(it => /\.c\b/i.test(it.name || ''));
+      } else if (wantsB) {
+        matchedItem = candidateList.find(it => /\.b\b/i.test(it.name || ''));
+      }
+
+      if (!matchedItem) {
+        matchedItem = candidateList.find(it => /\.c\b/i.test(it.name || '')) ||
+                      candidateList.find(it => /\.b\b/i.test(it.name || '')) ||
+                      candidateList[0];
+      }
+
+      if (matchedItem && matchedItem.url) {
+        console.log(`[${this.name}] Dynamic fallback resolved active play URL for "${matchTitle}": ${matchedItem.name} (${matchedItem.url})`);
+        const freshRes = await this.proxyFetch(`${baseSite}/mediahubmx-resolve.json`, {
+          method: 'POST',
+          headers: {
+            'user-agent': 'MediaHubMX/2',
+            'accept': 'application/json',
+            'content-type': 'application/json; charset=utf-8',
+            'mediahubmx-signature': sig,
+            'origin': baseSite,
+            'referer': `${baseSite}/`
+          },
+          body: JSON.stringify({
+            language: src.language || 'de',
+            region: 'AT',
+            url: matchedItem.url,
+            clientVersion: '3.1.0'
+          }),
+          timeoutMs: 6000
+        });
+
+        if (freshRes.ok) {
+          const freshJson = await freshRes.json();
+          if (Array.isArray(freshJson) && freshJson[0]?.url) return String(freshJson[0].url);
+          if (freshJson?.url) return String(freshJson.url);
+          if (freshJson?.data?.url) return String(freshJson.data.url);
+        }
+      }
+    } catch (err) {
+      console.warn(`[${this.name}] Dynamic fallback error for "${matchTitle}":`, err.message);
+    }
+    return null;
   }
 }
 

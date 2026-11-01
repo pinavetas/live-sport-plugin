@@ -143,6 +143,53 @@ describe('Cluster Worker Deduplication & Batch Prewarming', () => {
       }
     });
 
+    test('bounds aggregate prewarming across concurrent matches and drops excess backlog', async () => {
+      const resolveCache = container.resolve('streamResolveCache');
+      const origGet = resolveCache.get.bind(resolveCache);
+      const origGetOrCreate = resolveCache.getOrCreate.bind(resolveCache);
+
+      let currentConcurrency = 0;
+      let maxConcurrency = 0;
+      const executedKeys = [];
+      jest.spyOn(resolveCache, 'get').mockReturnValue(null);
+      jest.spyOn(resolveCache, 'getOrCreate').mockImplementation(async (key) => {
+        currentConcurrency++;
+        maxConcurrency = Math.max(maxConcurrency, currentConcurrency);
+        executedKeys.push(key);
+        await new Promise((r) => setTimeout(r, 15));
+        currentConcurrency--;
+        return [];
+      });
+
+      const makeMatch = (id) => ({
+        id,
+        sources: [
+          { id: 's1', source: 'daddylive', name: 'Feed 1' },
+          { id: 's2', source: 'timstreams', name: 'Feed 2' },
+          { id: 's3', source: 'streamsports99', name: 'Feed 3' },
+          { id: 's4', source: 'cdnlive', name: 'Feed 4' },
+        ],
+      });
+
+      try {
+        await Promise.all([
+          prewarmMatch(makeMatch('concurrent_1'), null),
+          prewarmMatch(makeMatch('concurrent_2'), null),
+          prewarmMatch(makeMatch('concurrent_3'), null),
+          prewarmMatch(makeMatch('concurrent_4'), null),
+          prewarmMatch(makeMatch('concurrent_5'), null),
+        ]);
+
+        // Two active matches × the existing per-match batch size of three.
+        expect(maxConcurrency).toBeLessThanOrEqual(6);
+        // Two active plus two queued matches are processed; the fifth is dropped.
+        expect(executedKeys).toHaveLength(16);
+      } finally {
+        resolveCache.get.mockRestore ? resolveCache.get.mockRestore() : (resolveCache.get = origGet);
+        resolveCache.getOrCreate.mockRestore ? resolveCache.getOrCreate.mockRestore() : (resolveCache.getOrCreate = origGetOrCreate);
+      }
+    });
+
     test('Skips heavy embed-family providers during prewarm (PREWARM_SKIP_PROVIDERS)', async () => {
       const resolveCache = container.resolve('streamResolveCache');
       const origGet = resolveCache.get.bind(resolveCache);

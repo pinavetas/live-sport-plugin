@@ -17,6 +17,11 @@ class ReplayZoneProvider {
         this._byseCache = new Map();
         this._dmCache = new Map();
         this._webCache = new Map();
+        // url -> { v, at }: entries never expire and there was no count cap,
+        // so every distinct fallback link ever probed stayed for the worker's
+        // lifetime. TTL + FIFO cap; eviction just means one re-probe later.
+        this._webCacheTtlMs = Number(process.env.REPLAYZONE_WEBCACHE_TTL_MS || 6 * 3600 * 1000);
+        this._webCacheMaxEntries = Number(process.env.REPLAYZONE_WEBCACHE_MAX || 2000);
     }
 
     async getMatches() {
@@ -154,7 +159,10 @@ class ReplayZoneProvider {
     async _checkWebAlive(url) {
         if (!url || typeof url !== 'string') return false;
         const cached = this._webCache.get(url);
-        if (cached !== undefined) return cached;
+        if (cached !== undefined) {
+            if (Date.now() - cached.at <= this._webCacheTtlMs) return cached.v;
+            this._webCache.delete(url);
+        }
 
         let alive = true;
         try {
@@ -178,7 +186,10 @@ class ReplayZoneProvider {
             alive = true;
         }
 
-        this._webCache.set(url, alive);
+        if (this._webCache.size >= this._webCacheMaxEntries) {
+            this._webCache.delete(this._webCache.keys().next().value);
+        }
+        this._webCache.set(url, { v: alive, at: Date.now() });
         return alive;
     }
 

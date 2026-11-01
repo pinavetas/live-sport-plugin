@@ -268,6 +268,17 @@ app.get('/api/provider-health', (req, res) => {
   });
 });
 
+app.get('/api/worker-budget', (req, res) => {
+  const expectedToken = process.env.WORKER_BUDGET_TOKEN;
+  if (expectedToken && req.query.token !== expectedToken) {
+    return res.status(401).json({ error: 'Unauthorized', reason: 'invalid_token' });
+  }
+
+  const { workerPool } = require('./services/HlsRewriteService');
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(workerPool.snapshot());
+});
+
 app.get('/api/matches', (req, res) => {
   // Internal/debug surface: the configure page does not use it, but local helper
   // scripts do. Restrict to a direct local caller instead of removing it.
@@ -319,7 +330,14 @@ async function entryToDataUri(entry) {
 // Memoized composed match cards: an identical query set skips both the badge
 // fetch and the base64 re-encode. Bounded so a hostile query space cannot grow
 // it without limit.
+try {
+  const sharp = require('sharp');
+  sharp.concurrency(1);
+  sharp.cache({ memory: 16, files: 0, items: 20 });
+} catch (_) {}
+
 const matchCardMemo = new Map();
+const matchCardInFlight = new Map();
 const MATCH_CARD_MEMO_MAX = 120;
 
 // Stremio's documented poster budget is 100 kb (50 kb recommended). Generated
@@ -436,6 +454,33 @@ app.get(['/img/match', '/:config/img/match'], async (req, res) => {
     }
     return res.send(cached);
   }
+
+  if (matchCardInFlight.has(memoKey)) {
+    try {
+      const inflightResult = await matchCardInFlight.get(memoKey);
+      if (inflightResult) {
+        if (Buffer.isBuffer(inflightResult)) {
+          res.setHeader('Content-Type', 'image/jpeg');
+        } else {
+          res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
+        }
+        return res.send(inflightResult);
+      }
+    } catch (_) {}
+  }
+
+  let resolveInflight;
+  const inFlightPromise = new Promise((resolve) => { resolveInflight = resolve; });
+  matchCardInFlight.set(memoKey, inFlightPromise);
+  const finishInflight = (data) => {
+    if (resolveInflight) {
+      resolveInflight(data);
+      resolveInflight = null;
+      matchCardInFlight.delete(memoKey);
+    }
+  };
+  res.on('finish', () => finishInflight(null));
+  res.on('close', () => finishInflight(null));
 
   // Resolve each badge and inline its bytes as a data URI. A dead crest is
   // omitted (so the card falls back to its plate / monogram) and the card stays
@@ -654,23 +699,31 @@ app.get(['/img/match', '/:config/img/match'], async (req, res) => {
   const hasArtwork = !!(badgesToUse.badge1 || badgesToUse.badge2 || badgesToUse.leagueBadge || badgesToUse.channelBadge || badgesToUse.channelMark);
   const memoWorthy = droppedForSize || !hasNameSlot || hasArtwork;
 
-  if (matchCardMemo.size >= MATCH_CARD_MEMO_MAX) matchCardMemo.clear();
+  while (matchCardMemo.size >= MATCH_CARD_MEMO_MAX) {
+    const oldest = matchCardMemo.keys().next().value;
+    if (!oldest) break;
+    matchCardMemo.delete(oldest);
+  }
 
   if (memoWorthy) {
     if (jpeg) {
       matchCardMemo.set(memoKey, jpeg);
+      finishInflight(jpeg);
       res.setHeader('Content-Type', 'image/jpeg');
       return res.send(jpeg);
     }
     matchCardMemo.set(memoKey, svg);
+    finishInflight(svg);
     res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
     return res.send(svg);
   }
 
   if (jpeg) {
+    finishInflight(jpeg);
     res.setHeader('Content-Type', 'image/jpeg');
     return res.send(jpeg);
   }
+  finishInflight(svg);
   res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
   return res.send(svg);
 });
@@ -790,8 +843,11 @@ app.get('/img', async (req, res) => {
 // absent, all fetches silently use undici — streams continue to work.
 app.use(require('./routes/streamProxy'));
 app.use(require('./routes/manifest'));
+app.use(require('./routes/hlsResource'));
 app.use(require('./routes/embed'));
 app.use('/api/parser', require('./routes/parserStudio'));
+// Zero-bandwidth DASH→HLS converter (must stay above the /api resolver proxy)
+app.use(require('./routes/dash'));
 // Mount the HLS Video Proxy (routes to the internal resolver on port RESOLVER_PORT)
 app.use('/api', createProxyMiddleware({
   target: `http://127.0.0.1:${RESOLVER_PORT}/api`,
@@ -810,6 +866,14 @@ app.use('/api', createProxyMiddleware({
 // Intercepts /manifest.json, /catalog/*, /meta/*, and /stream/* responses to
 // dynamically rewrite all internal proxy URLs (/img, /watch, /api/manifest)
 // to match the client's incoming Host and Protocol.
+
+// Rewriting can only fire when one of these prefixes appears somewhere in the
+// payload (both the relative and absolute-URL branches below match on them).
+// A substring scan is far cheaper than JSON-parsing multi-megabyte hub
+// responses that carry no relative URLs, so payloads without any prefix are
+// passed through untouched. Keep in sync with the prefix lists in rewriteUrl.
+const REWRITE_SCAN_PREFIXES = ['/img', '/watch', '/api/manifest', '/api/dash', '/logo', '/api/mp4proxy', '/api/fastmp4', '/api/hlschunk', '/api/hls', '/hls', '/posters', '/donate'];
+
 app.use((req, res, next) => {
   const isAddonRoute = req.path === '/manifest.json' || 
                        req.path.endsWith('/manifest.json') ||
@@ -836,9 +900,14 @@ app.use((req, res, next) => {
   res.end = function (chunk, encoding, callback) {
     if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
 
+    let bodyBuffer = null;
     if (chunks.length > 0) {
-      const bodyBuffer = Buffer.concat(chunks);
+      bodyBuffer = Buffer.concat(chunks);
       const bodyString = bodyBuffer.toString('utf8');
+
+      if (!REWRITE_SCAN_PREFIXES.some((p) => bodyString.includes(p))) {
+        return originalEnd.call(res, bodyBuffer, encoding, callback);
+      }
 
       try {
         const body = JSON.parse(bodyString);
@@ -847,12 +916,12 @@ app.use((req, res, next) => {
         const rewriteUrl = (url) => {
           if (!url || typeof url !== 'string') return url;
           // Relative URLs
-          if (url.startsWith('/img') || url.startsWith('/watch') || url.startsWith('/api/manifest') || url.startsWith('/logo') || url.startsWith('/api/mp4proxy') || url.startsWith('/api/fastmp4') || url.startsWith('/api/hlschunk') || url.startsWith('/posters') || url.startsWith('/donate')) {
+          if (url.startsWith('/img') || url.startsWith('/watch') || url.startsWith('/api/manifest') || url.startsWith('/api/dash') || url.startsWith('/logo') || url.startsWith('/api/mp4proxy') || url.startsWith('/api/fastmp4') || url.startsWith('/api/hlschunk') || url.startsWith('/api/hls') || url.startsWith('/hls') || url.startsWith('/posters') || url.startsWith('/donate')) {
             modified = true;
             return `${currentBaseUrl}${url}`;
           }
           // Absolute URLs with legacy/static base or localhost/LAN IP
-          const match = url.match(/^(?:https?:\/\/[^\/]+)(\/(?:img|watch|api\/manifest|api\/mp4proxy|api\/fastmp4|api\/hlschunk|logo|posters|donate)(?:[?\/].*|\.[A-Za-z0-9]+)?)$/);
+          const match = url.match(/^(?:https?:\/\/[^\/]+)(\/(?:img|watch|api\/manifest|api\/dash|api\/mp4proxy|api\/fastmp4|api\/hlschunk|api\/hls|hls|logo|posters|donate)(?:[?\/].*|\.[A-Za-z0-9]+)?)$/);
           if (match) {
             modified = true;
             return `${currentBaseUrl}${match[1]}`;
@@ -906,7 +975,10 @@ app.use((req, res, next) => {
       }
     }
 
-    const finalBuffer = Buffer.concat(chunks);
+    // bodyBuffer already holds the exact bytes when a body was captured;
+    // re-concatenating chunks copies the whole payload a second time on every
+    // unmodified response.
+    const finalBuffer = bodyBuffer || Buffer.concat(chunks);
     originalEnd.call(res, finalBuffer, encoding, callback);
   };
 

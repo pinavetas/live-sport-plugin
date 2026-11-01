@@ -106,6 +106,13 @@
       "referer": "https://dlive.sx/",
       "first_seen": "",
       "note": "DaddyLive mirror base domain."
+    },
+    "wideiptv.top": {
+      "role": "wrapper",
+      "strategy": "nested",
+      "referer": "https://wideiptv.top/",
+      "first_seen": "2026-10-24",
+      "note": "Player 6 on thedaddy.pk. Embeds /player/{streamName} holding ds*.bluetier.top direct HLS."
     }
   },
   "terminal_hosts": {
@@ -126,6 +133,11 @@
       "referer": "https://play.matchli.st/",
       "first_seen": "2026-09-21",
       "note": "FLAKY: 200/live, 403, 404 and timeouts observed within minutes; outcome did not correlate with Referer. URL construction verified correct. Left as-is by decision."
+    },
+    "bluetier.top": {
+      "referer": "https://wideiptv.top/",
+      "first_seen": "2026-10-24",
+      "note": "Direct uncloaked MPEG-TS HLS host for Player 6 (wideiptv.top)."
     }
   }
 }

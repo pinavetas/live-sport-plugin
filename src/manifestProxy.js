@@ -86,15 +86,26 @@ function playlistHasContent(text) {
 // Fetch + validate the upstream manifest. Throws on failure so coalesced
 // waiters share the same outcome; successful bodies are cached by the caller.
 async function fetchUpstreamManifest(targetUrl, referer, origin) {
+  const deadlineAt = performance.now() + 10000;
+  const isVavoo = Boolean(
+    (targetUrl && (targetUrl.includes('/sunshine/') || targetUrl.includes('vavoo.') || targetUrl.includes(':8008'))) ||
+    (referer && referer.includes('vavoo.'))
+  );
+  const userAgent = isVavoo
+    ? 'MediaHubMX/2'
+    : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36';
+
   const headers = {
-    'Referer': referer,
-    'Origin': origin,
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
+    'Referer': referer || (isVavoo ? 'https://vavoo.to/' : 'https://embed.st/'),
+    'Origin': origin || (isVavoo ? 'https://vavoo.to' : 'https://embed.st'),
+    'User-Agent': userAgent
   };
   // _safeFetch: impit (browser TLS fingerprint) with automatic undici fallback.
   // A hard 10 s timeout ensures a hung upstream can never hold the viewer's poll.
   const attempt = async () => {
-    const result = await _safeFetch(targetUrl, { headers, timeoutMs: 10000 });
+    const remainingMs = Math.ceil(deadlineAt - performance.now());
+    if (remainingMs <= 0) throw Object.assign(new Error('Manifest timeout 10000ms'), { name: 'TimeoutError', code: 'ETIMEDOUT' });
+    const result = await _safeFetch(targetUrl, { headers, timeoutMs: remainingMs });
     if (!result.ok) {
       // Carry the upstream status so the caller can tell "the token/CDN said no"
       // apart from "our proxy is broken" — they need different HTTP responses.
@@ -120,6 +131,9 @@ async function fetchUpstreamManifest(targetUrl, referer, origin) {
     );
     const isTransient = status === 500 || status === 502 || status === 503 || status === 504 || isNetworkTransient;
     if (!isTransient) throw err;
+    // Backoff and the retry share the original manifest budget. A depleted
+    // deadline is not a new network glitch to retry for another ten seconds.
+    if (deadlineAt - performance.now() <= 400) throw err;
     await new Promise((r) => setTimeout(r, 400));
     console.warn(`[ManifestProxy] Upstream ${status || err.code || 'network glitch'} — retrying once: ${String(targetUrl).slice(0, 90)}`);
     return await attempt(); // a second failure propagates with statusCode intact
