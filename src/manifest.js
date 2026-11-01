@@ -84,7 +84,8 @@ const manifest = {
     { key: 'replayFilter', title: 'Replay Catalog (all or mainstream)', type: 'text', default: 'all' },
     { key: 'liveSources', title: 'Live & TV Sources (comma separated)', type: 'text', default: 'all' },
     { key: 'replaySources', title: 'Replay & VOD Sources (comma separated)', type: 'text', default: 'all' },
-    { key: 'sources', title: 'All Sources (legacy, comma separated)', type: 'text', default: 'all' }
+    { key: 'sources', title: 'All Sources (legacy, comma separated)', type: 'text', default: 'all' },
+    { key: 'madplayUrl', title: 'MadPlay Base URL', type: 'text' }
   ],
 
   idPrefixes: ['nuvio_sport_'],

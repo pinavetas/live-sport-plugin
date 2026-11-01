@@ -33,6 +33,7 @@ const SOURCE_PRIORITY = {
   ppvst: 2,
   damitv: 2,
   ak47live: 2,
+  madplay: 2,
   golf: 2,
   delta: 2,
   echo: 2,
@@ -58,8 +59,8 @@ const SOURCE_PRIORITY = {
 const VERIFY_BODY_MAX_BYTES = 64 * 1024;
 
 const KNOWN_REPLAY_SOURCES = ['replayzone', 'livetv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive'];
-const KNOWN_LIVE_SOURCES = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'damitv', 'sktech', 'vavoo', 'ak47live', 'leaf'];
-const KNOWN_FALLBACKS = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'replayzone', 'livetv', 'damitv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive', 'sktech', 'vavoo', 'ak47live', 'leaf'];
+const KNOWN_LIVE_SOURCES = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'damitv', 'sktech', 'vavoo', 'ak47live', 'leaf', 'madplay'];
+const KNOWN_FALLBACKS = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'replayzone', 'livetv', 'damitv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive', 'sktech', 'vavoo', 'ak47live', 'leaf', 'madplay'];
 
 // Labeling tables hoisted to module scope: they were allocated per request
 // (handleStream) and per formatChannelStreamTitle call.
@@ -88,6 +89,7 @@ const NICE_NAMES = {
   'fullraces': 'FullRaces',
   'hockeyreplays': 'HockeyReplays',
   'mlblive': 'MLBLive',
+  madplay: 'MadPlay',
   admin: 'Streamed.pk',
   echo: 'Streamed.pk',
   golf: 'Streamed.pk',
@@ -117,7 +119,8 @@ const CHANNEL_TITLE_NICE_NAMES = {
   vavoo: 'Vavoo',
   ppvst: 'PPV.st',
   ak47live: 'AK47Live',
-  leaf: 'Leaf'
+  leaf: 'Leaf',
+  madplay: 'MadPlay'
 };
 
 function isReplaySource(sourceName) {
@@ -199,7 +202,7 @@ function selectSources(matchSources, config, match = null) {
 
 // Ask one provider for its streams. Extracted from resolveSource so the whole
 // dispatch can be retried as a unit without duplicating the chain.
-async function dispatchToProvider(sourceName, src, match) {
+async function dispatchToProvider(sourceName, src, match, config = {}) {
   let resStreams = [];
 
   if (sourceName === 'timstreams') {
@@ -268,6 +271,9 @@ async function dispatchToProvider(sourceName, src, match) {
   } else if (sourceName === 'leaf') {
     const provider = container.resolve('leafProvider');
     resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
+  } else if (sourceName === 'madplay') {
+    const provider = container.resolve('madplayProvider');
+    resStreams = await provider.resolveStream(src.id, match.category, match.title, src, config);
   } else if (sourceName.startsWith('yaml_')) {
     const yamlProviders = container.resolve('yamlProviders');
     const pName = sourceName.replace('yaml_', '');
@@ -313,7 +319,7 @@ async function resolveSource(src, match, config) {
 
   try {
     const deadlineAt = Date.now() + RESOLVE_TOTAL_BUDGET_MS;
-    resStreams = await withRetry(() => dispatchToProvider(sourceName, src, match), {
+    resStreams = await withRetry(() => dispatchToProvider(sourceName, src, match, config), {
       attempts: RESOLVE_ATTEMPTS,
       baseDelayMs: 300,
       maxDelayMs: 1200,

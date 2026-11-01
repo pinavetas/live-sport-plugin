@@ -79,4 +79,6 @@ const BASE_URL = (
   `http://${getLocalIp()}:${PORT}`                              // Local dev fallback to LAN IP
 ).replace(/\/$/, '');                                           // Strip trailing slash if any
 
-module.exports = { PORT, BASE_URL, getLocalIp, getRequestBaseUrl };
+const MADPLAY_BASE_URL = (process.env.MADPLAY_BASE_URL || 'https://jack27eo.mpanrc4imind.my/').replace(/\/+$/, '') + '/';
+
+module.exports = { PORT, BASE_URL, MADPLAY_BASE_URL, getLocalIp, getRequestBaseUrl };

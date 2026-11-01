@@ -722,6 +722,13 @@
             <label class="checkbox-label active"><input type="checkbox" value="damitv" checked> DamiTV</label>
             <label class="checkbox-label active"><input type="checkbox" value="ppvst" checked> PPV.st</label>
             <label class="checkbox-label active"><input type="checkbox" value="sktech" checked> SkTech</label>
+            <label class="checkbox-label active"><input type="checkbox" value="madplay" checked> MadPlay (RBTV+)</label>
+          </div>
+
+          <div class="field" style="margin-top: 16px;">
+            <label for="madplayUrl">MadPlay Domain / URL (Dynamic)</label>
+            <input type="text" id="madplayUrl" placeholder="https://jack27eo.mpanrc4imind.my/" autocomplete="off" spellcheck="false">
+            <p class="hint">Host base configurable para MadPlay / RBTV+. Si la web cambia de dominio o rota, actualízalo aquí.</p>
           </div>
         </div>
       </section>
@@ -967,6 +974,7 @@
     const copyBtnLabel = document.getElementById('copyBtnLabel');
     const COPY_LINK_LABEL = 'Copy link for Nuvio app';
     const input = document.getElementById('teams');
+    const madplayUrlInput = document.getElementById('madplayUrl');
     const checkboxes = document.querySelectorAll('#sportsGrid input[type="checkbox"]');
     const liveSourceCheckboxes = document.querySelectorAll('#liveSourcesGrid input[type="checkbox"]');
     const replaySourceCheckboxes = document.querySelectorAll('#replaySourcesGrid input[type="checkbox"]');
@@ -1181,6 +1189,10 @@
 
       const config = {};
       if (teams) config.teams = teams;
+      const madplayVal = (madplayUrlInput ? madplayUrlInput.value.trim() : '');
+      if (madplayVal && madplayVal !== 'https://jack27eo.mpanrc4imind.my/' && madplayVal !== 'https://jack27eo.mpanrc4imind.my') {
+        config.madplayUrl = madplayVal;
+      }
       if (tz) config.timezone = tz;
       // Only emit non-default values, mirroring how sports/sources are added
       // only when narrowed. English-first and 'all' are baked in server-side.
@@ -1335,6 +1347,7 @@
     }
 
     input.addEventListener('input', updateLink);
+    if (madplayUrlInput) madplayUrlInput.addEventListener('input', updateLink);
     timezoneSelect.addEventListener('change', updateLink);
     // The two personalization controls must re-derive the addon URL the same
     // way teams/timezone do; without these listeners typing a language or
