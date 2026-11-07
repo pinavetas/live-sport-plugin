@@ -7,6 +7,7 @@ const StreamEntity = require('../domain/StreamEntity');
 const { safeFetch } = require('../impitClient');
 const { extract: extractChain } = require('./EmbedExtractorChain');
 const SpaHydrator = require('./SpaHydrator');
+const { parseJsLiteral } = require('./safeJsLiteral');
 
 class DynamicCustomProvider extends BaseProvider {
   constructor(config, opts = {}) {
@@ -151,8 +152,8 @@ class DynamicCustomProvider extends BaseProvider {
       const ftbMatch = html.match(/window\.ftbPageData\s*=\s*(\{[\s\S]*?\});\s*(?:window\.|\n|<\/script>)/);
       if (ftbMatch) {
         try {
-          const fn = new Function('return ' + ftbMatch[1]);
-          const data = fn();
+          // Literal-only evaluation: the payload is third-party HTML, never execute it.
+          const data = parseJsLiteral(ftbMatch[1]);
           const sched = data && data.schedule ? data.schedule : {};
           for (const g of Object.values(sched)) {
             if (g && g.links) {
