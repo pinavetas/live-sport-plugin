@@ -4,6 +4,13 @@ const StreamResolveCache = require('../services/StreamResolveCache');
 // Catalog stale-while-revalidate window: once the cache is older than this,
 // the next catalog/meta request triggers a background re-sync (see ensureFresh).
 const REVALIDATE_AFTER_MS = parseInt(process.env.CATALOG_REVALIDATE_MS, 10) || 10 * 60 * 1000;
+// When a sync fails outright (every provider down, or it throws), the cache
+// stays stale, so without a backoff every catalog request would launch another
+// full provider sweep. Stale-triggered syncs wait 2 min after the first
+// failure, doubling per consecutive failure up to 15 min. Scheduled syncs are
+// unaffected.
+const SYNC_FAILURE_BACKOFF_BASE_MS = parseInt(process.env.SYNC_FAILURE_BACKOFF_BASE_MS, 10) || 2 * 60 * 1000;
+const SYNC_FAILURE_BACKOFF_MAX_MS = parseInt(process.env.SYNC_FAILURE_BACKOFF_MAX_MS, 10) || 15 * 60 * 1000;
 
 class CronService {
   constructor({ matchAggregator, streamResolveCache, cacheService, providerHealthService }) {
@@ -12,6 +19,9 @@ class CronService {
     this.cacheService = cacheService;
     this.providerHealthService = providerHealthService;
     this.syncing = false;
+    this.consecutiveSyncFailures = 0;
+    this.lastSyncAttemptAt = 0;
+    this.syncBackoffUntil = 0;
   }
 
   get isSyncing() { return this.syncing; }
@@ -20,13 +30,18 @@ class CronService {
   async runSync() {
     if (this.syncing) return;
     this.syncing = true;
+    this.lastSyncAttemptAt = Date.now();
     try {
       const activeMatches = await this.matchAggregator.syncMatches();
       if (activeMatches !== null) {
+        this._noteSyncSuccess();
         this.pruneStreamCache(activeMatches);
         this.prewarmCatalogMemo();
+      } else {
+        this._noteSyncFailure();
       }
     } catch (error) {
+      this._noteSyncFailure();
       if (this.providerHealthService) {
         this.providerHealthService.finishSync({ matchCount: 0, succeeded: false });
       }
@@ -34,6 +49,21 @@ class CronService {
     } finally {
       this.syncing = false;
     }
+  }
+
+  _noteSyncSuccess() {
+    this.consecutiveSyncFailures = 0;
+    this.syncBackoffUntil = 0;
+  }
+
+  _noteSyncFailure() {
+    this.consecutiveSyncFailures++;
+    const delay = Math.min(
+      SYNC_FAILURE_BACKOFF_BASE_MS * Math.pow(2, this.consecutiveSyncFailures - 1),
+      SYNC_FAILURE_BACKOFF_MAX_MS
+    );
+    this.syncBackoffUntil = Date.now() + delay; // measured from when the attempt ended
+    console.warn(`[CronService] Sync failed (${this.consecutiveSyncFailures} in a row); stale-triggered syncs paused for ${Math.round(delay / 1000)}s.`);
   }
 
   // Rebuild the hot catalog pages right after a sync, so no user ever pays the
@@ -72,6 +102,7 @@ class CronService {
                         (process.env.pm_id === undefined || process.env.pm_id === '0');
       if (!isPrimary) return;
       if (this.syncing) return;
+      if (Date.now() < this.syncBackoffUntil) return; // recent sync failed: back off
       if (!this.cacheService || !this.cacheService.isStale(REVALIDATE_AFTER_MS)) return;
       console.log('[CronService] Catalog stale, triggering background re-sync (SWR)...');
       this.runSync().catch((err) => console.error('[CronService] SWR sync failed:', err.message));
