@@ -47,7 +47,16 @@
  *    A 403, 429, or 503 response marks that worker spent for the UTC day,
  *    filtering it out of pick() immediately.
  *  - The paid worker is never probed. Network failures leave spent=false.
+ *
+ * Persistence: the daily/monthly counters are written to a small JSON file
+ * (atomic tmp + rename, debounced) and reloaded on start, so a restart does not
+ * hand every free worker a fresh daily allowance or reset the paid monthly hard
+ * cap. Only the production singleton persists (see resolveBudgetFile); pools
+ * built with createWorkerPool() stay in memory unless given a persistPath.
  */
+
+const fs = require('fs');
+const path = require('path');
 
 // Six free workers. The paid worker is deliberately NOT in this list.
 const DEFAULT_FREE_POOL = [
@@ -108,6 +117,70 @@ function utcDayKey(date) {
 
 function utcMonthKey(date) {
   return date.toISOString().slice(0, 7);
+}
+
+const PERSIST_VERSION = 1;
+const DEFAULT_PERSIST_DEBOUNCE_MS = 5000;
+
+/**
+ * Where the production pool keeps its counters: DATA_DIR (or ./data), one file
+ * per PM2 instance because every process keeps (and caps) its own share.
+ * Returns null under Jest so parallel test workers never share or inherit
+ * budget state; tests opt in with an explicit temp persistPath.
+ */
+function resolveBudgetFile(env = process.env) {
+  if (env.JEST_WORKER_ID) return null;
+  const dir = env.DATA_DIR || path.join(process.cwd(), 'data');
+  const instance = env.NODE_APP_INSTANCE !== undefined && env.NODE_APP_INSTANCE !== ''
+    ? `.${String(env.NODE_APP_INSTANCE).replace(/[^\w-]/g, '')}`
+    : '';
+  return path.join(dir, `worker_budget${instance}.json`);
+}
+
+function isCount(v) {
+  return Number.isFinite(v) && v >= 0;
+}
+
+/** Parsed persisted counters, or null when the file is missing or corrupted. */
+function readPersisted(file) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (_) {
+    return null;
+  }
+  try {
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== 'object' || data.version !== PERSIST_VERSION) return null;
+    const free = new Map();
+    if (data.free && typeof data.free === 'object') {
+      for (const [url, entry] of Object.entries(data.free)) {
+        if (entry && typeof entry.day === 'string' && isCount(entry.used)) {
+          free.set(url, { day: entry.day, used: Math.floor(entry.used) });
+        }
+      }
+    }
+    let paid = null;
+    if (data.paid && typeof data.paid.month === 'string' && isCount(data.paid.used)) {
+      paid = { month: data.paid.month, used: Math.floor(data.paid.used) };
+    }
+    return { free, paid };
+  } catch (_) {
+    return null;
+  }
+}
+
+function writePersistedSync(file, payload) {
+  const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(tmp, payload, 'utf8');
+    fs.renameSync(tmp, file);
+    return true;
+  } catch (_) {
+    try { fs.unlinkSync(tmp); } catch (__) {}
+    return false;
+  }
 }
 
 function hostOf(url) {
@@ -196,6 +269,50 @@ function createWorkerPool(options = {}) {
 
   const freeState = new Map(); // url -> { day, used }
   let paidState = { month: null, used: 0 };
+
+  const persistPath = typeof options.persistPath === 'string' && options.persistPath
+    ? options.persistPath
+    : null;
+  const persistDebounceMs = Number.isFinite(options.persistDebounceMs) && options.persistDebounceMs >= 0
+    ? options.persistDebounceMs
+    : DEFAULT_PERSIST_DEBOUNCE_MS;
+  let persistTimer = null;
+  let dirty = false;
+
+  if (persistPath) {
+    const restored = readPersisted(persistPath);
+    if (restored) {
+      for (const [url, entry] of restored.free) freeState.set(url, entry);
+      if (restored.paid) paidState = restored.paid;
+    }
+  }
+
+  function flush() {
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+    if (!persistPath || !dirty) return false;
+    dirty = false;
+    const free = {};
+    for (const [url, entry] of freeState) free[url] = { day: entry.day, used: entry.used };
+    return writePersistedSync(
+      persistPath,
+      JSON.stringify({ version: PERSIST_VERSION, free, paid: { month: paidState.month, used: paidState.used } })
+    );
+  }
+
+  function markDirty() {
+    if (!persistPath) return;
+    dirty = true;
+    if (persistTimer) return;
+    persistTimer = setTimeout(flush, persistDebounceMs);
+    if (typeof persistTimer.unref === 'function') persistTimer.unref();
+  }
+
+  // Best effort on a clean shutdown; the debounce bounds what a crash loses.
+  const onExit = () => { flush(); };
+  if (persistPath) process.once('exit', onExit);
   const dedupe = new Map(); // segment key -> { workerUrl, tier, expiresAt }
   const probeState = new Map(); // url -> { day, probing: boolean, spent: boolean }
 
@@ -245,9 +362,10 @@ function createWorkerPool(options = {}) {
     const entry = freeState.get(url);
     if (entry && entry.day === day) {
       entry.used += 1;
-      return;
+    } else {
+      freeState.set(url, { day, used: 1 });
     }
-    freeState.set(url, { day, used: 1 });
+    markDirty();
   }
 
   function paidUsedThisMonth(month) {
@@ -257,6 +375,7 @@ function createWorkerPool(options = {}) {
   function bumpPaid(month) {
     if (paidState.month !== month) paidState = { month, used: 0 };
     paidState.used += 1;
+    markDirty();
   }
 
   function pruneDedupe(atMs) {
@@ -415,14 +534,17 @@ function createWorkerPool(options = {}) {
       clearInterval(logTimer);
       logTimer = null;
     }
+    flush();
+    if (persistPath) process.removeListener('exit', onExit);
   }
 
-  return { config, pick, snapshot, logSnapshot, stop };
+  return { config, pick, snapshot, logSnapshot, stop, flush, persistPath };
 }
 
 module.exports = {
   createWorkerPool,
   resolveConfig,
+  resolveBudgetFile,
   DEFAULT_FREE_POOL,
   DEFAULT_PAID_WORKER,
   FREE_DAILY_LIMIT,
