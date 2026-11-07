@@ -43,10 +43,15 @@ router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
 
   // Playlist-only proxy (same as WatchFooty / Streamed.pk .ts): this host fetches
   // the m3u8 with the CDN Referer, then the player pulls every media byte from the CDN.
-  const cacheKey = `${targetUrl}|${referer}|${origin}`;
   // Recovery key for this stream, if the URL was emitted by our own resolver.
   const rck = readRck(req);
   const rckSuffix = rck ? '&rck=' + encodeURIComponent(rck) : '';
+  // The cached body is the REWRITTEN playlist, which bakes in absolute URLs on
+  // this request's base URL plus the rck suffix. Both must be part of the key,
+  // or a client reaching the addon through another host (LAN vs tunnel) would
+  // be served child URLs pointing at a host it cannot reach.
+  const addonBaseUrl = getRequestBaseUrl(req);
+  const cacheKey = `${targetUrl}|${referer}|${origin}|${addonBaseUrl}|${rck || ''}`;
   const entry = manifestCacheGet(cacheKey);
   if (entry && entry.negative) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -167,7 +172,7 @@ router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
           referer,
           origin,
           rckSuffix,
-          absoluteAddonBaseUrl: getRequestBaseUrl(req),
+          absoluteAddonBaseUrl: addonBaseUrl,
           bitrate: out.includes('#EXT-X-STREAM-INF') ? undefined : variantBitrateCache.get(effectiveUrl)
         });
         manifestCacheSet(cacheKey, rewrittenResult, dynamicTtl);
