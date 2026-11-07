@@ -365,6 +365,8 @@ function parseArchive(html, ymd) {
   return out;
 }
 
+const UNSHORTEN_HOP_TIMEOUT_MS = 5000;
+
 async function unshorten(url) {
   if (!url || typeof url !== 'string') return url;
   let curr = url.trim();
@@ -373,11 +375,17 @@ async function unshorten(url) {
       return curr;
     }
     try {
+      // Bound every hop: up to 5 sequential fetches with no timeout could
+      // stall the whole resolve on one dead shortener.
       const res = await fetch(curr, {
         method: 'GET',
         headers: { 'User-Agent': UA },
         redirect: 'manual',
+        signal: AbortSignal.timeout(UNSHORTEN_HOP_TIMEOUT_MS),
       });
+      // Only the status/Location header is needed; release the body so the
+      // underlying socket is not held open waiting for it to be consumed.
+      try { await res.body?.cancel(); } catch (_) {}
       if (res.status >= 300 && res.status < 400) {
         const loc = res.headers.get('location');
         if (loc) {
@@ -780,4 +788,5 @@ class LiveTVProvider {
 }
 
 LiveTVProvider.parseArchive = parseArchive;
+LiveTVProvider._unshorten = unshorten; // exposed for tests
 module.exports = LiveTVProvider;
