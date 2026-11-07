@@ -134,6 +134,80 @@ describe('Granular Live & Replay Source Separation', () => {
     });
   });
 
+  describe("'all' (manifest default) means no restriction", () => {
+    const defaultSelection = selectSources(sampleSources, null).map(s => s.source);
+
+    test.each([
+      [{ liveSources: 'all', replaySources: 'all', sources: 'all' }],
+      [{ liveSources: 'all' }],
+      [{ replaySources: 'all' }],
+      [{ sources: 'all' }],
+      [{ liveSources: ' ALL ', replaySources: 'All', sources: 'aLl' }]
+    ])('%j selects the same sources as no config', (config) => {
+      const names = selectSources(sampleSources, config).map(s => s.source);
+      expect(names.length).toBeGreaterThan(0);
+      expect(names).toEqual(defaultSelection);
+    });
+
+    test("liveSources 'all' with a narrowed replay list only restricts replays", () => {
+      const names = selectSources(sampleSources, { liveSources: 'all', replaySources: 'soccerfull', sources: 'all' })
+        .map(s => s.source);
+      expect(names).toEqual(expect.arrayContaining(['daddylive', 'watchfooty', 'streamedpk', 'soccerfull']));
+      expect(names).not.toContain('fullraces');
+      expect(names).not.toContain('replayzone');
+    });
+
+    test("'none' is still honoured case-insensitively", () => {
+      const names = selectSources(sampleSources, { liveSources: 'NONE', replaySources: 'all' }).map(s => s.source);
+      expect(names).not.toContain('daddylive');
+      expect(names).toContain('soccerfull');
+    });
+  });
+
+  describe('Dynamic custom-AI sources', () => {
+    const { KNOWN_FALLBACKS } = require('../src/streams');
+    const dynamicParserRegistry = require('../src/services/DynamicParserRegistry');
+    const CUSTOM = 'myreplays';
+    const withCustom = [...sampleSources, { source: CUSTOM, id: 'https://example.com/replay/1' }];
+
+    beforeEach(() => {
+      // What DynamicParserRegistry.mountProvider does for an active parser.
+      dynamicParserRegistry.activeProviders.set(CUSTOM, { sourceName: CUSTOM });
+      KNOWN_REPLAY_SOURCES.push(CUSTOM);
+      KNOWN_FALLBACKS.push(CUSTOM);
+    });
+
+    afterEach(() => {
+      dynamicParserRegistry.activeProviders.delete(CUSTOM);
+      KNOWN_REPLAY_SOURCES.splice(KNOWN_REPLAY_SOURCES.indexOf(CUSTOM), 1);
+      KNOWN_FALLBACKS.splice(KNOWN_FALLBACKS.indexOf(CUSTOM), 1);
+    });
+
+    test('survive a narrowed replaySources list (the UI has no checkbox for them)', () => {
+      const names = selectSources(withCustom, { replaySources: 'soccerfull' }).map(s => s.source);
+      expect(names).toContain(CUSTOM);
+      expect(names).toContain('soccerfull');
+      expect(names).not.toContain('fullraces');
+    });
+
+    test('survive a narrowed legacy sources list', () => {
+      const names = selectSources(withCustom, { sources: 'daddylive' }).map(s => s.source);
+      expect(names).toContain(CUSTOM);
+      expect(names).not.toContain('watchfooty');
+    });
+
+    test("are removed by replaySources 'none'", () => {
+      const names = selectSources(withCustom, { replaySources: 'none' }).map(s => s.source);
+      expect(names).not.toContain(CUSTOM);
+    });
+
+    test('an unmounted custom source is not whitelisted', () => {
+      dynamicParserRegistry.activeProviders.delete(CUSTOM);
+      const names = selectSources(withCustom, { replaySources: 'soccerfull' }).map(s => s.source);
+      expect(names).not.toContain(CUSTOM);
+    });
+  });
+
   describe('Configure page markup & wiring validation', () => {
     const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'configure.html'), 'utf8');
 
