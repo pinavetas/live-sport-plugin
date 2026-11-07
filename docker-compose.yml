@@ -10,4 +10,12 @@ services:
       - PORT=7000
       # If you are hosting this on a public VPS, uncomment the line below and set your domain or IP
       # - ADDON_URL=http://your-server-ip:7000
+    volumes:
+      # Persist runtime caches (matches_cache.json, team logos, ...) across
+      # container recreation. On first use Docker seeds the empty named volume
+      # with the image's /app/data, which the build creates from src/data.
+      - nuvio-data:/app/data
     restart: unless-stopped
+
+volumes:
+  nuvio-data:
