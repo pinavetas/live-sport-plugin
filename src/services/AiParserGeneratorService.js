@@ -11,6 +11,11 @@
 const cheerio = require('cheerio');
 const { safeFetch } = require('../impitClient');
 const SpaHydrator = require('./SpaHydrator');
+const { checkOutboundUrl } = require('./OutboundUrlGuard');
+
+function normalizeBaseUrl(url) {
+  return String(url || '').trim().replace(/\/+$/, '').toLowerCase();
+}
 
 class AiParserGeneratorService {
   constructor(opts = {}) {
@@ -19,6 +24,8 @@ class AiParserGeneratorService {
     this.defaultModel = opts.model || process.env.AI_MODEL || 'deepseek-chat';
     this.maxHtmlTokens = opts.maxHtmlTokens || 12000; // ~3000-4000 tokens
     this.fetchFn = opts.fetchFn || safeFetch;
+    // SSRF gate for the scraped target URL (injectable for tests).
+    this.urlGuard = opts.urlGuard || ((url) => checkOutboundUrl(url, { allowedHosts: null }));
   }
 
   /**
@@ -63,8 +70,16 @@ class AiParserGeneratorService {
    * - OpenAI-compatible providers (OpenCode, Freebuff, OpenAI, Ollama, DeepSeek, vLLM).
    */
   async queryLlm({ prompt, systemPrompt, config = {} }) {
-    const apiKey = config.apiKey !== undefined ? config.apiKey : this.defaultApiKey;
-    let rawBaseUrl = config.baseUrl || this.defaultBaseUrl;
+    const rawBaseUrl = config.baseUrl || this.defaultBaseUrl;
+    // The server's key is only ever sent to the server's configured endpoint. A
+    // caller-supplied baseUrl without its own apiKey gets NO key; otherwise anyone
+    // could point baseUrl at their own host and receive AI_API_KEY in the
+    // Authorization header.
+    const callerChoseEndpoint = Boolean(config.baseUrl)
+      && normalizeBaseUrl(config.baseUrl) !== normalizeBaseUrl(this.defaultBaseUrl);
+    let apiKey;
+    if (config.apiKey !== undefined) apiKey = config.apiKey;
+    else apiKey = callerChoseEndpoint ? '' : this.defaultApiKey;
 
     const isGemini = (apiKey && apiKey.startsWith('AIza')) || 
                      (rawBaseUrl && rawBaseUrl.includes('generativelanguage.googleapis.com'));
@@ -451,6 +466,14 @@ class AiParserGeneratorService {
   async generateParser({ url, aiConfig = {} }) {
     if (!url || typeof url !== 'string' || !url.startsWith('http')) {
       throw new Error('Valid HTTP/HTTPS URL is required');
+    }
+
+    // SSRF gate: refuse loopback / private / metadata targets before fetching.
+    const verdict = await this.urlGuard(url);
+    if (!verdict || !verdict.ok) {
+      const err = new Error(`Blocked outbound URL (${verdict ? verdict.reason : 'blocked'})`);
+      err.outboundVerdict = verdict || { ok: false, reason: 'blocked', detail: url };
+      throw err;
     }
 
     // 1. Fetch live page HTML
