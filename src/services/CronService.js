@@ -20,6 +20,10 @@ class CronService {
   async runSync() {
     if (this.syncing) return;
     this.syncing = true;
+    // Settles (never rejects) when this run ends; lets requestSync() queue a
+    // follow-up behind an in-flight run.
+    let releaseInflight;
+    this._inflightSync = new Promise((resolve) => { releaseInflight = resolve; });
     try {
       const activeMatches = await this.matchAggregator.syncMatches();
       if (activeMatches !== null) {
@@ -33,7 +37,31 @@ class CronService {
       throw error;
     } finally {
       this.syncing = false;
+      this._inflightSync = null;
+      releaseInflight();
     }
+  }
+
+  /**
+   * On-demand full sync, used by Parser Studio after a custom parser is saved
+   * or a manual sync is requested. Dynamic parsers are mounted into
+   * matchAggregator.providers, so the regular aggregator sync ingests them with
+   * normalization, merging and dedupe.
+   *
+   * Starts a sync when idle. When one is already running, it may have
+   * snapshotted the provider list before the parser was mounted, so a single
+   * follow-up run is queued behind it (concurrent requests share it).
+   */
+  requestSync() {
+    if (!this.syncing) return this.runSync();
+    if (!this._followUpSync) {
+      const idle = this._inflightSync || Promise.resolve();
+      this._followUpSync = idle.then(() => {
+        this._followUpSync = null;
+        return this.runSync();
+      });
+    }
+    return this._followUpSync;
   }
 
   // Rebuild the hot catalog pages right after a sync, so no user ever pays the
@@ -93,33 +121,9 @@ class CronService {
       }
     });
 
-    // Background sync for dynamic Custom AI parsers (every 30 mins)
-    cron.schedule(process.env.CUSTOM_AI_CRON_SCHEDULE || '*/30 * * * *', async () => {
-      try {
-        const container = require('../container');
-        const dynamicParserRegistry = container.resolve('dynamicParserRegistry');
-        const active = dynamicParserRegistry ? dynamicParserRegistry.activeProviders : null;
-        if (active && active.size > 0) {
-          console.log(`[CronService] Running background sync for ${active.size} custom AI parser(s)...`);
-          const cache = container.resolve('cacheService');
-          for (const provider of active.values()) {
-            try {
-              const matches = await provider.getMatches();
-              if (matches && matches.length > 0 && cache) {
-                const existing = (cache.getMatchesReadOnly ? cache.getMatchesReadOnly() : cache.getMatches()) || [];
-                const matchIds = new Set(matches.map(m => m.id));
-                const filtered = existing.filter(m => !matchIds.has(m.id));
-                cache.setMatches([...filtered, ...matches]);
-              }
-            } catch (pErr) {
-              console.warn(`[CronService] Custom AI sync error for ${provider.name}: ${pErr.message}`);
-            }
-          }
-        }
-      } catch (err) {
-        console.error('[CronService] Custom AI sync job failed:', err.message);
-      }
-    });
+    // No separate job for dynamic Custom AI parsers: they are mounted into
+    // matchAggregator.providers, so the match sync above (and the SWR
+    // re-sync) already crawls and merges them.
 
     // Prewarm LIVE matches only, so a click is near-instant.
     //
