@@ -124,10 +124,16 @@ describe('ceiling is coupled to the circuit breaker, never above it', () => {
 
 describe('call sites are wired correctly', () => {
   test('exactly 2 sync fetches use the helper', () => {
-    // Each sync fetch assigns its budget from the helper once, then passes the
+    // Both sync fetches go through raceMirrors, which derives each mirror's
+    // budget from the helper (clipped to the breaker deadline) and passes the
     // same value as both signal and timeoutMs (see the attempts:1 pin below).
     // Note: reduced from 3 to 2 after removing stale JSON pass in 4f3a2d3.
-    expect((source.match(/= resolveSyncTimeoutMs\(\)/g) || []).length).toBe(2);
+    const raceStart = source.indexOf('function raceMirrors(');
+    const raceEnd = source.indexOf('class DaddyLiveProvider');
+    const race = source.slice(raceStart, raceEnd);
+    expect((race.match(/Math\.min\(resolveSyncTimeoutMs\(\)/g) || []).length).toBe(1);
+    const ctor = source.slice(source.indexOf('constructor(opts = {})'), source.indexOf('clearCache(sourceId)'));
+    expect((ctor.match(/raceMirrors\(this\.baseDomains, cbTimeout,/g) || []).length).toBe(2);
   });
 
   test('the 4 resolve-path fetches keep their literal 6000 (bounded by handleStream)', () => {
@@ -139,7 +145,7 @@ describe('call sites are wired correctly', () => {
     const ctorEnd = source.indexOf('clearCache(sourceId)');
     const ctor = source.slice(ctorStart, ctorEnd);
     expect(ctor).not.toMatch(/AbortSignal\.timeout\(6000\)/);
-    expect((ctor.match(/= resolveSyncTimeoutMs\(\)/g) || []).length).toBe(2);
+    expect((ctor.match(/raceMirrors\(/g) || []).length).toBe(2);
   });
 
   test("requires 'os' exactly once and imports the breaker timeout", () => {
@@ -156,6 +162,8 @@ describe('call sites are wired correctly', () => {
     const ctorEnd = source.indexOf('clearCache(sourceId)');
     const ctor = source.slice(ctorStart, ctorEnd);
     expect((ctor.match(/^\s*attempts: 1$/gm) || []).length).toBe(2);
-    expect((ctor.match(/timeoutMs: (?:home)?[bB]udgetMs/g) || []).length).toBe(2);
+    // timeoutMs/signal come from raceMirrors' per-mirror budget.
+    expect((ctor.match(/^\s*timeoutMs,$/gm) || []).length).toBe(2);
+    expect((ctor.match(/^\s*signal,$/gm) || []).length).toBe(2);
   });
 });
