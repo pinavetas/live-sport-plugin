@@ -33,15 +33,10 @@ const { RESOLVER_PORT, workerOffset } = require('./resolverManager');
 
 // Removed global User-Agent fix because it causes ECONNRESET on Streamed.pk
 
-process.on('unhandledRejection', (reason) => {
-  // Client disconnects abort in-flight fetches; those rejections are expected and
-  // would otherwise spam the log with AbortError stack traces.
-  if (reason && (reason.name === 'AbortError' || reason.__expected)) return;
-  console.error('[unhandledRejection]', reason && reason.stack ? reason.stack : reason);
-});
-process.on('uncaughtException', (err) => {
-  console.error('[uncaughtException]', err && err.stack ? err.stack : err);
-});
+// unhandledRejection is logged (expected AbortErrors are ignored); an
+// uncaughtException logs and exits(1) so PM2 / Docker restart a clean process.
+const { installProcessHandlers, attachServerErrorHandler } = require('./services/processGuards');
+installProcessHandlers();
 
 // ─── Register Addon Handlers ──────────────────────────────────────────────────
 
@@ -1243,7 +1238,7 @@ if (workerOffset === 0) {
 }
 
 const BIND_HOST = process.env.HOST || process.env.IP || '0.0.0.0';
-app.listen(PORT, BIND_HOST, () => {
+const server = app.listen(PORT, BIND_HOST, () => {
   console.log('');
   console.log('╔══════════════════════════════════════════════════════╗');
   console.log('║          🔴 Nuvio Live Sports Plugin                 ║');
@@ -1256,6 +1251,9 @@ app.listen(PORT, BIND_HOST, () => {
   console.log('╚══════════════════════════════════════════════════════╝');
   console.log('');
 });
+// Without this, EADDRINUSE leaves a process that serves nothing while cron keeps
+// scraping, and PM2 / Docker never restart it.
+attachServerErrorHandler(server, { port: PORT, host: BIND_HOST });
 
 
 
