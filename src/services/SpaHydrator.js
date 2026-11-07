@@ -15,6 +15,13 @@
 
 const cheerio = require('cheerio');
 
+// Scraped values are interpolated into synthesized HTML; escape them so quotes or
+// markup in a title/link cannot break out of the attribute or inject elements.
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+function esc(value) {
+  return String(value === undefined || value === null ? '' : value).replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
+}
+
 class SpaHydrator {
   /**
    * Hydrates embedded SPA script state into static DOM match elements.
@@ -50,10 +57,10 @@ class SpaHydrator {
             const link = `/sports/${sportsSlug}/${gameSlug}/${g.id}/`;
 
             return `
-              <div class="match-item ft-sch-game-item" data-id="${g.id}">
-                <a href="${link}" class="match-link">
-                  <span class="match-title">${rawName}</span>
-                  <span class="match-time">${g.start || ''}</span>
+              <div class="match-item ft-sch-game-item" data-id="${esc(g.id)}">
+                <a href="${esc(link)}" class="match-link">
+                  <span class="match-title">${esc(rawName)}</span>
+                  <span class="match-time">${esc(g.start || '')}</span>
                 </a>
               </div>
             `;
@@ -84,10 +91,10 @@ class SpaHydrator {
                 const link = item.url || item.link || item.slug || item.href || '#';
                 const poster = item.poster || item.thumbnail || item.image || '';
                 return `
-                  <div class="match-item next-match-card" data-id="${item.id || i}">
-                    <a href="${link}" class="match-link">
-                      <span class="match-title">${title}</span>
-                      ${poster ? `<img src="${poster}" class="match-poster" />` : ''}
+                  <div class="match-item next-match-card" data-id="${esc(item.id || i)}">
+                    <a href="${esc(link)}" class="match-link">
+                      <span class="match-title">${esc(title)}</span>
+                      ${poster ? `<img src="${esc(poster)}" class="match-poster" />` : ''}
                     </a>
                   </div>
                 `;
