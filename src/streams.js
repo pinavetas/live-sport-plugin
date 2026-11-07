@@ -151,44 +151,59 @@ function selectSources(matchSources, config, match = null) {
     return enabledList.includes(srcName);
   };
 
+  // A source-list setting restricts only when it is an explicit list or
+  // 'none'. 'all' is the manifest default (src/manifest.js) that Stremio's
+  // native config form sends back verbatim, so it means "no restriction",
+  // exactly like an absent key.
+  const sourceSetting = (value) => {
+    if (typeof value !== 'string') return null;
+    const v = value.trim();
+    if (v.toLowerCase() === 'all') return null;
+    return v.toLowerCase() === 'none' ? 'none' : v;
+  };
+  const toList = (setting) => setting.split(',').map(s => s.trim());
+
+  const liveSetting = config ? sourceSetting(config.liveSources) : null;
+  const replaySetting = config ? sourceSetting(config.replaySources) : null;
+  const legacySetting = config ? sourceSetting(config.sources) : null;
+
   // Case 1: Granular Live and/or Replay sources configuration
-  const hasLiveConfig = config && typeof config.liveSources === 'string';
-  const hasReplayConfig = config && typeof config.replaySources === 'string';
+  const hasLiveConfig = liveSetting !== null;
+  const hasReplayConfig = replaySetting !== null;
 
   if (hasLiveConfig || hasReplayConfig) {
-    const liveAllowed = hasLiveConfig && config.liveSources !== 'none'
-      ? config.liveSources.split(',').map(s => s.trim())
-      : (hasLiveConfig && config.liveSources === 'none' ? [] : null);
-
-    const replayAllowed = hasReplayConfig && config.replaySources !== 'none'
-      ? config.replaySources.split(',').map(s => s.trim())
-      : (hasReplayConfig && config.replaySources === 'none' ? [] : null);
+    const liveAllowed = hasLiveConfig && liveSetting !== 'none' ? toList(liveSetting) : [];
+    const replayAllowed = hasReplayConfig && replaySetting !== 'none' ? toList(replaySetting) : [];
 
     return sortedSources.filter(src => {
       if (src.source.startsWith('yaml_')) return true;
       const isReplay = isReplaySource(src.source);
       if (isReplay) {
         if (!hasReplayConfig) return KNOWN_FALLBACKS.includes(src.source);
-        if (config.replaySources === 'none') return false;
+        if (replaySetting === 'none') return false;
+        // Custom-AI sources are not in the configure UI's checkbox list, so a
+        // narrowed list can never name them; only 'none' turns them off.
+        if (isDynamicCustomSource(src.source)) return true;
         return checkAllowed(src.source, replayAllowed);
       } else {
         if (!hasLiveConfig) return KNOWN_FALLBACKS.includes(src.source);
-        if (config.liveSources === 'none') return false;
+        if (liveSetting === 'none') return false;
         return checkAllowed(src.source, liveAllowed);
       }
     });
   }
 
   // Case 2: Legacy combined sources configuration (config.sources)
-  if (config && typeof config.sources === 'string') {
-    if (config.sources === 'none') {
+  if (legacySetting !== null) {
+    if (legacySetting === 'none') {
       return sortedSources.filter(src => src.source.startsWith('yaml_'));
     }
-    const enabled = config.sources.split(',').map(s => s.trim());
+    const enabled = toList(legacySetting);
     return sortedSources.filter(src => {
       if (src.source.startsWith('yaml_')) return true;
       const isFallback = KNOWN_FALLBACKS.includes(src.source);
       if (!isFallback) return false;
+      if (isDynamicCustomSource(src.source)) return true;
       return checkAllowed(src.source, enabled);
     });
   }
