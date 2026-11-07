@@ -310,14 +310,19 @@ const { normalizeCollectionSport, findCollectionPoster } = require('./services/C
  */
 async function entryToDataUri(entry) {
   if (!entry || !entry.buffer || !entry.contentType) return null;
+  // The data URI ends up inside an SVG that sharp rasterises, so an image with
+  // absurd declared dimensions would be decoded there instead: drop it.
+  if (imageService.exceedsPixelLimit(entry)) return null;
   let buffer = entry.buffer;
   let contentType = entry.contentType;
   if (contentType.includes('webp') || contentType.includes('avif')) {
     try {
       const sharp = require('sharp');
-      buffer = await sharp(buffer).png().toBuffer();
+      buffer = await sharp(buffer, imageService.sharpInputOptions()).png().toBuffer();
       contentType = 'image/png';
-    } catch (e) {}
+    } catch (e) {
+      if (e && /pixel limit/i.test(e.message || '')) return null;
+    }
   }
   return `data:${contentType};base64,${buffer.toString('base64')}`;
 }
@@ -780,6 +785,10 @@ app.get('/img', async (req, res) => {
       // Inline the bytes: an SVG poster never fetches external subresources, so
       // a nested URL here would render as a logo-less card.
       const imgUrl = await entryToDataUri(entry);
+      if (!imgUrl) {
+        // Over the decode pixel limit: never embed it, serve the text card.
+        return await sendRasterizedIfPossible(res, imageService.svgPlaceholder(text, color));
+      }
       const cleanTitle = String(text || '').replace(/\b(24\/7|live|stream|raw|hd)\b/gi, '').trim();
       const showTitle = cleanTitle.length > 0 && cleanTitle.length <= 36;
       // Broadcast Slate. This card previously carried its OWN near-black gradient

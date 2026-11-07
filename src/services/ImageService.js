@@ -28,9 +28,22 @@ try { require('sharp').cache(false); } catch (_) {}
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36';
 
+function envPositiveInt(name, fallback) {
+  const n = parseInt(process.env[name], 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 const IMAGE_TTL_MS = 10 * 60 * 1000;   // 10 minutes
 const CACHE_MAX_ENTRIES = 120;
 const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+// The entry cap alone allowed 120 x 5 MB = ~600 MB of encoded bytes per worker.
+// Bound the total too, evicting least-recently-used entries first.
+const CACHE_MAX_BYTES = envPositiveInt('IMAGE_CACHE_MAX_BYTES', 64 * 1024 * 1024);
+// A tiny file can declare huge dimensions (a 16k x 16k PNG is a few KB but
+// decodes to ~1 GB of RGBA). sharp's default limitInputPixels (~268 MP) does not
+// protect a worker with a 1.3 GB ceiling, so every decode of a fetched image is
+// capped well below that.
+const MAX_INPUT_PIXELS = envPositiveInt('IMAGE_MAX_INPUT_PIXELS', 4096 * 4096);
 // Total per-request cap (headers + body). This was 3000 ms, which is tight for a
 // CDN logo: jsDelivr routinely exceeds it under load, so a perfectly good logo
 // failed, went into the 60 s negative cache, and the card fell back to the
@@ -39,7 +52,8 @@ const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 // keeps the slow-loris protection while removing the spurious failures.
 const FETCH_TIMEOUT_MS = 8000;
 
-const cache = new Map();     // url -> { buffer, contentType, expiresAt }
+const cache = new Map();     // url -> { buffer, contentType, expiresAt } (LRU order)
+let cacheBytes = 0;          // sum of buffer lengths currently held in `cache`
 const inFlight = new Map();  // url -> Promise
 const negatives = new Map(); // url -> expiry ts (recently failed/slow sources)
 
@@ -182,9 +196,12 @@ async function getResizedImage(rawUrl, width) {
   const p = (async () => {
     const entry = await getImage(url);
     if (!entry) return null;
+    // Refuse before decoding when the header already declares too many pixels;
+    // sharp's own limit below covers formats the header parser does not read.
+    if (exceedsPixelLimit(entry)) return null;
     try {
       const sharp = require('sharp');
-      const out = await sharp(entry.buffer)
+      const out = await sharp(entry.buffer, sharpInputOptions())
         .resize({ width, withoutEnlargement: true })
         .jpeg({ quality: 82 })
         .toBuffer();
@@ -285,11 +302,46 @@ function parseImageDimensions(buffer) {
   }
 }
 
+/** Options for every sharp() call that decodes a fetched (untrusted) image. */
+function sharpInputOptions() {
+  return { limitInputPixels: MAX_INPUT_PIXELS };
+}
+
+/**
+ * True when the entry's header-declared dimensions exceed the decode limit.
+ * Unknown dimensions return false; sharp's limitInputPixels still applies.
+ */
+function exceedsPixelLimit(entry) {
+  if (!entry || !entry.width || !entry.height) return false;
+  return entry.width * entry.height > MAX_INPUT_PIXELS;
+}
+
+function cacheDelete(url) {
+  const existing = cache.get(url);
+  if (!existing) return;
+  cache.delete(url);
+  cacheBytes -= existing.buffer ? existing.buffer.length : 0;
+}
+
+/** Insert as most-recently-used and evict down to both caps. */
+function cacheSet(url, entry) {
+  cacheDelete(url);
+  const size = entry.buffer ? entry.buffer.length : 0;
+  // An entry that alone exceeds the byte budget would just flush everything else.
+  if (size > CACHE_MAX_BYTES) return;
+  cache.set(url, entry);
+  cacheBytes += size;
+  evictIfNeeded();
+}
+
 function evictIfNeeded() {
-  while (cache.size > CACHE_MAX_ENTRIES) {
-    const oldestKey = cache.keys().next().value;
-    cache.delete(oldestKey);
+  while (cache.size > 0 && (cache.size > CACHE_MAX_ENTRIES || cacheBytes > CACHE_MAX_BYTES)) {
+    cacheDelete(cache.keys().next().value);
   }
+}
+
+function getCacheStats() {
+  return { entries: cache.size, bytes: cacheBytes, maxEntries: CACHE_MAX_ENTRIES, maxBytes: CACHE_MAX_BYTES };
 }
 
 /**
@@ -312,10 +364,10 @@ async function getImage(rawUrl) {
     if (now < hit.expiresAt) {
       hit.lastAccess = now;
       cache.delete(url);
-      cache.set(url, hit);
+      cache.set(url, hit); // move to most-recently-used; byte total unchanged
       return hit;
     }
-    cache.delete(url);
+    cacheDelete(url);
   }
 
   const pending = inFlight.get(url);
@@ -371,9 +423,7 @@ async function getImage(rawUrl) {
               expiresAt: Date.now() + IMAGE_TTL_MS,
               lastAccess: Date.now()
             };
-            cache.delete(url);
-            cache.set(url, result);
-            evictIfNeeded();
+            cacheSet(url, result);
             break; // Success, exit retry loop
           }
         }
@@ -490,7 +540,12 @@ module.exports = {
   fetchImage,
   getResizedImage,
   getCachedMeta,
+  getCacheStats,
   parseImageDimensions,
+  sharpInputOptions,
+  exceedsPixelLimit,
+  MAX_INPUT_PIXELS,
+  CACHE_MAX_BYTES,
   proxyUrl,
   placeholderUrl,
   sportPosterUrl,
