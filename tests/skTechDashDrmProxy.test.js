@@ -1,5 +1,17 @@
 'use strict';
 
+// The DASH proxy now runs the SSRF guard before fetching, and this suite's fake
+// upstream listens on 127.0.0.1 (which the guard rightly blocks). Let the guard
+// pass here so the MPD rewrite logic stays covered; the guard itself is tested
+// against these routes in ssrfGuardEntryPoints.test.js.
+jest.mock('../src/services/OutboundUrlGuard', () => {
+  const actual = jest.requireActual('../src/services/OutboundUrlGuard');
+  return {
+    ...actual,
+    checkOutboundUrl: jest.fn(async (url) => ({ ok: true, url, hostname: new URL(url).hostname, addresses: [] })),
+  };
+});
+
 const http = require('http');
 const express = require('express');
 const SkTechCrypto = require('../src/resolver/sktech/SkTechCrypto');

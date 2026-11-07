@@ -396,7 +396,7 @@ async function handleDashManifestProxy(req, res) {
   if (cookie) headers['Cookie'] = cookie;
 
   try {
-    const result = await _safeFetch(targetUrl, { headers, timeoutMs: 10000 });
+    const result = await _safeFetch(targetUrl, { headers, timeoutMs: 10000, outboundGuard: true });
     if (!result.ok) {
       return res.status(result.status).send(`Upstream returned HTTP ${result.status}`);
     }
