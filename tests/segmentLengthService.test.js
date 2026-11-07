@@ -5,6 +5,19 @@ jest.mock('../src/impitClient', () => ({ safeFetch: jest.fn() }));
 const segmentLengthService = require('../src/services/SegmentLengthService');
 const { safeFetch } = require('../src/impitClient');
 const { SegmentLengthService } = segmentLengthService;
+const adaptiveDnsResolver = require('../src/services/AdaptiveDnsResolver');
+
+// Probes run through the SSRF guard, which resolves the hostname first. Keep the
+// suite offline: every test host resolves to a public documentation-free address
+// unless a test overrides it.
+const PUBLIC_ADDR = '93.184.216.34';
+let dnsAnswer = PUBLIC_ADDR;
+jest.spyOn(adaptiveDnsResolver, 'lookup').mockImplementation((host, opts, cb) => {
+  cb(null, [{ address: dnsAnswer, family: 4 }]);
+});
+
+// The guard's DNS step makes the probe start asynchronously.
+const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 function fakeHeaders(map = {}) {
   return { get: (k) => (map[String(k).toLowerCase()] !== undefined ? map[String(k).toLowerCase()] : null) };
@@ -15,6 +28,7 @@ describe('SegmentLengthService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    dnsAnswer = PUBLIC_ADDR;
     service = new SegmentLengthService({ maxSize: 10, autoProbe: false });
   });
 
@@ -129,6 +143,7 @@ describe('SegmentLengthService', () => {
     const first = svc.probeContentLength(firstUrl);
     const second = svc.probeContentLength(secondUrl);
     expect(svc.activeProbes).toBe(2);
+    await flush();
     expect(pending).toHaveLength(2);
 
     await expect(svc.probeContentLength(rejectedUrl)).resolves.toBeNull();
@@ -143,11 +158,25 @@ describe('SegmentLengthService', () => {
 
     const next = svc.probeContentLength(nextUrl);
     expect(svc.activeProbes).toBe(2);
+    await flush();
     expect(pending).toHaveLength(3);
 
     pending[1](okResponse);
     pending[2](okResponse);
     await expect(Promise.all([second, next])).resolves.toEqual([500000, 500000]);
+    expect(svc.activeProbes).toBe(0);
+  });
+
+  test('never dials a segment URI that targets a private / loopback address', async () => {
+    const svc = new SegmentLengthService({ maxSize: 10 });
+
+    await expect(svc.probeContentLength('http://127.0.0.1:7003/api/health.image')).resolves.toBeNull();
+    await expect(svc.probeContentLength('http://169.254.169.254/latest/meta-data.image')).resolves.toBeNull();
+    dnsAnswer = '192.168.1.10';
+    await expect(svc.probeContentLength('https://lan-cdn.example.com/seg.image')).resolves.toBeNull();
+
+    expect(safeFetch).not.toHaveBeenCalled();
+    expect(svc.probeFailures.has('http://127.0.0.1:7003/api/health.image')).toBe(true);
     expect(svc.activeProbes).toBe(0);
   });
 
