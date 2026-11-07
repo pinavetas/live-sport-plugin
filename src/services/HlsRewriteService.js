@@ -323,10 +323,20 @@ async function preprobeManifestSegments(manifestBody, manifestUrl, opts = {}) {
     segmentLengthService.probeContentLength(url, { referer, origin })
   );
 
-  await Promise.race([
-    Promise.allSettled(probePromises),
-    new Promise(resolve => setTimeout(resolve, 1500))
-  ]);
+  // Bound the wait at 1.5 s, but clear the timer as soon as the race settles:
+  // one timer per manifest request otherwise outlives the probes it guards.
+  let budgetTimer;
+  try {
+    await Promise.race([
+      Promise.allSettled(probePromises),
+      new Promise(resolve => {
+        budgetTimer = setTimeout(resolve, 1500);
+        if (typeof budgetTimer.unref === 'function') budgetTimer.unref();
+      })
+    ]);
+  } finally {
+    clearTimeout(budgetTimer);
+  }
 }
 
 module.exports = {
