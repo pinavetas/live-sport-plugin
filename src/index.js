@@ -22,6 +22,7 @@ const path = require('path');
 
 const { builder } = require('./manifest');
 const { handleCatalog, handleMeta, isReplayMatch, isCustomAiMatch } = require('./catalog');
+const { createReplaySubcatalogHandler } = require('./routes/replaySubcatalogs');
 const { handleStream } = require('./streams');
 const { PORT, BASE_URL, getRequestBaseUrl, getLocalIp } = require('./config');
 const { isLocalDirectRequest } = require('./services/localRequest');
@@ -1196,34 +1197,7 @@ app.get([
   '/catalog/:type/:id/:extra.json',
   '/:config/catalog/:type/:id.json',
   '/:config/catalog/:type/:id/:extra.json'
-], async (req, res, next) => {
-  const { type, id } = req.params;
-  if (id && id.startsWith('nuvio_sports_replays_') && id !== 'nuvio_sports_replays') {
-    const config = applyCompactParams(
-      req.params.config ? decodeConfigSegment(req.params.config) : {},
-      req.query
-    );
-    let extra = {};
-    if (req.params.extra) {
-      try {
-        const parts = req.params.extra.split('&');
-        for (const p of parts) {
-          const [k, v] = p.split('=');
-          if (k && v) extra[k] = decodeURIComponent(v);
-        }
-      } catch (_) {}
-    }
-    const result = await handleCatalog(type, id, extra, config);
-    res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    if (result && Number.isInteger(result.cacheMaxAge)) {
-      const swr = Number.isInteger(result.staleRevalidate) ? result.staleRevalidate : result.cacheMaxAge * 2;
-      res.setHeader('Cache-Control', `max-age=${result.cacheMaxAge}, stale-while-revalidate=${swr}, public`);
-    }
-    return res.json(result);
-  }
-  next();
-});
+], createReplaySubcatalogHandler({ handleCatalog, decodeConfigSegment, applyCompactParams }));
 
 // Mount the Stremio addon router
 app.use(getRouter(builder.getInterface()));
