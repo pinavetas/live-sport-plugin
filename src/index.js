@@ -21,7 +21,7 @@ const child_process = require('child_process');
 const path = require('path');
 
 const { builder } = require('./manifest');
-const { handleCatalog, handleMeta, isReplayMatch, isCustomAiMatch } = require('./catalog');
+const { handleCatalog, handleMeta, isReplayMatch, hasCustomAiContent } = require('./catalog');
 const { handleStream } = require('./streams');
 const { PORT, BASE_URL, getRequestBaseUrl, getLocalIp } = require('./config');
 const { isLocalDirectRequest } = require('./services/localRequest');
@@ -1073,13 +1073,12 @@ app.get('/:config?/manifest.json', (req, res, next) => {
   }
 
   // Hide custom AI games catalog if no dynamic parsers are configured and no custom matches exist
+  // (in-memory only: mounted providers first, then a flag scan of the cache;
+  // reading the parser storage file per match blocked the event loop).
   try {
-    const dpr = container.resolve('dynamicParserRegistry');
     const cs = container.resolve('cacheService');
-    const hasParsers = dpr && dpr.listParsers && dpr.listParsers().length > 0;
     const cachedMatches = (cs && cs.getMatchesReadOnly ? cs.getMatchesReadOnly() : (cs ? cs.getMatches() : [])) || [];
-    const hasCustomMatches = cachedMatches.some(m => isCustomAiMatch(m));
-    if (!hasParsers && !hasCustomMatches) {
+    if (!hasCustomAiContent(cachedMatches)) {
       newManifest.catalogs = newManifest.catalogs.filter(c => c.id !== 'nuvio_sports_custom_ai');
     }
   } catch (_) {}
