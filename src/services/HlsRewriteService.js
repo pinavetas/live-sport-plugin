@@ -24,12 +24,12 @@
  *  - anything else → absolute URL as-is
  */
 
-const { createWorkerPool } = require('./WorkerBudget');
+const { createWorkerPool, resolveBudgetFile } = require('./WorkerBudget');
 const byteRangeSigner = require('./ByteRangeSigner');
 const segmentLengthService = require('./SegmentLengthService');
 
 // Legacy fallback worker pool (for explicit opt-out or testing)
-const workerPool = createWorkerPool();
+const workerPool = createWorkerPool({ persistPath: resolveBudgetFile() });
 
 /**
  * Detect whether a segment URL is a TikTok / ByteDance cloaked segment (WebP with MPEG-TS).
