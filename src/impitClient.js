@@ -432,10 +432,21 @@ async function fetchWithinDeadline(url, opts, deadlineAt) {
           if (!proxyUrl) recordImpitTlsFailure(url);
           break;
         }
-        // If impit failed because of connection refused to loopback (127.0.0.1) or DNS failure,
-        // trip the circuit breaker immediately and fall back to undici without further retries.
+        // Connection refused to loopback or a DNS failure: retrying impit (OS
+        // getaddrinfo) cannot help, so fall back to undici (adaptive DNS) now.
+        // Only trip the circuit breaker on EVIDENCE of sinkholing: a plain
+        // "dns error" / "Host desconocido" is also what a genuinely dead domain
+        // produces, and poisoning it would disable impit's TLS impersonation for
+        // 30 min for no reason. The check runs in the background so it never
+        // adds latency to this request.
         if (targetHostname && (errMsg.includes('127.0.0.1') || errMsg.includes('dns error') || errMsg.includes('Host desconocido') || errMsg.includes('ConnectionRefused'))) {
-          adaptiveDnsResolver.markPoisoned(targetHostname, 'impit-sinkhole-detected');
+          const host = targetHostname;
+          Promise.resolve()
+            .then(() => adaptiveDnsResolver.confirmSinkhole(host, errMsg))
+            .then((sinkholed) => {
+              if (sinkholed) adaptiveDnsResolver.markPoisoned(host, 'impit-sinkhole-detected');
+            })
+            .catch(() => {});
           break;
         }
         if (attempt < maxAttempts) {
