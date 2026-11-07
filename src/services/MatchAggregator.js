@@ -4,6 +4,12 @@
 // aggregated cache. Bounds replay list growth while preserving the full annual season.
 const REPLAY_RETENTION_DAYS = 365;
 
+// Per-provider deadline for one sync. syncMatches waits for every provider
+// (allSettled), so without this one slow or hung scraper delays the whole
+// catalog refresh, or stalls it forever if its promise never settles. A
+// provider that misses the deadline is treated exactly like one that threw.
+const PROVIDER_SYNC_TIMEOUT_MS = Number(process.env.PROVIDER_SYNC_TIMEOUT_MS) || 60000;
+
 const STOP_WORDS = new Set([
   'the', 'and', 'vs', 'v', 'live', 'stream', 'fc', 'cf', 'sc', 'united', 'city',
   'real', 'sport', 'sports', 'club', 'de', 'la', 'women', 'men', 'u19', 'u20',
@@ -460,6 +466,7 @@ class MatchAggregator {
     this.providerHealthService = providerHealthService;
     this.vavooProvider = vavooProvider;
     this.broadcasterMatchService = broadcasterMatchService;
+    this.providerSyncTimeoutMs = PROVIDER_SYNC_TIMEOUT_MS;
     if (this.providerHealthService) this.providerHealthService.registerProviders(this.providers);
   }
 
@@ -887,8 +894,17 @@ class MatchAggregator {
 
   async _fetchProviderMatches(provider) {
     const startedAt = Date.now();
+    const timeoutMs = this.providerSyncTimeoutMs;
+    let timer = null;
     try {
-      const matches = await provider.getMatches();
+      const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const name = (provider && (provider.sourceName || provider.name)) || 'provider';
+          reject(new Error(`${name} getMatches timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+        if (timer && typeof timer.unref === 'function') timer.unref();
+      });
+      const matches = await Promise.race([provider.getMatches(), deadline]);
       if (this.providerHealthService) {
         this.providerHealthService.recordResult(provider, {
           matches,
@@ -905,6 +921,8 @@ class MatchAggregator {
         });
       }
       throw error;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
