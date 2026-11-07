@@ -900,6 +900,11 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
       });
     }
     metaPreview.videos = videos;
+    // For multi-part series replays (> 1 video), omit defaultVideoId so Stremio
+    // presents the episode/part list instead of auto-playing Part 1.
+    if (videos.length > 1 && metaPreview.behaviorHints) {
+      delete metaPreview.behaviorHints.defaultVideoId;
+    }
   }
 
   return metaPreview;

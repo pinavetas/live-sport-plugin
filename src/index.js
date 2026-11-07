@@ -921,7 +921,7 @@ app.use((req, res, next) => {
             return `${currentBaseUrl}${url}`;
           }
           // Absolute URLs with legacy/static base or localhost/LAN IP
-          const match = url.match(/^(?:https?:\/\/[^\/]+)(\/(?:img|watch|api\/manifest|api\/dash|api\/mp4proxy|api\/fastmp4|api\/hlschunk|api\/hls|hls|logo|posters|donate)(?:[?\/].*|\.[A-Za-z0-9]+)?)$/);
+          const match = url.match(/^(?:https?:\/\/[^\/]+)(\/(?:img|watch|api\/manifest|api\/dash|api\/mp4proxy|api\/fastmp4|api\/hlschunk|api\/hls|hls|logo|posters|donate)(?:\.[A-Za-z0-9]+)?(?:[?\/].*)?)$/);
           if (match) {
             modified = true;
             return `${currentBaseUrl}${match[1]}`;
