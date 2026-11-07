@@ -203,41 +203,71 @@ function isMatchLive(match) {
  * Replays must originate from a replay-capable provider (replayzone, livetv).
  */
 /**
- * Determines whether a match was parsed by an AI-generated custom parser.
+ * Returns the in-memory map of mounted custom-AI providers (sourceName ->
+ * provider), or null when the registry is unavailable.
+ *
+ * Only the runtime map is consulted: it is populated from the stored configs at
+ * boot and kept in sync by save/delete, so it is the authoritative set of active
+ * parsers. Reading the storage file instead (listParsers: existsSync +
+ * readFileSync + JSON.parse) cost ~31µs per call, which blocked the event loop
+ * for ~0.3s when applied to every match of a ~10k-match cache.
  */
-function isCustomAiMatch(match) {
+function getActiveCustomAiProviders() {
+  let registry = null;
+  try {
+    registry = container.resolve('dynamicParserRegistry');
+  } catch (_) {
+    try { registry = require('./services/DynamicParserRegistry'); } catch (_) {}
+  }
+  const active = registry && registry.activeProviders;
+  return active && typeof active.has === 'function' ? active : null;
+}
+
+/**
+ * Core custom-AI check against an already-resolved active provider map, so hot
+ * loops resolve the registry once instead of once per match.
+ */
+function matchBelongsToCustomAi(match, active) {
   if (!match) return false;
   if (match.isCustomAi === true) return true;
   if (match.customAiSource) return true;
+  if (!active || active.size === 0) return false;
 
   if (Array.isArray(match.sources)) {
-    let dynamicParserRegistry = null;
-    try {
-      dynamicParserRegistry = container.resolve('dynamicParserRegistry');
-    } catch (_) {
-      try { dynamicParserRegistry = require('./services/DynamicParserRegistry'); } catch (_) {}
-    }
-    if (dynamicParserRegistry) {
-      const active = dynamicParserRegistry.activeProviders;
-      if (active && active.size > 0) {
-        for (let i = 0; i < match.sources.length; i++) {
-          const s = match.sources[i];
-          if (s && s.source && active.has(s.source)) return true;
-        }
-      }
-      if (typeof dynamicParserRegistry.listParsers === 'function') {
-        const parsers = dynamicParserRegistry.listParsers();
-        for (let i = 0; i < parsers.length; i++) {
-          const p = parsers[i];
-          const pName = p.name || p.id;
-          if (pName && ((match.id && match.id.startsWith(pName + '_')) || match.sources.some(s => s.source === pName))) {
-            return true;
-          }
-        }
-      }
+    for (let i = 0; i < match.sources.length; i++) {
+      const s = match.sources[i];
+      if (s && s.source && active.has(s.source)) return true;
     }
   }
+  if (typeof match.id === 'string') {
+    for (const name of active.keys()) {
+      if (name && match.id.startsWith(name + '_')) return true;
+    }
+  }
+  return false;
+}
 
+/**
+ * Determines whether a match was parsed by an AI-generated custom parser.
+ * Pure in-memory check (flags + active provider names); never touches disk.
+ */
+function isCustomAiMatch(match) {
+  if (!match) return false;
+  if (match.isCustomAi === true || match.customAiSource) return true;
+  return matchBelongsToCustomAi(match, getActiveCustomAiProviders());
+}
+
+/**
+ * Whether the Custom IA catalog has anything to show: a mounted custom parser,
+ * or a cached match flagged as custom-AI. Used by the manifest handler.
+ */
+function hasCustomAiContent(matches) {
+  const active = getActiveCustomAiProviders();
+  if (active && active.size > 0) return true;
+  if (!Array.isArray(matches)) return false;
+  for (let i = 0; i < matches.length; i++) {
+    if (matchBelongsToCustomAi(matches[i], active)) return true;
+  }
   return false;
 }
 
@@ -1474,7 +1504,8 @@ async function handleCatalogUncached(type, id, extra, config) {
     const now = Date.now();
     filteredMatches = matches.filter(m => !isMatchLive(m) && (getKickoff(m.date) || 0) > now);
   } else if (categoryMatch === 'custom_ai') {
-    filteredMatches = matches.filter(m => isCustomAiMatch(m));
+    const activeCustomAi = getActiveCustomAiProviders();
+    filteredMatches = matches.filter(m => matchBelongsToCustomAi(m, activeCustomAi));
   } else if (categoryMatch === 'replays') {
     filteredMatches = matches.filter(m => {
       if (!isReplayMatch(m)) return false;
@@ -1864,6 +1895,7 @@ module.exports = {
   isMatchLive,
   isReplayMatch,
   isCustomAiMatch,
+  hasCustomAiContent,
   mapMatchToMetaPreview,
   getKickoff,
   getEventDurationMs,
