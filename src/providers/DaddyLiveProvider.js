@@ -128,6 +128,85 @@ function resolveSyncTimeoutMs() {
   return Math.max(baseMs, Math.min(scaled, maxMs));
 }
 
+// Mirror racing for the sync fetches (schedule / 24-7 channels).
+//
+// The breaker around each fetch aborts the whole call at cbTimeout (30s by
+// default), but each mirror alone may take resolveSyncTimeoutMs() (12-18s+).
+// Tried strictly one after another, a hanging first and second mirror
+// exhausted the breaker before the third was ever contacted. Instead, the
+// next mirror is started as soon as the current one fails OR after a stagger
+// of (cbTimeout - margin) / mirrors, whichever comes first, and every
+// attempt is clipped to the time left before the breaker would fire. So
+// every mirror is reached within the breaker timeout, while a healthy first
+// mirror still serves alone.
+const MIRROR_BREAKER_MARGIN_MS = 2000;
+const MIRROR_MIN_BUDGET_MS = 4000;
+
+function raceMirrors(bases, totalBudgetMs, attemptFn, failMessage = 'All mirrors failed') {
+  const budgetMs = Math.max(MIRROR_MIN_BUDGET_MS, totalBudgetMs - MIRROR_BREAKER_MARGIN_MS);
+  const deadline = Date.now() + budgetMs;
+  const staggerMs = Math.max(MIRROR_MIN_BUDGET_MS, Math.floor(budgetMs / Math.max(1, bases.length)));
+
+  return new Promise((resolve, reject) => {
+    let next = 0;
+    let pending = 0;
+    let settled = false;
+    let lastErr = null;
+    let staggerTimer = null;
+    const controllers = [];
+
+    const stopAll = (except) => {
+      clearTimeout(staggerTimer);
+      for (const c of controllers) if (c !== except) c.abort();
+    };
+
+    const onAttemptFailed = (err) => {
+      if (err) lastErr = err;
+      if (next < bases.length) launch();
+      else if (pending === 0) {
+        settled = true;
+        stopAll(null);
+        reject(lastErr || new Error(failMessage));
+      }
+    };
+
+    function launch() {
+      clearTimeout(staggerTimer);
+      staggerTimer = null;
+      if (settled || next >= bases.length) return;
+      const base = bases[next++];
+      const attemptMs = Math.min(resolveSyncTimeoutMs(), Math.max(MIRROR_MIN_BUDGET_MS, deadline - Date.now()));
+      const ctrl = new AbortController();
+      controllers.push(ctrl);
+      const signal = AbortSignal.any([ctrl.signal, AbortSignal.timeout(attemptMs)]);
+      pending++;
+      Promise.resolve()
+        .then(() => attemptFn(base, { signal, timeoutMs: attemptMs }))
+        .then((value) => {
+          pending--;
+          if (settled) return;
+          if (value != null) {
+            settled = true;
+            stopAll(ctrl);
+            resolve(value);
+          } else {
+            onAttemptFailed(null);
+          }
+        }, (err) => {
+          pending--;
+          if (settled) return;
+          onAttemptFailed(err);
+        });
+      if (next < bases.length) {
+        staggerTimer = setTimeout(launch, staggerMs);
+        if (typeof staggerTimer.unref === 'function') staggerTimer.unref();
+      }
+    }
+
+    launch();
+  });
+}
+
 class DaddyLiveProvider extends BaseProvider {
   static isEventStream(name) {
     if (!name || typeof name !== 'string') return false;
@@ -176,19 +255,15 @@ class DaddyLiveProvider extends BaseProvider {
     };
 
     this.fetchSchedule = this.circuitBreaker.wrapSync(`${this.name}_fetchSchedule`, async () => {
-      let lastErr = null;
-
-      // Pass 2: Scrape live homepage HTML (contains current real-time schedule)
-      for (const base of this.baseDomains) {
-        try {
-          const homeBudgetMs = resolveSyncTimeoutMs();
+      // Scrape live homepage HTML (contains current real-time schedule)
+      return raceMirrors(this.baseDomains, cbTimeout, async (base, { signal, timeoutMs }) => {
           const homeRes = await this.proxyFetch(`${base}/`, {
             headers: {
               'User-Agent': UA,
               'Referer': `${base}/`
             },
-            signal: AbortSignal.timeout(homeBudgetMs),
-            timeoutMs: homeBudgetMs,
+            signal,
+            timeoutMs,
             attempts: 1
           });
           if (homeRes && homeRes.ok) {
@@ -196,27 +271,20 @@ class DaddyLiveProvider extends BaseProvider {
             const parsed = this.parseScheduleHtml(homeHtml);
             if (parsed) return parsed;
           }
-        } catch (e) {
-          lastErr = e;
-        }
-      }
-
-      throw lastErr || new Error('All DaddyLive schedule endpoints failed');
+          return null;
+        }, 'All DaddyLive schedule endpoints failed');
     }, dlCbOptions);
 
     this.fetchChannels = this.circuitBreaker.wrapSync(`${this.name}_fetchChannels`, async () => {
-      let lastErr = null;
-      for (const base of this.baseDomains) {
-        try {
+      return raceMirrors(this.baseDomains, cbTimeout, async (base, { signal, timeoutMs }) => {
           const url = `${base}/24-7-channels.php`;
-          const budgetMs = resolveSyncTimeoutMs();
           const res = await this.proxyFetch(url, {
             headers: {
               'User-Agent': UA,
               'Referer': `${base}/`
             },
-            signal: AbortSignal.timeout(budgetMs),
-            timeoutMs: budgetMs,
+            signal,
+            timeoutMs,
             attempts: 1
           });
           if (res.ok) {
@@ -226,11 +294,8 @@ class DaddyLiveProvider extends BaseProvider {
               return res.text;
             }
           }
-        } catch (e) {
-          lastErr = e;
-        }
-      }
-      throw lastErr || new Error('All DaddyLive 24-7 channels endpoints failed');
+          return null;
+        }, 'All DaddyLive 24-7 channels endpoints failed');
     }, dlCbOptions);
   }
 
@@ -1046,3 +1111,4 @@ class DaddyLiveProvider extends BaseProvider {
 }
 
 module.exports = DaddyLiveProvider;
+module.exports._raceMirrors = raceMirrors; // exposed for tests
