@@ -14,6 +14,7 @@
 'use strict';
 
 const cheerio = require('cheerio');
+const { parseJsLiteral } = require('./safeJsLiteral');
 
 class SpaHydrator {
   /**
@@ -33,8 +34,8 @@ class SpaHydrator {
     const ftbMatch = rawHtml.match(/window\.ftbPageData\s*=\s*(\{[\s\S]*?\});\s*<\/script>/);
     if (ftbMatch) {
       try {
-        const fn = new Function('return ' + ftbMatch[1]);
-        const data = fn();
+        // Literal-only evaluation: the payload is third-party HTML, never execute it.
+        const data = parseJsLiteral(ftbMatch[1]);
         if (data && Array.isArray(data.schedule) && data.schedule.length > 0) {
           const sportsSlug = data.sports && data.sports.slug 
             ? String(data.sports.slug).replace(/-sports$/, '') 
