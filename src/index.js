@@ -298,6 +298,7 @@ app.get('/api/matches', (req, res) => {
 //                         placehold.co dependency.
 const imageService = require('./services/ImageService');
 const { resolveEmbedBase } = require('./services/EmbedBase');
+const { normalizeCollectionSport, findCollectionPoster } = require('./services/CollectionPoster');
 
 /**
  * Encode a fetched image as a data URI.
@@ -357,21 +358,22 @@ async function sendRasterizedIfPossible(res, svg) {
 }
 
 app.get(['/img/collection/:sport', '/:config/img/collection/:sport'], async (req, res) => {
-  const sport = (req.params.sport || 'football').toLowerCase().replace(/\.(jpg|jpeg|png|svg)$/i, '');
-  const candidatePaths = [
-    path.join(__dirname, '..', 'public', 'posters', 'collections', `${sport}.jpg`),
-    path.join(__dirname, 'public', 'posters', 'collections', `${sport}.jpg`),
-    path.join(process.cwd(), 'public', 'posters', 'collections', `${sport}.jpg`),
-    path.join(process.cwd(), 'dist', 'public', 'posters', 'collections', `${sport}.jpg`)
-  ];
-  for (const p of candidatePaths) {
-    if (fs.existsSync(p)) {
-      res.setHeader('Content-Type', 'image/jpeg');
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-      res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
-      return res.sendFile(p);
-    }
+  // Express URL-decodes :sport, so `..%2F` arrives as `../`: whitelist the key
+  // before it ever reaches a filesystem path.
+  const sport = normalizeCollectionSport(req.params.sport);
+  if (!sport) return res.status(400).end();
+  const posterPath = findCollectionPoster(sport, [
+    path.join(__dirname, '..', 'public', 'posters', 'collections'),
+    path.join(__dirname, 'public', 'posters', 'collections'),
+    path.join(process.cwd(), 'public', 'posters', 'collections'),
+    path.join(process.cwd(), 'dist', 'public', 'posters', 'collections')
+  ]);
+  if (posterPath) {
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+    return res.sendFile(posterPath);
   }
   const svg = imageService.generateSportSvg(sport, 'landscape', { badge: 'REPLAYS' });
   res.setHeader('Access-Control-Allow-Origin', '*');
