@@ -149,6 +149,10 @@ function recordImpitTlsFailure(url) {
 }
 
 // -- Shared undici keep-alive agent -------------------------------------------
+// Scraping-only agent: TLS verification is relaxed because several upstream
+// stream hosts serve broken or self-signed chains. It is passed EXPLICITLY as
+// `dispatcher` by the undici path below and must never become the process-wide
+// default.
 const _undiciAgent = new Agent({
   connect: {
     timeout: 20000,
@@ -159,8 +163,21 @@ const _undiciAgent = new Agent({
   keepAliveMaxTimeout: 30000,
 });
 
+// Process-wide agent used by global fetch (LLM APIs with API keys, DoH, any
+// other library). It keeps the adaptive DNS lookup (sinkhole bypass) but leaves
+// TLS verification at Node's secure default. Installing `_undiciAgent` here
+// would silently disable certificate checks for every fetch in the process.
+const _globalAgent = new Agent({
+  connect: {
+    timeout: 20000,
+    lookup: (hostname, opts, cb) => adaptiveDnsResolver.lookup(hostname, opts, cb),
+  },
+  keepAliveTimeout: 15000,
+  keepAliveMaxTimeout: 30000,
+});
+
 try {
-  setGlobalDispatcher(_undiciAgent);
+  setGlobalDispatcher(_globalAgent);
 } catch (_) {}
 
 // Enough for the mirror 301s observed in production, small enough that a rogue
