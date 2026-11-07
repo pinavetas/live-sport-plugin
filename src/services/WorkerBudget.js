@@ -128,9 +128,12 @@ const DEFAULT_PERSIST_DEBOUNCE_MS = 5000;
  * Returns null under Jest so parallel test workers never share or inherit
  * budget state; tests opt in with an explicit temp persistPath.
  */
-function resolveBudgetFile(env = process.env) {
+function resolveBudgetFile(env = process.env, cwd = process.cwd()) {
   if (env.JEST_WORKER_ID) return null;
-  const dir = env.DATA_DIR || path.join(process.cwd(), 'data');
+  // cwd is a runtime parameter on purpose: the ncc production build rewrites a
+  // literal path.join(process.cwd(), 'data') into a dist/ asset, which would
+  // put the persisted counters inside the build output (wiped every build).
+  const dir = env.DATA_DIR || path.join(cwd, 'data');
   const instance = env.NODE_APP_INSTANCE !== undefined && env.NODE_APP_INSTANCE !== ''
     ? `.${String(env.NODE_APP_INSTANCE).replace(/[^\w-]/g, '')}`
     : '';

@@ -129,5 +129,6 @@ describe('resolveBudgetFile', () => {
 
   test('falls back to ./data', () => {
     expect(resolveBudgetFile({})).toBe(path.join(process.cwd(), 'data', 'worker_budget.json'));
+    expect(resolveBudgetFile({}, path.join('srv', 'app'))).toBe(path.join('srv', 'app', 'data', 'worker_budget.json'));
   });
 });
