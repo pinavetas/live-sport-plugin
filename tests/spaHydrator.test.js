@@ -82,3 +82,55 @@ describe('SpaHydrator - Client-Side Rendered (SPA) Virtual DOM Hydration', () =>
     expect(SpaHydrator.hydrate('<script>window.ftbPageData = invalid-syntax;</script>')).toContain('window.ftbPageData');
   });
 });
+
+describe('SpaHydrator - escapes scraped values in synthesized HTML', () => {
+  const cheerio = require('cheerio');
+
+  test('ftbPageData titles with quotes and markup stay text, not markup', () => {
+    const rawHtml = `<html><body><section class="ft-sch"></section><script>
+      window.ftbPageData = {
+        sports: {"slug":"football"},
+        schedule: [{"id":"7\\" onclick=\\"x","name":"Say \\"Hi\\" <b>bold</b> & co","start":"<i>1</i>"}]
+      };
+    </script></body></html>`;
+
+    const $ = cheerio.load(SpaHydrator.hydrate(rawHtml));
+    const card = $('.ft-sch-game-item');
+    expect(card).toHaveLength(1);
+    expect(card.attr('data-id')).toBe('7" onclick="x');
+    expect(card.attr('onclick')).toBeUndefined();
+    expect(card.find('.match-title').text()).toBe('Say "Hi" <b>bold</b> & co');
+    expect(card.find('b')).toHaveLength(0);
+    expect(card.find('i')).toHaveLength(0);
+    expect(card.find('.match-time').text()).toBe('<i>1</i>');
+  });
+
+  test('__NEXT_DATA__ title/link/poster/id with quotes and markup cannot break attributes', () => {
+    const payload = {
+      props: {
+        pageProps: {
+          matches: [{
+            id: 'm"1',
+            title: 'A "quoted" <b>title</b>',
+            url: '/watch/a" onmouseover="alert(1)',
+            poster: 'https://img.test/p.jpg" onerror="alert(1)',
+          }],
+        },
+      },
+    };
+    const rawHtml = `<html><body><script id="__NEXT_DATA__" type="application/json">${JSON.stringify(payload)}</script></body></html>`;
+
+    const $ = cheerio.load(SpaHydrator.hydrate(rawHtml));
+    const card = $('.next-match-card');
+    expect(card).toHaveLength(1);
+    expect(card.attr('data-id')).toBe('m"1');
+    expect(card.find('.match-title').text()).toBe('A "quoted" <b>title</b>');
+    expect(card.find('b')).toHaveLength(0);
+    const a = card.find('a.match-link');
+    expect(a.attr('href')).toBe('/watch/a" onmouseover="alert(1)');
+    expect(a.attr('onmouseover')).toBeUndefined();
+    const img = card.find('img.match-poster');
+    expect(img.attr('src')).toBe('https://img.test/p.jpg" onerror="alert(1)');
+    expect(img.attr('onerror')).toBeUndefined();
+  });
+});

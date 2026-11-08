@@ -1,122 +1,236 @@
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-puppeteer.use(StealthPlugin());
+'use strict';
+
+/**
+ * run_puppeteer_extractor.js
+ *
+ * Generic headless browser network sniffer for live streams.
+ * Intercepts HLS (.m3u8) and DASH (.mpd) manifests from complex or obfuscated embed players.
+ *
+ * Features:
+ * - Dynamic loader: puppeteer-extra (with stealth), standard puppeteer, or puppeteer-core
+ * - Resource blocking: aborts images, fonts, media, and ad trackers for fast load times
+ * - Active player triggers: unmutes and clicks play buttons / video elements
+ * - Structured JSON output on stdout: { success: true, file, type, headers }
+ * - Strict timeout protection preventing hanging processes
+ */
+
+function resolvePuppeteer() {
+  try {
+    const extra = require('puppeteer-extra');
+    try {
+      const Stealth = require('puppeteer-extra-plugin-stealth');
+      extra.use(Stealth());
+    } catch (_) {}
+    return extra;
+  } catch (_) {
+    try {
+      return require('puppeteer');
+    } catch (_) {
+      try {
+        return require('puppeteer-core');
+      } catch (_) {
+        return null;
+      }
+    }
+  }
+}
 
 const args = process.argv.slice(2);
 const targetUrl = args[0];
-const referer = args[1];
+const referer = args[1] && args[1] !== 'EMPTY' ? args[1] : null;
+const timeoutMs = Math.max(5000, Math.min(30000, Number(args[2]) || 15000));
 
 if (!targetUrl) {
-    console.error("No target URL provided");
-    process.exit(1);
+  console.error(JSON.stringify({ success: false, error: 'No target URL provided' }));
+  process.exit(1);
+}
+
+const puppeteer = resolvePuppeteer();
+
+if (!puppeteer) {
+  console.error(JSON.stringify({ success: false, error: 'No puppeteer package available' }));
+  process.exit(2);
 }
 
 (async () => {
-    let browser;
-    try {
-        browser = await puppeteer.launch({ 
-            headless: 'new',
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process'
-            ]
-        });
-        
-        const page = await browser.newPage();
-        
-        if (referer && referer !== 'EMPTY') {
-            await page.setExtraHTTPHeaders({
-                'Referer': referer
-            });
-        }
-        
-        await page.setRequestInterception(true);
-        
-        let foundM3u8 = null;
-        
-        page.on('request', req => {
-            req.continue();
-        });
-        
-        page.on('response', async res => {
-            let url = res.url();
-            if (url.includes('url=')) {
-                try {
-                    const urlMatch = url.match(/url=([^&]+)/);
-                    if (urlMatch) {
-                        const decoded = decodeURIComponent(urlMatch[1]);
-                        if (decoded.includes('.m3u8')) url = decoded;
-                    }
-                } catch(e) {}
-            }
-            if (url.includes('.m3u8') && !url.includes('blank.m3u8') && !foundM3u8) {
-                foundM3u8 = url;
-                console.log(JSON.stringify({ file: url }));
-                await browser.close();
-                process.exit(0);
-            }
-        });
-        
-        setTimeout(async () => {
-            console.error("Timeout waiting for m3u8");
-            if (browser) await browser.close();
-            process.exit(1);
-        }, 35000);
-        
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        
-        // Check for iframes every 2 seconds, and try to click play
-        for (let i = 0; i < 15; i++) {
-            await new Promise(r => setTimeout(r, 2000));
-            if (foundM3u8) break;
-            
-            // Attempt to click anything that looks like a play button or just play the video
-            await page.evaluate(() => {
-                try {
-                    const video = document.querySelector('video');
-                    if (video) video.play();
-                } catch(e) {}
-                try {
-                    document.querySelectorAll('.jw-video, .jw-media, video, .vjs-big-play-button, .vjs-tech, .jw-display-icon-display').forEach(el => {
-                        el.click();
-                    });
-                } catch(e) {}
-            });
-            
-            const iframeM3u8 = await page.evaluate(() => {
-                let found = null;
-                document.querySelectorAll('iframe').forEach(f => {
-                    try {
-                        let src = f.src || '';
-                        let urlMatch = src.match(/url=([^&]+)/);
-                        if (urlMatch) {
-                            let decoded = decodeURIComponent(urlMatch[1]);
-                            if (decoded.includes('.m3u8')) found = decoded;
-                        }
-                    } catch(e) {}
-                });
-                return found;
-            });
-            
-            if (iframeM3u8 && !foundM3u8) {
-                foundM3u8 = iframeM3u8;
-                console.log(JSON.stringify({ file: iframeM3u8 }));
-                await browser.close();
-                process.exit(0);
-            }
-        }
-        
-        if (!foundM3u8) {
-            console.error("Could not find m3u8 in network traffic or iframes");
-            await browser.close();
-            process.exit(1);
-        }
-        
-    } catch (err) {
-        console.error(err.message);
-        if (browser) await browser.close();
-        process.exit(1);
+  let browser = null;
+  let foundStream = null;
+
+  const timer = setTimeout(async () => {
+    if (!foundStream) {
+      console.error(JSON.stringify({ success: false, error: 'Timeout waiting for stream manifest' }));
+      if (browser) {
+        try { await browser.close(); } catch (_) {}
+      }
+      process.exit(1);
     }
+  }, timeoutMs);
+
+  try {
+    const launchArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-web-security',
+      '--disable-features=IsolateOrigins,site-per-process',
+      '--mute-audio'
+    ];
+
+    const launchOpts = {
+      headless: 'new',
+      args: launchArgs
+    };
+
+    const customExec = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH;
+    if (customExec) {
+      launchOpts.executablePath = customExec;
+    }
+
+    browser = await puppeteer.launch(launchOpts);
+    const page = await browser.newPage();
+
+    const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
+    await page.setUserAgent(userAgent);
+
+    if (referer) {
+      await page.setExtraHTTPHeaders({
+        'Referer': referer
+      });
+    }
+
+    await page.setRequestInterception(true);
+
+    page.on('request', req => {
+      const resourceType = req.resourceType();
+      const url = req.url();
+
+      // Block non-essential media, fonts, images and ads for blazingly fast load
+      if (['image', 'font', 'media'].includes(resourceType) && !url.includes('.m3u8') && !url.includes('.mpd')) {
+        return req.abort();
+      }
+
+      if (/analytics|doubleclick|googletagmanager|adservice|popcash|popads|propellerads/i.test(url)) {
+        return req.abort();
+      }
+
+      req.continue();
+    });
+
+    const checkStreamHit = async (candidateUrl, contentType = '') => {
+      if (foundStream || !candidateUrl) return;
+
+      let url = candidateUrl;
+      if (url.includes('url=') || url.includes('source=') || url.includes('file=')) {
+        try {
+          const match = url.match(/(?:url|source|file)=([^&]+)/);
+          if (match) {
+            const decoded = decodeURIComponent(match[1]);
+            if (decoded.includes('.m3u8') || decoded.includes('.mpd')) {
+              url = decoded;
+            }
+          }
+        } catch (_) {}
+      }
+
+      const isHls = url.includes('.m3u8') || contentType.includes('mpegurl');
+      const isDash = url.includes('.mpd') || contentType.includes('dash+xml');
+
+      if ((isHls || isDash) && !url.includes('blank.m3u8') && !url.includes('empty.m3u8')) {
+        foundStream = {
+          success: true,
+          file: url,
+          type: isDash ? 'dash' : 'hls',
+          headers: {
+            'User-Agent': userAgent,
+            'Referer': referer || targetUrl,
+            'Origin': new URL(targetUrl).origin
+          }
+        };
+
+        clearTimeout(timer);
+        console.log(JSON.stringify(foundStream));
+
+        try { await browser.close(); } catch (_) {}
+        process.exit(0);
+      }
+    };
+
+    page.on('response', async res => {
+      const url = res.url();
+      const contentType = (res.headers()['content-type'] || '').toLowerCase();
+      await checkStreamHit(url, contentType);
+    });
+
+    page.on('request', async req => {
+      const url = req.url();
+      await checkStreamHit(url);
+    });
+
+    await page.goto(targetUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: Math.max(3000, timeoutMs - 2000)
+    });
+
+    // Active DOM triggering loop
+    const pollIntervalMs = 1500;
+    const maxPolls = Math.floor((timeoutMs - 4000) / pollIntervalMs);
+
+    for (let i = 0; i < maxPolls; i++) {
+      await new Promise(r => setTimeout(r, pollIntervalMs));
+      if (foundStream) break;
+
+      await page.evaluate(() => {
+        try {
+          const video = document.querySelector('video');
+          if (video) {
+            video.muted = true;
+            video.play().catch(() => {});
+          }
+        } catch (_) {}
+
+        try {
+          document.querySelectorAll('.jw-video, .jw-media, video, .vjs-big-play-button, .vjs-tech, .jw-display-icon-display, button[aria-label*="Play" i], .play-button').forEach(el => {
+            try { el.click(); } catch (_) {}
+          });
+        } catch (_) {}
+      });
+
+      const iframeStream = await page.evaluate(() => {
+        let found = null;
+        document.querySelectorAll('iframe').forEach(f => {
+          try {
+            const src = f.src || '';
+            const match = src.match(/(?:url|source|file)=([^&]+)/);
+            if (match) {
+              const decoded = decodeURIComponent(match[1]);
+              if (decoded.includes('.m3u8') || decoded.includes('.mpd')) found = decoded;
+            }
+          } catch (_) {}
+        });
+        return found;
+      });
+
+      if (iframeStream && !foundStream) {
+        await checkStreamHit(iframeStream);
+        break;
+      }
+    }
+
+    if (!foundStream) {
+      clearTimeout(timer);
+      console.error(JSON.stringify({ success: false, error: 'Could not find m3u8 or mpd manifest in network traffic or DOM' }));
+      if (browser) {
+        try { await browser.close(); } catch (_) {}
+      }
+      process.exit(1);
+    }
+  } catch (err) {
+    clearTimeout(timer);
+    console.error(JSON.stringify({ success: false, error: err.message }));
+    if (browser) {
+      try { await browser.close(); } catch (_) {}
+    }
+    process.exit(1);
+  }
 })();

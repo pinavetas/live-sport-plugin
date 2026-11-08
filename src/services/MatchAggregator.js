@@ -4,6 +4,12 @@
 // aggregated cache. Bounds replay list growth while preserving the full annual season.
 const REPLAY_RETENTION_DAYS = 365;
 
+// Per-provider deadline for one sync. syncMatches waits for every provider
+// (allSettled), so without this one slow or hung scraper delays the whole
+// catalog refresh, or stalls it forever if its promise never settles. A
+// provider that misses the deadline is treated exactly like one that threw.
+const PROVIDER_SYNC_TIMEOUT_MS = Number(process.env.PROVIDER_SYNC_TIMEOUT_MS) || 60000;
+
 const STOP_WORDS = new Set([
   'the', 'and', 'vs', 'v', 'live', 'stream', 'fc', 'cf', 'sc', 'united', 'city',
   'real', 'sport', 'sports', 'club', 'de', 'la', 'women', 'men', 'u19', 'u20',
@@ -452,14 +458,15 @@ const sourceIdentityKey = (s) => [
 ].join('\u0000');
 
 class MatchAggregator {
-  constructor({ timStreamsProvider, watchFootyProvider, cdnLiveProvider, streamSports99Provider, streamedPkProvider, cacheService, yamlProviders, replayzoneProvider, daddyLiveProvider, teamLogoService, liveTvProvider, damiTvProvider, ppvStProvider, soccerFullProvider, basketballVideoProvider, nflVideoProvider, skTechProvider, fullRacesProvider, hockeyReplaysProvider, mlbLiveProvider, vavooProvider, ak47LiveProvider, leafProvider, madplayProvider, providerHealthService, broadcasterMatchService } = {}) {
-    this.providers = [timStreamsProvider, streamedPkProvider, watchFootyProvider, cdnLiveProvider, ...(yamlProviders || []), replayzoneProvider, ...(liveTvProvider ? [liveTvProvider] : []), ...(daddyLiveProvider ? [daddyLiveProvider] : []), ...(damiTvProvider ? [damiTvProvider] : []), ...(ppvStProvider ? [ppvStProvider] : []), ...(soccerFullProvider ? [soccerFullProvider] : []), ...(basketballVideoProvider ? [basketballVideoProvider] : []), ...(nflVideoProvider ? [nflVideoProvider] : []), ...(skTechProvider ? [skTechProvider] : []), ...(fullRacesProvider ? [fullRacesProvider] : []), ...(hockeyReplaysProvider ? [hockeyReplaysProvider] : []), ...(mlbLiveProvider ? [mlbLiveProvider] : []), ...(vavooProvider ? [vavooProvider] : []), ...(ak47LiveProvider ? [ak47LiveProvider] : []), ...(leafProvider ? [leafProvider] : []), ...(madplayProvider ? [madplayProvider] : [])];
+  constructor({ timStreamsProvider, watchFootyProvider, cdnLiveProvider, streamSports99Provider, streamedPkProvider, cacheService, yamlProviders, replayzoneProvider, daddyLiveProvider, teamLogoService, liveTvProvider, damiTvProvider, ppvStProvider, soccerFullProvider, basketballVideoProvider, nflVideoProvider, skTechProvider, fullRacesProvider, hockeyReplaysProvider, mlbLiveProvider, vavooProvider, ak47LiveProvider, leafProvider, madplayProvider, bintvProvider, angulismoProvider, tdtChannelsProvider, nbaMonsterProvider, providerHealthService, broadcasterMatchService } = {}) {
+    this.providers = [timStreamsProvider, streamedPkProvider, watchFootyProvider, cdnLiveProvider, ...(yamlProviders || []), replayzoneProvider, ...(liveTvProvider ? [liveTvProvider] : []), ...(daddyLiveProvider ? [daddyLiveProvider] : []), ...(damiTvProvider ? [damiTvProvider] : []), ...(ppvStProvider ? [ppvStProvider] : []), ...(soccerFullProvider ? [soccerFullProvider] : []), ...(basketballVideoProvider ? [basketballVideoProvider] : []), ...(nflVideoProvider ? [nflVideoProvider] : []), ...(skTechProvider ? [skTechProvider] : []), ...(fullRacesProvider ? [fullRacesProvider] : []), ...(hockeyReplaysProvider ? [hockeyReplaysProvider] : []), ...(mlbLiveProvider ? [mlbLiveProvider] : []), ...(vavooProvider ? [vavooProvider] : []), ...(ak47LiveProvider ? [ak47LiveProvider] : []), ...(leafProvider ? [leafProvider] : []), ...(madplayProvider ? [madplayProvider] : []), ...(bintvProvider ? [bintvProvider] : []), ...(angulismoProvider ? [angulismoProvider] : []), ...(tdtChannelsProvider ? [tdtChannelsProvider] : []), ...(nbaMonsterProvider ? [nbaMonsterProvider] : [])];
     this.streamSports99Provider = streamSports99Provider;
     this.cacheService = cacheService;
     this.teamLogoService = teamLogoService;
     this.providerHealthService = providerHealthService;
     this.vavooProvider = vavooProvider;
     this.broadcasterMatchService = broadcasterMatchService;
+    this.providerSyncTimeoutMs = PROVIDER_SYNC_TIMEOUT_MS;
     if (this.providerHealthService) this.providerHealthService.registerProviders(this.providers);
   }
 
@@ -887,8 +894,17 @@ class MatchAggregator {
 
   async _fetchProviderMatches(provider) {
     const startedAt = Date.now();
+    const timeoutMs = this.providerSyncTimeoutMs;
+    let timer = null;
     try {
-      const matches = await provider.getMatches();
+      const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const name = (provider && (provider.sourceName || provider.name)) || 'provider';
+          reject(new Error(`${name} getMatches timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+        if (timer && typeof timer.unref === 'function') timer.unref();
+      });
+      const matches = await Promise.race([provider.getMatches(), deadline]);
       if (this.providerHealthService) {
         this.providerHealthService.recordResult(provider, {
           matches,
@@ -905,6 +921,8 @@ class MatchAggregator {
         });
       }
       throw error;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -1560,6 +1578,11 @@ class MatchAggregator {
       this._enrichMatchesWithBroadcasters(activeMatches);
 
       this.cacheService.setMatches(activeMatches);
+      // Identity of the snapshot just written: enrichment results are only
+      // written back while the cache still holds this sync's matches.
+      const cachedSnapshot = typeof this.cacheService.getMatchesReadOnly === 'function'
+        ? this.cacheService.getMatchesReadOnly()
+        : null;
       if (this.providerHealthService) {
         this.providerHealthService.finishSync({ matchCount: activeMatches.length, succeeded: true });
       }
@@ -1591,9 +1614,21 @@ class MatchAggregator {
             try { await this.teamLogoService.enrichMatch(m); } catch (_) {}
           }
         };
-        Promise.all(
+        // setMatches() stored CLONES, so the logos enrichMatch writes into
+        // these objects never reached the cache. Once the pool drains, write
+        // the enriched set back (still off the sync's critical path).
+        const logoSig = (m) => `${m.logo || ''}|${(m.team1 && m.team1.logo) || ''}|${(m.team2 && m.team2.logo) || ''}`;
+        const before = enrichable.map(logoSig);
+        this.logoEnrichment = Promise.all(
           Array.from({ length: Math.min(ENRICH_CONCURRENCY, enrichable.length) }, enrichWorker)
-        ).catch(() => {});
+        ).then(() => {
+          if (!enrichable.some((m, i) => logoSig(m) !== before[i])) return false;
+          // A newer sync (or a cross-worker disk reload) replaced the snapshot:
+          // its data wins, never overwrite it with this older match set.
+          if (cachedSnapshot && this.cacheService.getMatchesReadOnly() !== cachedSnapshot) return false;
+          this.cacheService.setMatches(activeMatches);
+          return true;
+        }).catch(() => false);
       }
 
       return activeMatches;

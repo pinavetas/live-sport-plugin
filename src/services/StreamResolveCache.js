@@ -17,6 +17,10 @@ const MIN_TTL_MS = 60 * 1000;
 const MAX_TTL_MS = 10 * 60 * 1000;
 const NEGATIVE_TTL_MS = 30 * 1000;
 const MAX_ENTRIES = 200;
+// Hard ceiling on a single mint. Retry budgets upstream (streams.js withRetry)
+// only bound *between* attempts, not a call that never settles; without this a
+// hung provider call would hold the single-flight slot for the key forever.
+const RESOLVE_HARD_TIMEOUT_MS = Number(process.env.RESOLVE_HARD_TIMEOUT_MS) || 25000;
 const CHANNEL_MATCH_ID = '__channel__'; // evergreen 24/7 keys survive pruneEnded
 
 // behaviorHints are small plain-JSON trees; a tight recursive copy beats V8's
@@ -109,6 +113,7 @@ class StreamResolveCache {
     this.maxTtlMs = opts.maxTtlMs ?? MAX_TTL_MS;
     this.negativeTtlMs = opts.negativeTtlMs ?? NEGATIVE_TTL_MS;
     this.maxEntries = opts.maxEntries ?? MAX_ENTRIES;
+    this.resolveTimeoutMs = opts.resolveTimeoutMs ?? RESOLVE_HARD_TIMEOUT_MS;
 
     this.entries = new Map();   // key -> { streams, matchId, status, resolvedAt, expiresAt, lastAccess }
     this.inFlight = new Map();  // key -> Promise (mint in progress)
@@ -352,8 +357,20 @@ class StreamResolveCache {
     const sourceName = parts[0];
     const matchId = parts[1];
     const p = (async () => {
+      let hardTimer = null;
       try {
-        const streams = await mintFn();
+        // Race the mint against a hard timer so a provider call that never
+        // settles cannot pin the in-flight slot. A late answer from the losing
+        // mint is simply dropped; the timeout is negative-cached briefly below.
+        const timeout = new Promise((_, reject) => {
+          hardTimer = setTimeout(
+            () => reject(new Error(`resolve hard timeout after ${this.resolveTimeoutMs}ms`)),
+            this.resolveTimeoutMs
+          );
+          if (hardTimer && typeof hardTimer.unref === 'function') hardTimer.unref();
+        });
+        const streams = await Promise.race([mintFn(), timeout]);
+        clearTimeout(hardTimer);
         // Pruning can run while the provider is resolving. Discard both
         // positive and negative late answers before touching either cache.
         if (operation.pruned) return;
@@ -387,6 +404,7 @@ class StreamResolveCache {
           );
         }
       } catch (_) {
+        clearTimeout(hardTimer);
         if (operation.pruned) return;
         this._set(key, sourceName, matchId, [], 'failed', this.negativeTtlMs);
         // Release the shared mint claim so other workers don't stall up to

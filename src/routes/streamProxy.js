@@ -42,6 +42,48 @@ const hlsChunkHttpAgent = new http.Agent({
 //
 // Defaults: 6 connections x 1 MB chunks. Bounded memory (~6 MB in flight) and a
 // deliberate cap so a single viewer cannot stampede the upstream.
+// ─── Redirect-safe fetch ──────────────────────────────────────────────────
+// checkOutboundUrl() only vets the URL it is given. fetch() follows redirects on
+// its own by default, so a public URL answering `302 Location:
+// http://169.254.169.254/` would otherwise be dialled without ever being
+// checked. Redirects are therefore followed by hand, a bounded number of times,
+// and every Location is put through the same gate before it is requested.
+const MAX_PROXY_REDIRECTS = 5;
+
+async function fetchFollowingCheckedRedirects(url, init = {}, maxRedirects = MAX_PROXY_REDIRECTS) {
+  let current = url;
+  for (let hop = 0; ; hop++) {
+    const response = await fetch(current, { ...init, redirect: 'manual' });
+    const isRedirect = response.status >= 300 && response.status < 400;
+    const location = isRedirect ? response.headers.get('location') : null;
+    if (!location) return response;
+
+    // The redirect body is never used; release its socket.
+    try { if (response.body) await response.body.cancel(); } catch (_) {}
+
+    if (hop >= maxRedirects) {
+      const err = new Error(`too many redirects (> ${maxRedirects})`);
+      err.statusCode = 502;
+      throw err;
+    }
+    let next;
+    try {
+      next = new URL(location, current).toString();
+    } catch (_) {
+      const err = new Error('invalid redirect location');
+      err.statusCode = 502;
+      throw err;
+    }
+    const verdict = await checkOutboundUrl(next);
+    if (!verdict.ok) {
+      const err = new Error(`redirect blocked (${verdict.reason})`);
+      err.blockedVerdict = verdict;
+      throw err;
+    }
+    current = next;
+  }
+}
+
 const FASTMP4_CHUNK = 1 * 1024 * 1024;
 const FASTMP4_CONCURRENCY = 6;
 
@@ -104,7 +146,7 @@ async function readCapped(response, maxBytes) {
 async function fetchRangeBuf(url, start, end, headers, signal) {
   try {
     const wanted = end - start + 1;
-    const r = await fetch(url, {
+    const r = await fetchFollowingCheckedRedirects(url, {
       headers: { ...headers, Range: `bytes=${start}-${end}` },
       signal: AbortSignal.any([signal, AbortSignal.timeout(chunkTimeoutMs(wanted))]),
     });
@@ -162,7 +204,7 @@ router.get('/api/fastmp4', async (req, res) => {
   let total = null;
   let contentType = 'video/mp4';
   try {
-    const probe = await fetch(targetUrl, {
+    const probe = await fetchFollowingCheckedRedirects(targetUrl, {
       headers: { ...upstreamHeaders, Range: 'bytes=0-0' },
       signal: AbortSignal.timeout(15000),
     });
@@ -179,6 +221,7 @@ router.get('/api/fastmp4', async (req, res) => {
     // 200 here is the whole file, which must not be buffered.
     try { await readCapped(probe, 1); } catch (_) {}
   } catch (e) {
+    if (e && e.blockedVerdict) return rejectBlockedUrl(res, e.blockedVerdict, 'FastMP4');
     console.error('[FastMP4] probe failed:', e.message);
     return res.status(502).send('upstream probe failed');
   }
@@ -284,7 +327,7 @@ router.get('/api/mp4proxy', async (req, res) => {
       headers['Range'] = req.headers['range'];
     }
 
-    const upstream = await fetch(targetUrl, { headers, redirect: 'follow' });
+    const upstream = await fetchFollowingCheckedRedirects(targetUrl, { headers });
 
     res.status(upstream.status);
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -300,8 +343,9 @@ router.get('/api/mp4proxy', async (req, res) => {
       res.end();
     }
   } catch (e) {
+    if (e && e.blockedVerdict) return rejectBlockedUrl(res, e.blockedVerdict, 'MP4Proxy');
     console.error('[MP4Proxy] Error:', e.message);
-    if (!res.headersSent) res.status(500).send('Proxy error');
+    if (!res.headersSent) res.status(e && e.statusCode === 502 ? 502 : 500).send('Proxy error');
   }
 });
 
@@ -440,3 +484,4 @@ router.get('/api/hlschunk', async (req, res) => {
 
 router.fetchRangeBuf = fetchRangeBuf;
 module.exports = router;
+router.fetchFollowingCheckedRedirects = fetchFollowingCheckedRedirects;

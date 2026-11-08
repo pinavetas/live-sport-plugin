@@ -145,13 +145,16 @@ class TimStreamsProvider extends BaseProvider {
 
   /**
    * Extract the signed m3u8 URL from a TimStreams embed page natively.
+   * `pageReferer` is the page that iframes the embed: the embed host checks it
+   * against a per-site allowlist (BINTV mirrors the same embeds under its own
+   * referer and gets "Domain Not Allowed" when sent timst.top's).
    */
-  async extractM3u8(embedUrl) {
+  async extractM3u8(embedUrl, pageReferer = 'https://timst.top/') {
     try {
       const res = await this.proxyFetch(embedUrl, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
-          'Referer': 'https://timst.top/'
+          'Referer': pageReferer
         },
         signal: AbortSignal.timeout(10000)
       });

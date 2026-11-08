@@ -36,12 +36,16 @@ const VavooProvider = require('./providers/VavooProvider');
 const Ak47LiveProvider = require('./providers/Ak47LiveProvider');
 const LeafProvider = require('./providers/LeafProvider');
 const MadPlayProvider = require('./providers/MadPlayProvider');
+const BintvProvider = require('./providers/BintvProvider');
+const AngulismoProvider = require('./providers/AngulismoProvider');
+const TdtChannelsProvider = require('./providers/TdtChannelsProvider');
+const NbaMonsterProvider = require('./providers/NbaMonsterProvider');
 const ProviderHealthService = require('./services/ProviderHealthService');
 const BroadcasterMatchService = require('./services/BroadcasterMatchService');
 const DashToHlsService = require('./services/DashToHlsService');
 const adaptiveDnsResolver = require('./services/AdaptiveDnsResolver');
 const dynamicParserRegistry = require('./services/DynamicParserRegistry');
-const AiParserGeneratorService = require('./services/AiParserGeneratorService');
+const PuppeteerSnifferService = require('./services/PuppeteerSnifferService');
 
 const container = createContainer({
   injectionMode: InjectionMode.PROXY
@@ -64,7 +68,7 @@ container.register({
   broadcasterMatchService: asValue(new BroadcasterMatchService()),
   adaptiveDnsResolver: asValue(adaptiveDnsResolver),
   dynamicParserRegistry: asValue(dynamicParserRegistry),
-  aiParserGenerator: asClass(AiParserGeneratorService).singleton(),
+  puppeteerSnifferService: asClass(PuppeteerSnifferService).singleton(),
   // Self-healing iframe-domain knowledge base (DaddyLive family). Singleton so
   // runtime discoveries accumulate for the process lifetime.
   iframeDomainRegistry: asValue(new IframeDomainRegistry())
@@ -99,6 +103,10 @@ container.register({
   ak47LiveProvider: asClass(Ak47LiveProvider).singleton(),
   leafProvider: asClass(LeafProvider).singleton(),
   madplayProvider: asClass(MadPlayProvider).singleton(),
+  bintvProvider: asClass(BintvProvider).singleton(),
+  angulismoProvider: asClass(AngulismoProvider).singleton(),
+  tdtChannelsProvider: asClass(TdtChannelsProvider).singleton(),
+  nbaMonsterProvider: asClass(NbaMonsterProvider).singleton(),
   yamlProviders: asValue(yamlProviders)
 });
 

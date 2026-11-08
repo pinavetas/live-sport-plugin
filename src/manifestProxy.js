@@ -11,7 +11,7 @@ const { safeFetch: _safeFetch } = require('./impitClient');
 // ─── Manifest proxy: short-TTL cache + request coalescing ───────────────────
 // Live HLS players reload /api/manifest every 2-6 s per viewer. A validated
 // short-TTL cache removes per-viewer TLS handshakes and repeated upstream
-// fetches. Key = url|referer|origin. Only bodies containing #EXT are cached.
+// fetches. Key = url|referer|origin|addonBaseUrl|rck. Only bodies containing #EXT are cached.
 const MANIFEST_TTL_MS = 3000;
 const MANIFEST_CACHE_MAX = 100;
 const MANIFEST_NEGATIVE_TTL_MS = 15 * 1000;
@@ -105,7 +105,10 @@ async function fetchUpstreamManifest(targetUrl, referer, origin) {
   const attempt = async () => {
     const remainingMs = Math.ceil(deadlineAt - performance.now());
     if (remainingMs <= 0) throw Object.assign(new Error('Manifest timeout 10000ms'), { name: 'TimeoutError', code: 'ETIMEDOUT' });
-    const result = await _safeFetch(targetUrl, { headers, timeoutMs: remainingMs });
+    // outboundGuard: the URL comes from the request, so every hop of the redirect
+    // chain is vetted by the SSRF guard (a public URL 302-ing to the LAN or the
+    // cloud metadata address must not be fetched and returned as a playlist).
+    const result = await _safeFetch(targetUrl, { headers, timeoutMs: remainingMs, outboundGuard: true });
     if (!result.ok) {
       // Carry the upstream status so the caller can tell "the token/CDN said no"
       // apart from "our proxy is broken" — they need different HTTP responses.
