@@ -19,6 +19,40 @@ router.use(express.json());
 
 const aiGenerator = new AiParserGeneratorService();
 
+// Upper bound for how long POST /sync waits for the aggregator sync before
+// answering; the sync keeps running in the background past it.
+const SYNC_WAIT_MS = Number(process.env.PARSER_SYNC_WAIT_MS) || 45000;
+
+/**
+ * Triggers the regular aggregator sync, which crawls the mounted dynamic
+ * parsers together with every other provider and merges/dedupes their
+ * matches. Hand-merging a parser's raw matches into the cache bypassed that
+ * normalization and appended duplicates on every re-save.
+ * Returns the sync promise (errors are logged), or null when unavailable.
+ */
+function triggerAggregatorSync(container) {
+  let cronService = null;
+  try { cronService = container && container.resolve ? container.resolve('cronService') : null; } catch (_) {}
+  if (!cronService || typeof cronService.requestSync !== 'function') return null;
+  const run = Promise.resolve().then(() => cronService.requestSync());
+  run.catch((err) => console.warn(`[ParserStudio] Aggregator sync failed: ${err.message}`));
+  return run;
+}
+
+function countMatchesFromSources(container, sourceNames) {
+  try {
+    const cache = container.resolve('cacheService');
+    const matches = (cache.getMatchesReadOnly ? cache.getMatchesReadOnly() : cache.getMatches()) || [];
+    let count = 0;
+    for (const m of matches) {
+      if (m && Array.isArray(m.sources) && m.sources.some(s => s && sourceNames.has(s.source))) count++;
+    }
+    return count;
+  } catch (_) {
+    return 0;
+  }
+}
+
 /**
  * POST /api/parser/generate
  * Analyzes target URL using AI (OpenCode / Freebuff / OpenAI compatible) and self-validates with Cheerio.
@@ -95,22 +129,9 @@ router.post('/save', async (req, res) => {
     const container = req.app.get('container');
     const result = dynamicParserRegistry.saveParser(config, container);
 
-    // Trigger an immediate background fetch for this single provider so matches populate the cache
-    if (result && result.provider && typeof result.provider.getMatches === 'function') {
-      result.provider.getMatches().then(matches => {
-        if (container && matches && matches.length > 0) {
-          try {
-            const cache = container.resolve('cacheService');
-            const existing = cache ? cache.getMatches() : [];
-            const merged = [...existing, ...matches];
-            if (cache) cache.setMatches(merged);
-            console.log(`[ParserStudio] Instantly populated cache with ${matches.length} matches from '${result.provider.name}'`);
-          } catch (_) {}
-        }
-      }).catch(err => {
-        console.warn(`[ParserStudio] Initial background crawl failed: ${err.message}`);
-      });
-    }
+    // The parser is now mounted in the aggregator; populate the catalog via a
+    // background aggregator sync (respond immediately, don't wait for it).
+    triggerAggregatorSync(container);
 
     return res.json({
       success: true,
@@ -148,12 +169,14 @@ router.delete('/:name', (req, res) => {
 
 /**
  * POST /api/parser/sync or /api/parser/:name/sync
- * Triggers an immediate crawl of custom parsers and pushes matches to cache.
+ * Triggers an aggregator sync (which crawls the custom parsers) and waits for
+ * it up to SYNC_WAIT_MS. `extracted` is the number of catalog matches coming
+ * from the targeted parser(s); `pending` is true when the sync was still
+ * running at response time.
  */
 router.post(['/sync', '/:name/sync'], async (req, res) => {
   const { name } = req.params;
   const container = req.app.get('container');
-  const cache = container ? container.resolve('cacheService') : null;
   const active = dynamicParserRegistry.activeProviders;
 
   const targets = [];
@@ -169,26 +192,35 @@ router.post(['/sync', '/:name/sync'], async (req, res) => {
     return res.status(404).json({ success: false, error: 'No matching active parser found' });
   }
 
-  let totalExtracted = 0;
-  for (const provider of targets) {
-    try {
-      const matches = await provider.getMatches();
-      if (matches && matches.length > 0 && cache) {
-        const existing = cache.getMatches() || [];
-        const matchIds = new Set(matches.map(m => m.id));
-        const filtered = existing.filter(m => !matchIds.has(m.id));
-        cache.setMatches([...filtered, ...matches]);
-        totalExtracted += matches.length;
-      }
-    } catch (err) {
-      console.warn(`[ParserStudio] Sync failed for ${provider.name}: ${err.message}`);
-    }
+  const syncRun = triggerAggregatorSync(container);
+  if (!syncRun) {
+    return res.status(503).json({ success: false, error: 'Match sync service unavailable' });
   }
 
+  let timer = null;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve('pending'), SYNC_WAIT_MS);
+    if (timer && typeof timer.unref === 'function') timer.unref();
+  });
+  const outcome = await Promise.race([
+    syncRun.then(() => 'done', (err) => ({ error: err })),
+    timeout
+  ]);
+  clearTimeout(timer);
+
+  if (outcome && outcome.error) {
+    return res.status(502).json({ success: false, error: `Sync failed: ${outcome.error.message}` });
+  }
+
+  const pending = outcome === 'pending';
+  const extracted = countMatchesFromSources(container, new Set(targets.map(p => p.sourceName)));
   return res.json({
     success: true,
-    message: `Synced ${targets.length} parser(s), extracted ${totalExtracted} matches`,
-    extracted: totalExtracted
+    message: pending
+      ? `Sync of ${targets.length} parser(s) still running in background; ${extracted} matches currently in catalog`
+      : `Synced ${targets.length} parser(s), extracted ${extracted} matches`,
+    extracted,
+    pending
   });
 });
 

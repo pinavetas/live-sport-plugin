@@ -37,7 +37,9 @@ describe('CronService scheduled jobs never overlap', () => {
     process.env.RENDER_EXTERNAL_URL = 'https://example.invalid';
     startService();
 
-    expect(cron.schedule).toHaveBeenCalledTimes(4);
+    // match-sync, prewarm and keep-alive: the separate custom-AI job is gone,
+    // dynamic parsers are crawled by the match sync itself.
+    expect(cron.schedule).toHaveBeenCalledTimes(3);
     for (const [expr, fn, opts] of cron.schedule.mock.calls) {
       expect(typeof expr).toBe('string');
       expect(typeof fn).toBe('function');
