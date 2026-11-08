@@ -36,6 +36,10 @@ const VavooProvider = require('./providers/VavooProvider');
 const Ak47LiveProvider = require('./providers/Ak47LiveProvider');
 const LeafProvider = require('./providers/LeafProvider');
 const MadPlayProvider = require('./providers/MadPlayProvider');
+const BintvProvider = require('./providers/BintvProvider');
+const AngulismoProvider = require('./providers/AngulismoProvider');
+const TdtChannelsProvider = require('./providers/TdtChannelsProvider');
+const NbaMonsterProvider = require('./providers/NbaMonsterProvider');
 const ProviderHealthService = require('./services/ProviderHealthService');
 const BroadcasterMatchService = require('./services/BroadcasterMatchService');
 const DashToHlsService = require('./services/DashToHlsService');
@@ -97,6 +101,10 @@ container.register({
   ak47LiveProvider: asClass(Ak47LiveProvider).singleton(),
   leafProvider: asClass(LeafProvider).singleton(),
   madplayProvider: asClass(MadPlayProvider).singleton(),
+  bintvProvider: asClass(BintvProvider).singleton(),
+  angulismoProvider: asClass(AngulismoProvider).singleton(),
+  tdtChannelsProvider: asClass(TdtChannelsProvider).singleton(),
+  nbaMonsterProvider: asClass(NbaMonsterProvider).singleton(),
   yamlProviders: asValue(yamlProviders)
 });
 

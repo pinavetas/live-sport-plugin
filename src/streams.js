@@ -34,6 +34,7 @@ const SOURCE_PRIORITY = {
   damitv: 2,
   ak47live: 2,
   madplay: 2,
+  tdtchannels: 2,
   golf: 2,
   delta: 2,
   echo: 2,
@@ -51,6 +52,9 @@ const SOURCE_PRIORITY = {
   embedindia: 3,
   embedst: 3,
   cdnlive: 3,
+  bintv: 3,
+  angulismo: 3,
+  nbamonster: 3,
   streamsports99: 4,
   timstreams: 9,
   streamsports: 13
@@ -59,8 +63,8 @@ const SOURCE_PRIORITY = {
 const VERIFY_BODY_MAX_BYTES = 64 * 1024;
 
 const KNOWN_REPLAY_SOURCES = ['replayzone', 'livetv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive'];
-const KNOWN_LIVE_SOURCES = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'damitv', 'sktech', 'vavoo', 'ak47live', 'leaf', 'madplay'];
-const KNOWN_FALLBACKS = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'replayzone', 'livetv', 'damitv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive', 'sktech', 'vavoo', 'ak47live', 'leaf', 'madplay'];
+const KNOWN_LIVE_SOURCES = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'damitv', 'sktech', 'vavoo', 'ak47live', 'leaf', 'madplay', 'bintv', 'angulismo', 'tdtchannels', 'nbamonster'];
+const KNOWN_FALLBACKS = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'replayzone', 'livetv', 'damitv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive', 'sktech', 'vavoo', 'ak47live', 'leaf', 'madplay', 'bintv', 'angulismo', 'tdtchannels', 'nbamonster'];
 
 // Labeling tables hoisted to module scope: they were allocated per request
 // (handleStream) and per formatChannelStreamTitle call.
@@ -90,6 +94,10 @@ const NICE_NAMES = {
   'hockeyreplays': 'HockeyReplays',
   'mlblive': 'MLBLive',
   madplay: 'MadPlay',
+  bintv: 'BINTV',
+  angulismo: 'AngulismoTV',
+  tdtchannels: 'TDTChannels',
+  nbamonster: 'NBAMonster',
   admin: 'Streamed.pk',
   echo: 'Streamed.pk',
   golf: 'Streamed.pk',
@@ -120,7 +128,11 @@ const CHANNEL_TITLE_NICE_NAMES = {
   ppvst: 'PPV.st',
   ak47live: 'AK47Live',
   leaf: 'Leaf',
-  madplay: 'MadPlay'
+  madplay: 'MadPlay',
+  bintv: 'BINTV',
+  angulismo: 'AngulismoTV',
+  tdtchannels: 'TDTChannels',
+  nbamonster: 'NBAMonster'
 };
 
 function isReplaySource(sourceName) {
@@ -274,6 +286,18 @@ async function dispatchToProvider(sourceName, src, match, config = {}) {
   } else if (sourceName === 'madplay') {
     const provider = container.resolve('madplayProvider');
     resStreams = await provider.resolveStream(src.id, match.category, match.title, src, config);
+  } else if (sourceName === 'bintv') {
+    const provider = container.resolve('bintvProvider');
+    resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
+  } else if (sourceName === 'angulismo') {
+    const provider = container.resolve('angulismoProvider');
+    resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
+  } else if (sourceName === 'tdtchannels') {
+    const provider = container.resolve('tdtChannelsProvider');
+    resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
+  } else if (sourceName === 'nbamonster') {
+    const provider = container.resolve('nbaMonsterProvider');
+    resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
   } else if (sourceName.startsWith('yaml_')) {
     const yamlProviders = container.resolve('yamlProviders');
     const pName = sourceName.replace('yaml_', '');
