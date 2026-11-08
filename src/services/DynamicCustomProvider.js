@@ -9,6 +9,7 @@ const { safeFetch } = require('../impitClient');
 const { extract: extractChain } = require('./EmbedExtractorChain');
 const SpaHydrator = require('./SpaHydrator');
 const { parseTimezone } = require('../timezone');
+const { parseJsLiteral } = require('./safeJsLiteral');
 
 const MIN_PLAUSIBLE_DATE_MS = Date.UTC(2000, 0, 1);
 const MAX_FUTURE_MS = 366 * 24 * 60 * 60 * 1000;
@@ -220,8 +221,8 @@ class DynamicCustomProvider extends BaseProvider {
       const ftbMatch = html.match(/window\.ftbPageData\s*=\s*(\{[\s\S]*?\});\s*(?:window\.|\n|<\/script>)/);
       if (ftbMatch) {
         try {
-          const fn = new Function('return ' + ftbMatch[1]);
-          const data = fn();
+          // Literal-only evaluation: the payload is third-party HTML, never execute it.
+          const data = parseJsLiteral(ftbMatch[1]);
           const sched = data && data.schedule ? data.schedule : {};
           for (const g of Object.values(sched)) {
             if (g && g.links) {

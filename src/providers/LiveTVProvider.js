@@ -365,6 +365,8 @@ function parseArchive(html, ymd) {
   return out;
 }
 
+const UNSHORTEN_HOP_TIMEOUT_MS = 5000;
+
 async function unshorten(url) {
   if (!url || typeof url !== 'string') return url;
   let curr = url.trim();
@@ -373,11 +375,17 @@ async function unshorten(url) {
       return curr;
     }
     try {
+      // Bound every hop: up to 5 sequential fetches with no timeout could
+      // stall the whole resolve on one dead shortener.
       const res = await fetch(curr, {
         method: 'GET',
         headers: { 'User-Agent': UA },
         redirect: 'manual',
+        signal: AbortSignal.timeout(UNSHORTEN_HOP_TIMEOUT_MS),
       });
+      // Only the status/Location header is needed; release the body so the
+      // underlying socket is not held open waiting for it to be consumed.
+      try { await res.body?.cancel(); } catch (_) {}
       if (res.status >= 300 && res.status < 400) {
         const loc = res.headers.get('location');
         if (loc) {
@@ -400,6 +408,10 @@ class LiveTVProvider {
     this.enabled = process.env.LIVETV_DISABLED !== 'true';
     this._streamCache = new Map(); // path -> { at, value }
     this._cacheTtlMs = Number(process.env.LIVETV_STREAM_TTL_MS || 6 * 3600 * 1000);
+    // An empty result is usually a transient failure (mirror down, timeout),
+    // so it is only remembered briefly; caching it for the full replay TTL
+    // would make the replay unplayable for hours after one bad fetch.
+    this._emptyCacheTtlMs = Number(process.env.LIVETV_EMPTY_STREAM_TTL_MS || 60 * 1000);
     // TTL is only checked on read, so without a count cap every distinct replay
     // path ever requested stays mapped for the life of the worker.
     this._cacheMaxEntries = Number(process.env.LIVETV_STREAM_CACHE_MAX || 500);
@@ -441,7 +453,7 @@ class LiveTVProvider {
 
     const cacheKey = path;
     const cached = this._streamCache.get(cacheKey);
-    if (cached && Date.now() - cached.at < this._cacheTtlMs) return cached.value;
+    if (cached && Date.now() - cached.at < (cached.ttl ?? this._cacheTtlMs)) return cached.value;
 
     const baseLabel = (srcObj && srcObj.name) || 'Replay';
     let streams = [];
@@ -717,7 +729,8 @@ class LiveTVProvider {
       // costs one re-resolve if that path is requested again.
       this._streamCache.delete(this._streamCache.keys().next().value);
     }
-    this._streamCache.set(cacheKey, { at: Date.now(), value: streams });
+    const ttl = streams.length > 0 ? this._cacheTtlMs : this._emptyCacheTtlMs;
+    this._streamCache.set(cacheKey, { at: Date.now(), value: streams, ttl });
     return streams;
   }
 
@@ -780,4 +793,5 @@ class LiveTVProvider {
 }
 
 LiveTVProvider.parseArchive = parseArchive;
+LiveTVProvider._unshorten = unshorten; // exposed for tests
 module.exports = LiveTVProvider;

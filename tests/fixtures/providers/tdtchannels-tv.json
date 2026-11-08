@@ -1,0 +1,290 @@
+{
+  "license": {
+    "source": "https://github.com/LaQuay/TDTChannels",
+    "url": "https://www.tdtchannels.com/avisolegal"
+  },
+  "updated": 1793918983,
+  "countries": [
+    {
+      "name": "Spain",
+      "ambits": [
+        {
+          "name": "Generalistas",
+          "channels": [
+            {
+              "name": "La 1",
+              "web": "https://www.rtve.es/play/videos/directo/la-1/",
+              "logo": "https://graph.facebook.com/la1detve/picture?width=200&height=200",
+              "epg_id": "La1.TV",
+              "options": [
+                {
+                  "format": "m3u8",
+                  "url": "https://rtvelivestream.rtve.es/rtvesec/la1/la1_main_dvr.m3u8",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                },
+                {
+                  "format": "m3u8",
+                  "url": "https://stream.ads.ottera.tv/playlist.m3u8?network_id=15619&avod=1&coppa=0&td=6&is_lat=[LMT]&dnt=[DNS]&us_privacy=[US_PRIVACY]&did=[DEVICE_ID]&ip=[IP]&ua=[UA]&ifa_type=[IFA_TYPE]&app_bundle=[APP_BUNDLE]",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                }
+              ],
+              "extra_info": [
+                "GEO"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Deportivos",
+          "channels": [
+            {
+              "name": "Teledeporte",
+              "web": "https://www.rtve.es/play/videos/directo/tdp/",
+              "logo": "https://graph.facebook.com/teledeporteRTVE/picture?width=200&height=200",
+              "epg_id": "TDP.TV",
+              "options": [
+                {
+                  "format": "m3u8",
+                  "url": "https://rtvelivestream.rtve.es/rtvesec/tdp/tdp_main.m3u8",
+                  "geo2": "SP",
+                  "res": null,
+                  "lang": null
+                },
+                {
+                  "format": "m3u8",
+                  "url": "https://stream.ads.ottera.tv/playlist.m3u8?network_id=15601&avod=1&coppa=0&td=6&is_lat=[LMT]&dnt=[DNS]&us_privacy=[US_PRIVACY]&did=[DEVICE_ID]&ip=[IP]&ua=[UA]&ifa_type=[IFA_TYPE]&app_bundle=[APP_BUNDLE]",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                }
+              ],
+              "extra_info": [
+                "GEO"
+              ]
+            },
+            {
+              "name": "Esport3",
+              "web": "https://www.3cat.cat/3cat/directes/esport3/",
+              "logo": "https://graph.facebook.com/Esport3/picture?width=200&height=200",
+              "epg_id": "E3.TV",
+              "options": [
+                {
+                  "format": "m3u8",
+                  "url": "https://directes-tv-cat.3catdirectes.cat/live-origin/esport3-hls/master.m3u8",
+                  "geo2": "CAT",
+                  "res": null,
+                  "lang": null
+                },
+                {
+                  "format": "m3u8",
+                  "url": "https://directes-tv-es.3catdirectes.cat/live-origin/esport3-hls/master.m3u8",
+                  "geo2": "SP",
+                  "res": null,
+                  "lang": null
+                }
+              ],
+              "extra_info": [
+                "GEO"
+              ]
+            },
+            {
+              "name": "ETB Deportes (Kirolak 360)",
+              "web": "https://kirolakeitb.eus/es/kirolak-360/en-directo/",
+              "logo": "https://graph.facebook.com/deportes.eitb.kirolak/picture?width=200&height=200",
+              "epg_id": "ETBD.TV",
+              "options": [
+                {
+                  "format": "m3u8",
+                  "url": "https://multimedia.eitb.eus/live-content/oka1hd-hls/master.m3u8",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                },
+                {
+                  "format": "m3u8",
+                  "url": "https://multimedia.eitb.eus/live-content/oka2hd-hls/master.m3u8",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                },
+                {
+                  "format": "m3u8",
+                  "url": "https://multimedia.eitb.eus/live-content/oka3hd-hls/master.m3u8",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                }
+              ],
+              "extra_info": [
+                "EVT",
+                "REF"
+              ],
+              "referer": "https://kirolakeitb.eus/es/kirolak-360/en-directo/"
+            },
+            {
+              "name": "Aragón Deporte 1",
+              "web": "https://www.aragonplay.es/watch/live/69f82201907d412a7bc35c63",
+              "logo": "https://graph.facebook.com/aragondeporte/picture?width=200&height=200",
+              "epg_id": "Aragón_Deporte1.TV",
+              "options": [],
+              "extra_info": [
+                "EXTA",
+                "REG",
+                "EVT"
+              ]
+            },
+            {
+              "name": "Real Madrid TV",
+              "web": "https://www.realmadrid.com/real-madrid-tv",
+              "logo": "https://graph.facebook.com/RealMadrid/picture?width=200&height=200",
+              "epg_id": "RMTV.TV",
+              "options": [
+                {
+                  "format": "m3u8",
+                  "url": "https://rmtv.akamaized.net/hls/live/2043153/rmtv-es-web/master.m3u8",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                },
+                {
+                  "format": "m3u8",
+                  "url": "https://rmtv.akamaized.net/hls/live/2043154/rmtv-en-web/master.m3u8",
+                  "geo2": null,
+                  "res": null,
+                  "lang": "EN"
+                },
+                {
+                  "format": "stream",
+                  "url": "https://player.twitch.tv/?channel=realmadrid&parent=play.tdtchannels.com",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                }
+              ],
+              "extra_info": [
+                "GEO"
+              ]
+            },
+            {
+              "name": "AS",
+              "web": "https://as.com",
+              "logo": "https://yt3.googleusercontent.com/ytc/AIdro_kKno7gC768MJ_rt67CNI107Zhs5157wEvhg2AQwkvQBgk=s200",
+              "epg_id": null,
+              "options": [
+                {
+                  "format": "youtube",
+                  "url": "https://www.youtube.com/channel/UCXISYK3xagaK5DHnhQ4X0hw/live",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                }
+              ],
+              "extra_info": [
+                "EMB",
+                "EVT"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Eventuales",
+          "channels": [
+            {
+              "name": "+tdp",
+              "web": "https://www.rtve.es/play/videos/directo/deportes/",
+              "logo": "https://graph.facebook.com/teledeporteRTVE/picture?width=200&height=200",
+              "epg_id": null,
+              "options": [
+                {
+                  "format": "m3u8",
+                  "url": "https://ztnr.rtve.es/ztnr/6712432.m3u8",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                },
+                {
+                  "format": "m3u8",
+                  "url": "https://ztnr.rtve.es/ztnr/6712453.m3u8",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                },
+                {
+                  "format": "m3u8",
+                  "url": "https://ztnr.rtve.es/ztnr/6712402.m3u8",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                },
+                {
+                  "format": "m3u8",
+                  "url": "https://ztnr.rtve.es/ztnr/6712407.m3u8",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                },
+                {
+                  "format": "m3u8",
+                  "url": "https://ztnr.rtve.es/ztnr/6712431.m3u8",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                },
+                {
+                  "format": "m3u8",
+                  "url": "https://ztnr.rtve.es/ztnr/6712410.m3u8",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                },
+                {
+                  "format": "m3u8",
+                  "url": "https://ztnr.rtve.es/ztnr/6712426.m3u8",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                },
+                {
+                  "format": "m3u8",
+                  "url": "https://ztnr.rtve.es/ztnr/6712411.m3u8",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                },
+                {
+                  "format": "m3u8",
+                  "url": "https://ztnr.rtve.es/ztnr/6712456.m3u8",
+                  "geo2": null,
+                  "res": null,
+                  "lang": null
+                }
+              ],
+              "extra_info": [
+                "EVT"
+              ]
+            },
+            {
+              "name": "Eventos (Mediaset Infinity)",
+              "web": "https://www.mitele.es/directo/eventos/",
+              "logo": "https://graph.facebook.com/MediasetInfinity/picture?width=200&height=200",
+              "epg_id": "Mitele_Eventos.TV",
+              "options": [],
+              "extra_info": [
+                "EXTA",
+                "EVT"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "International",
+      "ambits": []
+    }
+  ]
+}

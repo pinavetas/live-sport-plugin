@@ -4,9 +4,27 @@ const fs = require('fs');
 const path = require('path');
 const DynamicCustomProvider = require('./DynamicCustomProvider');
 
+/**
+ * Default location of the persisted parser configs: DATA_DIR when set,
+ * otherwise <cwd>/data, the same root CacheService uses.
+ *
+ * Must not be derived from __dirname: the production bundle (@vercel/ncc)
+ * rewrites __dirname-relative file paths into assets copied into dist/, so
+ * saved parsers would land in the build output (wiped on every build) and dev
+ * and prod would read different files. ncc also rewrites a literal
+ * path.join(process.cwd(), 'data') (verified), so the working directory is
+ * taken as a runtime parameter that the asset relocator cannot evaluate.
+ */
+function resolveDefaultStoragePath(env = process.env, cwd = process.cwd()) {
+  const dataDir = (typeof env.DATA_DIR === 'string' && env.DATA_DIR.trim())
+    ? env.DATA_DIR.trim()
+    : path.join(cwd, 'data');
+  return path.join(dataDir, 'custom_parsers.json');
+}
+
 class DynamicParserRegistry {
   constructor(opts = {}) {
-    this.storagePath = opts.storagePath || path.join(__dirname, '..', '..', 'data', 'custom_parsers.json');
+    this.storagePath = opts.storagePath || resolveDefaultStoragePath();
     this.activeProviders = new Map(); // sourceName -> DynamicCustomProvider instance
   }
 
@@ -208,3 +226,4 @@ const dynamicParserRegistry = new DynamicParserRegistry();
 
 module.exports = dynamicParserRegistry;
 module.exports.DynamicParserRegistry = DynamicParserRegistry;
+module.exports.resolveDefaultStoragePath = resolveDefaultStoragePath;

@@ -6,6 +6,7 @@
  */
 const express = require('express');
 const http = require('http');
+const { pipeline, Readable } = require('stream');
 const https = require('https');
 const { checkOutboundUrl, rejectBlockedUrl } = require('../services/OutboundUrlGuard');
 const adaptiveDnsResolver = require('../services/AdaptiveDnsResolver');
@@ -42,6 +43,48 @@ const hlsChunkHttpAgent = new http.Agent({
 //
 // Defaults: 6 connections x 1 MB chunks. Bounded memory (~6 MB in flight) and a
 // deliberate cap so a single viewer cannot stampede the upstream.
+// ─── Redirect-safe fetch ──────────────────────────────────────────────────
+// checkOutboundUrl() only vets the URL it is given. fetch() follows redirects on
+// its own by default, so a public URL answering `302 Location:
+// http://169.254.169.254/` would otherwise be dialled without ever being
+// checked. Redirects are therefore followed by hand, a bounded number of times,
+// and every Location is put through the same gate before it is requested.
+const MAX_PROXY_REDIRECTS = 5;
+
+async function fetchFollowingCheckedRedirects(url, init = {}, maxRedirects = MAX_PROXY_REDIRECTS) {
+  let current = url;
+  for (let hop = 0; ; hop++) {
+    const response = await fetch(current, { ...init, redirect: 'manual' });
+    const isRedirect = response.status >= 300 && response.status < 400;
+    const location = isRedirect ? response.headers.get('location') : null;
+    if (!location) return response;
+
+    // The redirect body is never used; release its socket.
+    try { if (response.body) await response.body.cancel(); } catch (_) {}
+
+    if (hop >= maxRedirects) {
+      const err = new Error(`too many redirects (> ${maxRedirects})`);
+      err.statusCode = 502;
+      throw err;
+    }
+    let next;
+    try {
+      next = new URL(location, current).toString();
+    } catch (_) {
+      const err = new Error('invalid redirect location');
+      err.statusCode = 502;
+      throw err;
+    }
+    const verdict = await checkOutboundUrl(next);
+    if (!verdict.ok) {
+      const err = new Error(`redirect blocked (${verdict.reason})`);
+      err.blockedVerdict = verdict;
+      throw err;
+    }
+    current = next;
+  }
+}
+
 const FASTMP4_CHUNK = 1 * 1024 * 1024;
 const FASTMP4_CONCURRENCY = 6;
 
@@ -64,19 +107,67 @@ function parseClientRange(rangeHeader, total) {
   return { start, end };
 }
 
+// Per-chunk deadline. ok.ru serves ~226 KB/s per connection, so the default
+// 1 MB chunk needs ~5 s; the ceiling scales with the chunk size (4 MB max) so a
+// slow-but-alive connection is not cut, while a stalled one cannot pin a
+// concurrency slot and its socket until undici's 300 s body timeout.
+const FASTMP4_CHUNK_TIMEOUT_MS = 20000;
+const FASTMP4_MIN_BYTES_PER_SEC = 100 * 1024;
+
+function chunkTimeoutMs(bytes) {
+  return Math.max(FASTMP4_CHUNK_TIMEOUT_MS, Math.ceil(bytes / FASTMP4_MIN_BYTES_PER_SEC) * 1000);
+}
+
+/**
+ * Read at most `maxBytes` from a fetch() Response body, then cancel the rest.
+ * Never buffers more than asked for, whatever the upstream decides to send.
+ */
+async function readCapped(response, maxBytes) {
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const parts = [];
+  let total = 0;
+  let finished = false;
+  try {
+    while (total < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) { finished = true; break; }
+      const take = Math.min(value.length, maxBytes - total);
+      parts.push(Buffer.from(value.buffer, value.byteOffset, take));
+      total += take;
+    }
+  } finally {
+    if (!finished) {
+      try { await reader.cancel(); } catch (_) {}
+    }
+  }
+  return Buffer.concat(parts, total);
+}
+
 async function fetchRangeBuf(url, start, end, headers, signal) {
   try {
-    const r = await fetch(url, {
+    const wanted = end - start + 1;
+    const r = await fetchFollowingCheckedRedirects(url, {
       headers: { ...headers, Range: `bytes=${start}-${end}` },
-      signal,
+      signal: AbortSignal.any([signal, AbortSignal.timeout(chunkTimeoutMs(wanted))]),
     });
-    if (r.status !== 206 && r.status !== 200) {
-      const err = new Error(`upstream ${r.status}`);
+    // A sub-range MUST come back as 206. A 200 means the upstream ignored the
+    // Range header and is sending the whole file from byte 0: that is only the
+    // right data when this chunk itself starts at 0 (and only its first
+    // `wanted` bytes are read). Anything else would splice the wrong bytes into
+    // the stream — and used to buffer an entire multi-GB file per chunk.
+    let ok = r.status === 206 || (r.status === 200 && start === 0);
+    if (ok && r.status === 206) {
+      const m = /bytes\s+(\d+)-/i.exec(r.headers.get('content-range') || '');
+      if (m && parseInt(m[1], 10) !== start) ok = false;
+    }
+    if (!ok) {
+      try { if (r.body) await r.body.cancel(); } catch (_) {}
+      const err = new Error(`upstream ${r.status} for range ${start}-${end}`);
       err.statusCode = r.status;
       throw err;
     }
-    const buf = Buffer.from(await r.arrayBuffer());
-    return buf;
+    return await readCapped(r, wanted);
   } catch (e) {
     // On client disconnect we abort() the whole batch. Those rejections are
     // expected and already handled at the await site, but the not-yet-awaited
@@ -114,7 +205,7 @@ router.get('/api/fastmp4', async (req, res) => {
   let total = null;
   let contentType = 'video/mp4';
   try {
-    const probe = await fetch(targetUrl, {
+    const probe = await fetchFollowingCheckedRedirects(targetUrl, {
       headers: { ...upstreamHeaders, Range: 'bytes=0-0' },
       signal: AbortSignal.timeout(15000),
     });
@@ -127,9 +218,11 @@ router.get('/api/fastmp4', async (req, res) => {
       if (m && m[1] !== '*') total = parseInt(m[1], 10);
     }
     if (probe.headers.get('content-type')) contentType = probe.headers.get('content-type');
-    // drain the tiny body
-    try { await probe.arrayBuffer(); } catch (_) {}
+    // Drain the 1-byte body without trusting the upstream to honour Range: a
+    // 200 here is the whole file, which must not be buffered.
+    try { await readCapped(probe, 1); } catch (_) {}
   } catch (e) {
+    if (e && e.blockedVerdict) return rejectBlockedUrl(res, e.blockedVerdict, 'FastMP4');
     console.error('[FastMP4] probe failed:', e.message);
     return res.status(502).send('upstream probe failed');
   }
@@ -235,7 +328,13 @@ router.get('/api/mp4proxy', async (req, res) => {
       headers['Range'] = req.headers['range'];
     }
 
-    const upstream = await fetch(targetUrl, { headers, redirect: 'follow' });
+    // Tie the upstream request to the client: when the player goes away before
+    // the body is done, abort the fetch instead of leaving the upstream socket
+    // open until undici's body timeout (300 s).
+    const ac = new AbortController();
+    res.on('close', () => { if (!res.writableFinished) ac.abort(); });
+
+    const upstream = await fetchFollowingCheckedRedirects(targetUrl, { headers, signal: ac.signal });
 
     res.status(upstream.status);
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -244,15 +343,22 @@ router.get('/api/mp4proxy', async (req, res) => {
     if (upstream.headers.get('content-length')) res.setHeader('Content-Length', upstream.headers.get('content-length'));
     if (upstream.headers.get('content-range')) res.setHeader('Content-Range', upstream.headers.get('content-range'));
 
-    const { Readable } = require('stream');
     if (upstream.body) {
-      Readable.fromWeb(upstream.body).pipe(res);
+      // pipeline() (unlike .pipe()) handles errors on both ends: an upstream
+      // reset mid-body destroys the response, so the player sees a broken
+      // transfer instead of a hung one, and a client disconnect cancels the
+      // upstream body. Without it the reset was an unhandled 'error' event.
+      pipeline(Readable.fromWeb(upstream.body), res, (err) => {
+        if (err && !ac.signal.aborted) console.warn('[MP4Proxy] Stream ended early:', err.message);
+      });
     } else {
       res.end();
     }
   } catch (e) {
+    if (res.destroyed || (e && e.name === 'AbortError')) return; // client went away
+    if (e && e.blockedVerdict) return rejectBlockedUrl(res, e.blockedVerdict, 'MP4Proxy');
     console.error('[MP4Proxy] Error:', e.message);
-    if (!res.headersSent) res.status(500).send('Proxy error');
+    if (!res.headersSent) res.status(e && e.statusCode === 502 ? 502 : 500).send('Proxy error');
   }
 });
 
@@ -357,6 +463,7 @@ router.get('/api/hlschunk', async (req, res) => {
     if (origin) headers['Origin'] = origin;
     if (req.headers['range']) headers['Range'] = req.headers['range'];
 
+    let clientGone = false;
     const upstreamReq = client.get(targetUrl, {
       agent,
       headers,
@@ -366,8 +473,13 @@ router.get('/api/hlschunk', async (req, res) => {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', 'video/mp2t');
 
-      const uncloakStream = createSegmentUncloakStream();
-      upstreamRes.pipe(uncloakStream).pipe(res);
+      // pipeline() propagates an upstream reset to the response (destroyed,
+      // not left hanging) and never leaves an 'error' event unhandled.
+      pipeline(upstreamRes, createSegmentUncloakStream(), res, (err) => {
+        if (!err) return;
+        if (!res.writableFinished && !upstreamReq.destroyed) upstreamReq.destroy();
+        if (!clientGone) console.warn('[HLSChunk] Stream ended early:', err.message);
+      });
     });
 
     upstreamReq.on('timeout', () => {
@@ -379,7 +491,12 @@ router.get('/api/hlschunk', async (req, res) => {
       if (!res.headersSent) res.status(502).send('Upstream error');
     });
 
-    req.on('close', () => {
+    // Client went away before the segment was fully sent: drop the upstream
+    // request too. Keyed on the response (not req 'close') and skipped once
+    // the response has finished, so a completed keep-alive socket is reused.
+    res.on('close', () => {
+      if (res.writableFinished) return;
+      clientGone = true;
       if (!upstreamReq.destroyed) upstreamReq.destroy();
     });
   } catch (e) {
@@ -389,4 +506,6 @@ router.get('/api/hlschunk', async (req, res) => {
 });
 
 
+router.fetchRangeBuf = fetchRangeBuf;
 module.exports = router;
+router.fetchFollowingCheckedRedirects = fetchFollowingCheckedRedirects;

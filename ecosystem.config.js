@@ -6,6 +6,11 @@ module.exports = {
       instances: 2,
       exec_mode: 'cluster',
       max_memory_restart: '1300M',
+      // Fatal errors (uncaughtException, EADDRINUSE on listen) exit(1) so PM2
+      // restarts the worker. Back off exponentially so a persistent cause such as
+      // a port held by another process does not hot-loop into "errored".
+      autorestart: true,
+      exp_backoff_restart_delay: 1000,
       node_args: '--expose-gc',
       env: {
         NODE_ENV: 'production',
