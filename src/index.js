@@ -991,28 +991,8 @@ app.use((req, res, next) => {
   next();
 });
 
-/**
- * Decodes a config URL segment. Accepts URL-encoded JSON or base64url JSON.
- * Returns null when the segment is not a valid config.
- */
-function decodeConfigSegment(configStr) {
-  try {
-    let parsed;
-    if (configStr.startsWith('%7B') || configStr.startsWith('{')) {
-      parsed = JSON.parse(decodeURIComponent(configStr));
-    } else {
-      let base64 = configStr.replace(/-/g, '+').replace(/_/g, '/');
-      while (base64.length % 4) {
-        base64 += '=';
-      }
-      parsed = JSON.parse(Buffer.from(base64, 'base64').toString('utf-8'));
-    }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    return parsed;
-  } catch (e) {
-    return null;
-  }
-}
+// Config segment decoding (JSON / URL-encoded JSON / base64url), see src/configSegment.js.
+const { decodeConfigSegment } = require('./configSegment');
 app.get('/:config?/manifest.json', (req, res, next) => {
   const { manifest } = require('./manifest');
   let parsedConfig = {};
