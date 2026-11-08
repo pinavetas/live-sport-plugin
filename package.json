@@ -51,6 +51,10 @@
     "undici": "^8.10.0",
     "youtubei.js": "^18.1.0"
   },
+  "optionalDependencies": {
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  },
   "engines": {
     "node": ">=22.0.0"
   },
