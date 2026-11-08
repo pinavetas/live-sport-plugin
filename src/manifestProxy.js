@@ -105,7 +105,10 @@ async function fetchUpstreamManifest(targetUrl, referer, origin) {
   const attempt = async () => {
     const remainingMs = Math.ceil(deadlineAt - performance.now());
     if (remainingMs <= 0) throw Object.assign(new Error('Manifest timeout 10000ms'), { name: 'TimeoutError', code: 'ETIMEDOUT' });
-    const result = await _safeFetch(targetUrl, { headers, timeoutMs: remainingMs });
+    // outboundGuard: the URL comes from the request, so every hop of the redirect
+    // chain is vetted by the SSRF guard (a public URL 302-ing to the LAN or the
+    // cloud metadata address must not be fetched and returned as a playlist).
+    const result = await _safeFetch(targetUrl, { headers, timeoutMs: remainingMs, outboundGuard: true });
     if (!result.ok) {
       // Carry the upstream status so the caller can tell "the token/CDN said no"
       // apart from "our proxy is broken" — they need different HTTP responses.

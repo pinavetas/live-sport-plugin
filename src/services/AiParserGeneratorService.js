@@ -508,7 +508,8 @@ class AiParserGeneratorService {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
       },
       timeoutMs: 15000,
-      attempts: 2
+      attempts: 2,
+      outboundGuard: true
     });
 
     if (!pageRes.ok) {
