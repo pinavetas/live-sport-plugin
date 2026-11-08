@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const cheerio = require('cheerio');
 const BaseProvider = require('../providers/BaseProvider');
 const MatchEntity = require('../domain/MatchEntity');
@@ -7,7 +8,21 @@ const StreamEntity = require('../domain/StreamEntity');
 const { safeFetch } = require('../impitClient');
 const { extract: extractChain } = require('./EmbedExtractorChain');
 const SpaHydrator = require('./SpaHydrator');
+const { parseTimezone } = require('../timezone');
 const { parseJsLiteral } = require('./safeJsLiteral');
+
+const MIN_PLAUSIBLE_DATE_MS = Date.UTC(2000, 0, 1);
+const MAX_FUTURE_MS = 366 * 24 * 60 * 60 * 1000;
+
+/**
+ * Stable match id derived from the full absolute link. Must not depend on the
+ * item's position in the page: sites reorder their lists, and a positional id
+ * breaks Stremio library/continue-watching entries and leaves stale duplicates.
+ */
+function stableMatchId(sourceName, link) {
+  const digest = crypto.createHash('sha1').update(String(link)).digest('hex').slice(0, 16);
+  return `${sourceName}_${digest}`;
+}
 
 class DynamicCustomProvider extends BaseProvider {
   constructor(config, opts = {}) {
@@ -17,6 +32,9 @@ class DynamicCustomProvider extends BaseProvider {
     this.sourceName = (config.name || 'custom').toLowerCase().replace(/[^a-z0-9]/g, '');
     this.baseUrl = config.baseUrl;
     this.defaultCategory = config.category || 'other';
+    // id -> first crawl time (ms). Dateless items keep this timestamp across
+    // syncs instead of being re-stamped with the crawl time on every run.
+    this._firstSeen = new Map();
 
     this.defaultHeaders = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
@@ -44,6 +62,10 @@ class DynamicCustomProvider extends BaseProvider {
       const selectors = this.config.selectors || {};
 
       if (!selectors.matches) return [];
+
+      const crawlTime = Date.now();
+      const seenLinks = new Set();
+      const seenIds = new Set();
 
       $(selectors.matches).each((i, el) => {
         let title = '';
@@ -75,11 +97,28 @@ class DynamicCustomProvider extends BaseProvider {
         }
 
         if (title && link) {
+          // The same link listed twice on a page (e.g. featured + list) is one match.
+          if (seenLinks.has(link)) return;
+          seenLinks.add(link);
+
+          const id = stableMatchId(this.sourceName, link);
+          seenIds.add(id);
+
+          // Prefer the page's own date (selectors.time, `datetime` attribute
+          // first). Otherwise use a stable first-seen time: stamping every
+          // crawl with "now" kept replays inside the live window forever and
+          // changed the date on each sync.
+          let date = this._extractDate($, el, selectors.time);
+          if (!date) {
+            if (!this._firstSeen.has(id)) this._firstSeen.set(id, crawlTime);
+            date = this._firstSeen.get(id);
+          }
+
           matches.push(new MatchEntity({
-            id: `${this.sourceName}_${i}_${Buffer.from(link).toString('base64url').slice(0, 16)}`,
+            id,
             title,
             category: this.normalizeCategory(this.defaultCategory),
-            date: Date.now().toString(),
+            date: String(date),
             poster: thumbnail,
             isCustomAi: true,
             customAiSource: this.sourceName,
@@ -92,12 +131,42 @@ class DynamicCustomProvider extends BaseProvider {
         }
       });
 
+      // Bound the first-seen map to what the site still lists.
+      if (seenIds.size > 0) {
+        for (const id of this._firstSeen.keys()) {
+          if (!seenIds.has(id)) this._firstSeen.delete(id);
+        }
+      }
+
       console.log(`[${this.name}] Successfully extracted ${matches.length} dynamic replay matches`);
     } catch (err) {
       console.error(`[${this.name}] Error fetching dynamic matches:`, err.message);
     }
 
     return matches;
+  }
+
+  /**
+   * Parses the card's date from `selectors.time` (`datetime` attribute, then
+   * text). Returns epoch ms, or null when absent or unparseable.
+   */
+  _extractDate($, el, timeSelector) {
+    if (!timeSelector) return null;
+    try {
+      const target = $(el).find(timeSelector).first();
+      if (!target.length) return null;
+      const candidates = [target.attr('datetime'), target.text()];
+      for (const raw of candidates) {
+        const value = typeof raw === 'string' ? raw.trim() : '';
+        if (!value) continue;
+        const ms = parseTimezone(value, 'UTC');
+        // Reject implausible values (e.g. a bare "12" parsed as a 1970 epoch).
+        if (ms && Number.isFinite(ms) && ms >= MIN_PLAUSIBLE_DATE_MS && ms <= Date.now() + MAX_FUTURE_MS) {
+          return ms;
+        }
+      }
+    } catch (_) {}
+    return null;
   }
 
   /**
@@ -373,3 +442,4 @@ class DynamicCustomProvider extends BaseProvider {
 }
 
 module.exports = DynamicCustomProvider;
+module.exports.stableMatchId = stableMatchId;
