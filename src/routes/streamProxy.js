@@ -6,6 +6,7 @@
  */
 const express = require('express');
 const http = require('http');
+const { pipeline, Readable } = require('stream');
 const https = require('https');
 const { checkOutboundUrl, rejectBlockedUrl } = require('../services/OutboundUrlGuard');
 const adaptiveDnsResolver = require('../services/AdaptiveDnsResolver');
@@ -327,7 +328,13 @@ router.get('/api/mp4proxy', async (req, res) => {
       headers['Range'] = req.headers['range'];
     }
 
-    const upstream = await fetchFollowingCheckedRedirects(targetUrl, { headers });
+    // Tie the upstream request to the client: when the player goes away before
+    // the body is done, abort the fetch instead of leaving the upstream socket
+    // open until undici's body timeout (300 s).
+    const ac = new AbortController();
+    res.on('close', () => { if (!res.writableFinished) ac.abort(); });
+
+    const upstream = await fetchFollowingCheckedRedirects(targetUrl, { headers, signal: ac.signal });
 
     res.status(upstream.status);
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -336,13 +343,19 @@ router.get('/api/mp4proxy', async (req, res) => {
     if (upstream.headers.get('content-length')) res.setHeader('Content-Length', upstream.headers.get('content-length'));
     if (upstream.headers.get('content-range')) res.setHeader('Content-Range', upstream.headers.get('content-range'));
 
-    const { Readable } = require('stream');
     if (upstream.body) {
-      Readable.fromWeb(upstream.body).pipe(res);
+      // pipeline() (unlike .pipe()) handles errors on both ends: an upstream
+      // reset mid-body destroys the response, so the player sees a broken
+      // transfer instead of a hung one, and a client disconnect cancels the
+      // upstream body. Without it the reset was an unhandled 'error' event.
+      pipeline(Readable.fromWeb(upstream.body), res, (err) => {
+        if (err && !ac.signal.aborted) console.warn('[MP4Proxy] Stream ended early:', err.message);
+      });
     } else {
       res.end();
     }
   } catch (e) {
+    if (res.destroyed || (e && e.name === 'AbortError')) return; // client went away
     if (e && e.blockedVerdict) return rejectBlockedUrl(res, e.blockedVerdict, 'MP4Proxy');
     console.error('[MP4Proxy] Error:', e.message);
     if (!res.headersSent) res.status(e && e.statusCode === 502 ? 502 : 500).send('Proxy error');
@@ -450,6 +463,7 @@ router.get('/api/hlschunk', async (req, res) => {
     if (origin) headers['Origin'] = origin;
     if (req.headers['range']) headers['Range'] = req.headers['range'];
 
+    let clientGone = false;
     const upstreamReq = client.get(targetUrl, {
       agent,
       headers,
@@ -459,8 +473,13 @@ router.get('/api/hlschunk', async (req, res) => {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', 'video/mp2t');
 
-      const uncloakStream = createSegmentUncloakStream();
-      upstreamRes.pipe(uncloakStream).pipe(res);
+      // pipeline() propagates an upstream reset to the response (destroyed,
+      // not left hanging) and never leaves an 'error' event unhandled.
+      pipeline(upstreamRes, createSegmentUncloakStream(), res, (err) => {
+        if (!err) return;
+        if (!res.writableFinished && !upstreamReq.destroyed) upstreamReq.destroy();
+        if (!clientGone) console.warn('[HLSChunk] Stream ended early:', err.message);
+      });
     });
 
     upstreamReq.on('timeout', () => {
@@ -472,7 +491,12 @@ router.get('/api/hlschunk', async (req, res) => {
       if (!res.headersSent) res.status(502).send('Upstream error');
     });
 
-    req.on('close', () => {
+    // Client went away before the segment was fully sent: drop the upstream
+    // request too. Keyed on the response (not req 'close') and skipped once
+    // the response has finished, so a completed keep-alive socket is reused.
+    res.on('close', () => {
+      if (res.writableFinished) return;
+      clientGone = true;
       if (!upstreamReq.destroyed) upstreamReq.destroy();
     });
   } catch (e) {
