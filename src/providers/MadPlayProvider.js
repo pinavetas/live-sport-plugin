@@ -14,6 +14,7 @@
 const BaseProvider = require('./BaseProvider');
 const { BASE_URL } = require('../config');
 const { MadPlayResolver, DEFAULT_BASE_URL } = require('../resolver/madplay/MadPlayResolver');
+const { safeFetch } = require('../impitClient');
 
 class MadPlayProvider extends BaseProvider {
   constructor(opts = {}) {
@@ -29,13 +30,15 @@ class MadPlayProvider extends BaseProvider {
     } catch (_) {}
 
     const baseUrl = customUrl || process.env.MADPLAY_BASE_URL || DEFAULT_BASE_URL;
-    const defaultFetch = typeof globalThis.fetch === 'function'
-      ? (url, options) => globalThis.fetch(url, options)
-      : (url, options) => this.proxyFetch(url, options);
 
+    // safeFetch honours the resolver's `timeoutMs` (native fetch silently
+    // ignores it, so a stalled upstream could hang a request for minutes) and
+    // goes through impit's browser TLS fingerprint with an undici fallback.
+    // Its response exposes ok/status/headers/text()/arrayBuffer(), which is all
+    // the resolver reads (headers may be a Headers object or a plain object).
     this.resolver = new MadPlayResolver({
       baseUrl,
-      fetchFn: defaultFetch
+      fetchFn: (url, options) => safeFetch(url, options)
     });
 
     if (this.circuitBreaker) {
