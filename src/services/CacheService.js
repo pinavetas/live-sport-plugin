@@ -1,6 +1,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { getDataDir } = require('../dataDir');
 
 const CACHE_SCHEMA_VERSION = 4;
 
@@ -28,16 +29,20 @@ function diskSignature(stats) {
   return [stats.dev, stats.ino, stats.size, stats.mtimeMs, stats.ctimeMs].join(':');
 }
 
-function resolveCacheFile() {
+function resolveCacheFile(env = process.env, cwd = process.cwd()) {
   // Jest runs test files in parallel worker processes that all share the repo's
   // matches_cache.json. Concurrent setMatches() calls overwrite each other and
   // the mtime poll then reloads foreign data mid-test (observed as replay
   // catalogs returning 0 metas in the full suite). Give each jest worker its
   // own temp file so parallel tests are isolated; production paths unchanged.
-  if (process.env.JEST_WORKER_ID) {
+  if (env.JEST_WORKER_ID) {
     return path.join(os.tmpdir(), `nuvio-matches-cache-test-${process.pid}.json`);
   }
-  const rootDataDir = path.join(process.cwd(), 'data');
+  // Resolved at runtime via getDataDir (DATA_DIR or <cwd>/data). A literal
+  // path.join(process.cwd(), 'data') here was rewritten by the ncc build into
+  // dist/data, so production read and wrote the cache inside the build output
+  // and the build baked the developer's local cache into the bundle.
+  const rootDataDir = getDataDir(env, cwd);
   if (!fs.existsSync(rootDataDir)) {
     try { fs.mkdirSync(rootDataDir, { recursive: true }); } catch (_) {}
   }
@@ -348,3 +353,4 @@ class CacheService {
 CacheService.CACHE_SCHEMA_VERSION = CACHE_SCHEMA_VERSION;
 
 module.exports = CacheService;
+module.exports.resolveCacheFile = resolveCacheFile;

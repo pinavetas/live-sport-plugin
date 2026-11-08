@@ -1,6 +1,7 @@
 'use strict';
 
 const { safeFetch } = require('../impitClient');
+const { checkOutboundUrl } = require('./OutboundUrlGuard');
 
 const MAX_CACHE_SIZE = 5000;
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour TTL for immutable chunk lengths
@@ -143,6 +144,11 @@ class SegmentLengthService {
 
     const probePromise = (async () => {
       try {
+        // SSRF gate: segment URIs come straight out of an upstream (i.e.
+        // attacker-controllable) playlist, so every probe target is checked
+        // before it is dialled. A blocked URI counts as a failed probe.
+        const verdict = await checkOutboundUrl(segmentUrl);
+        if (!verdict.ok) throw new Error(`blocked probe target (${verdict.reason})`);
         const ranged = await safeFetch(segmentUrl, {
           method: 'GET',
           headers: { ...headers, Range: 'bytes=0-0' },

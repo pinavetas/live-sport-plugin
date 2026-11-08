@@ -4,6 +4,24 @@ const StreamResolveCache = require('../services/StreamResolveCache');
 // Catalog stale-while-revalidate window: once the cache is older than this,
 // the next catalog/meta request triggers a background re-sync (see ensureFresh).
 const REVALIDATE_AFTER_MS = parseInt(process.env.CATALOG_REVALIDATE_MS, 10) || 10 * 60 * 1000;
+// When a sync fails outright (every provider down, or it throws), the cache
+// stays stale, so without a backoff every catalog request would launch another
+// full provider sweep. Stale-triggered syncs wait 2 min after the first
+// failure, doubling per consecutive failure up to 15 min. Scheduled syncs are
+// unaffected.
+const SYNC_FAILURE_BACKOFF_BASE_MS = parseInt(process.env.SYNC_FAILURE_BACKOFF_BASE_MS, 10) || 2 * 60 * 1000;
+const SYNC_FAILURE_BACKOFF_MAX_MS = parseInt(process.env.SYNC_FAILURE_BACKOFF_MAX_MS, 10) || 15 * 60 * 1000;
+// A sync that has been "in progress" longer than this is presumed stuck (a
+// provider promise that never settled); the next trigger may start a new one
+// instead of being skipped forever.
+const SYNC_WATCHDOG_MS = parseInt(process.env.SYNC_WATCHDOG_MS, 10) || 5 * 60 * 1000;
+
+// node-cron fires on schedule regardless of whether the previous run of the
+// same job finished. A prewarm tick (every 3 min, sequential mints) or a
+// custom-AI sweep can outlast its interval under load, and overlapping runs
+// pile up upstream requests and race on shared state. noOverlap (node-cron
+// >= 4) skips a tick while that job's previous execution is still pending.
+const JOB_OPTIONS = (name) => ({ name, noOverlap: true });
 
 class CronService {
   constructor({ matchAggregator, streamResolveCache, cacheService, providerHealthService }) {
@@ -12,32 +30,66 @@ class CronService {
     this.cacheService = cacheService;
     this.providerHealthService = providerHealthService;
     this.syncing = false;
+    this.consecutiveSyncFailures = 0;
+    this.lastSyncAttemptAt = 0;
+    this.syncBackoffUntil = 0;
+    this.syncStartedAt = 0;
+    this.syncGeneration = 0;
+    this.syncWatchdogMs = SYNC_WATCHDOG_MS;
   }
 
   get isSyncing() { return this.syncing; }
   set isSyncing(v) { this.syncing = v; }
 
+  // True while a sync is genuinely running. A sync older than the watchdog is
+  // treated as abandoned so it cannot block every later sync. (syncStartedAt
+  // is 0 when `syncing` was set externally, which is respected as-is.)
+  _syncInProgress() {
+    if (!this.syncing) return false;
+    if (this.syncStartedAt && Date.now() - this.syncStartedAt > this.syncWatchdogMs) {
+      console.warn(`[CronService] Sync running for ${Math.round((Date.now() - this.syncStartedAt) / 1000)}s exceeded the ${Math.round(this.syncWatchdogMs / 1000)}s watchdog; resetting the syncing flag.`);
+      this.syncing = false;
+      this.syncStartedAt = 0;
+      return false;
+    }
+    return true;
+  }
+
   async runSync() {
-    if (this.syncing) return;
+    if (this._syncInProgress()) return;
+    // The generation token keeps an abandoned sync that finally settles from
+    // clearing the flag of the sync that replaced it.
+    const generation = ++this.syncGeneration;
     this.syncing = true;
     // Settles (never rejects) when this run ends; lets requestSync() queue a
     // follow-up behind an in-flight run.
     let releaseInflight;
     this._inflightSync = new Promise((resolve) => { releaseInflight = resolve; });
+    this.lastSyncAttemptAt = Date.now();
+    this.syncStartedAt = Date.now();
     try {
       const activeMatches = await this.matchAggregator.syncMatches();
       if (activeMatches !== null) {
+        this._noteSyncSuccess();
         this.pruneStreamCache(activeMatches);
         this.prewarmCatalogMemo();
+      } else {
+        this._noteSyncFailure();
       }
     } catch (error) {
+      this._noteSyncFailure();
       if (this.providerHealthService) {
         this.providerHealthService.finishSync({ matchCount: 0, succeeded: false });
       }
       throw error;
     } finally {
-      this.syncing = false;
-      this._inflightSync = null;
+      if (this.syncGeneration === generation) {
+        this.syncing = false;
+        this.syncStartedAt = 0;
+        // Only the current run owns the shared in-flight promise; a superseded
+        // one still releases its own so queued follow-ups can proceed.
+        this._inflightSync = null;
+      }
       releaseInflight();
     }
   }
@@ -53,7 +105,7 @@ class CronService {
    * follow-up run is queued behind it (concurrent requests share it).
    */
   requestSync() {
-    if (!this.syncing) return this.runSync();
+    if (!this._syncInProgress()) return this.runSync();
     if (!this._followUpSync) {
       const idle = this._inflightSync || Promise.resolve();
       this._followUpSync = idle.then(() => {
@@ -62,6 +114,21 @@ class CronService {
       });
     }
     return this._followUpSync;
+  }
+
+  _noteSyncSuccess() {
+    this.consecutiveSyncFailures = 0;
+    this.syncBackoffUntil = 0;
+  }
+
+  _noteSyncFailure() {
+    this.consecutiveSyncFailures++;
+    const delay = Math.min(
+      SYNC_FAILURE_BACKOFF_BASE_MS * Math.pow(2, this.consecutiveSyncFailures - 1),
+      SYNC_FAILURE_BACKOFF_MAX_MS
+    );
+    this.syncBackoffUntil = Date.now() + delay; // measured from when the attempt ended
+    console.warn(`[CronService] Sync failed (${this.consecutiveSyncFailures} in a row); stale-triggered syncs paused for ${Math.round(delay / 1000)}s.`);
   }
 
   // Rebuild the hot catalog pages right after a sync, so no user ever pays the
@@ -99,7 +166,8 @@ class CronService {
       const isPrimary = (process.env.NODE_APP_INSTANCE === undefined || process.env.NODE_APP_INSTANCE === '0') &&
                         (process.env.pm_id === undefined || process.env.pm_id === '0');
       if (!isPrimary) return;
-      if (this.syncing) return;
+      if (this._syncInProgress()) return;
+      if (Date.now() < this.syncBackoffUntil) return; // recent sync failed: back off
       if (!this.cacheService || !this.cacheService.isStale(REVALIDATE_AFTER_MS)) return;
       console.log('[CronService] Catalog stale, triggering background re-sync (SWR)...');
       this.runSync().catch((err) => console.error('[CronService] SWR sync failed:', err.message));
@@ -119,7 +187,7 @@ class CronService {
       } catch (err) {
         console.error('[CronService] Match sync failed:', err.message);
       }
-    });
+    }, JOB_OPTIONS('match-sync'));
 
     // No separate job for dynamic Custom AI parsers: they are mounted into
     // matchAggregator.providers, so the match sync above (and the SWR
@@ -140,7 +208,7 @@ class CronService {
       } catch (err) {
         console.error('[CronService] Prewarm job failed:', err.message);
       }
-    });
+    }, JOB_OPTIONS('prewarm'));
 
     // Run first sync in background on boot so the catalog and all providers (including replays) are fresh immediately
     setImmediate(async () => {
@@ -159,11 +227,15 @@ class CronService {
         try {
           console.log(`[CronService] Pinging external URL to prevent sleep...`);
           const { request } = require('undici');
-          await request(`${externalUrl}/health`);
+          const { body } = await request(`${externalUrl}/health`);
+          // An unconsumed undici body keeps its socket checked out; drain it so
+          // the connection goes back to the pool (or closes) after every ping.
+          if (body && typeof body.dump === 'function') await body.dump();
+          else if (body && typeof body.destroy === 'function') body.destroy();
         } catch (err) {
           console.error('[CronService] Keep-alive ping failed:', err.message);
         }
-      });
+      }, JOB_OPTIONS('keep-alive'));
     }
 
     // Run first sync immediately on boot

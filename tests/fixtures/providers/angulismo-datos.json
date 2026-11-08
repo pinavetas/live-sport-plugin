@@ -1,0 +1,533 @@
+{
+  "events": [
+    {
+      "id": 621951168,
+      "evento": "FIP World Cup: Argentina (F) vs. España (Final femenina) (F)",
+      "fecha": "2026-11-07 08:00:00",
+      "competencia": "ATP WTA",
+      "logoUrl": "https://images.seeklogo.com/logo-png/24/1/tenis-logo-png_seeklogo-240691.png",
+      "team1Logo": "https://angulismotv.pages.dev/assets/logos/equipos/argentina.png",
+      "team2Logo": "https://angulismotv.pages.dev/assets/logos/equipos/espana.png",
+      "canales": [
+        {
+          "name": "ESPN 4",
+          "options": [
+            {
+              "name": "Opción 1 (FL)",
+              "iframe": "https://tvlibre.st/html/fl/?get=RVNQTkhE"
+            },
+            {
+              "name": "Opción 2",
+              "iframe": "https://streamtp99a.sbs/global1.php?stream=espn4"
+            },
+            {
+              "name": "Opción 3",
+              "iframe": "https://la18hd.su/vivo/canales.php?stream=espn4"
+            },
+            {
+              "name": "Opción 4",
+              "iframe": "https://streamxhd.com/live1.php?stream=espn4"
+            },
+            {
+              "name": "Opción 5",
+              "iframe": "https://welivesportz.cfd/embed/espn4col.php"
+            },
+            {
+              "name": "Opción 6 (Extensión)",
+              "iframe": "https://bestleague.life/tok.html?get=RVNQTkhE"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 650347538,
+      "evento": "Fórmula 1: GP Brasil - Clasificación",
+      "fecha": "2026-11-07 15:00:00",
+      "competencia": "Fórmula 1",
+      "logoUrl": "https://angulismotv.pages.dev/assets/logos/competicion/f1.png",
+      "team1Logo": null,
+      "team2Logo": null,
+      "canales": [
+        {
+          "name": "DAZN",
+          "options": [
+            {
+              "name": "Opción 1",
+              "iframe": "https://streamxhd.sbs/live1.php?stream=daznf1"
+            }
+          ]
+        },
+        {
+          "name": "Disney+",
+          "options": [
+            {
+              "name": "Opción 1",
+              "iframe": "https://streamxhd.sbs/live1.php?stream=disney23"
+            },
+            {
+              "name": "Opción 2",
+              "iframe": "https://streamtp99a.sbs/global1.php?stream=disney1"
+            }
+          ]
+        },
+        {
+          "name": "ESPN 2",
+          "options": [
+            {
+              "name": "Opción 1",
+              "iframe": "https://streamtp99a.sbs/global1.php?stream=espn2"
+            },
+            {
+              "name": "Opción 2 (Ads)",
+              "iframe": "https://welivesportz.cfd/futbol/espn2arg.php"
+            }
+          ]
+        },
+        {
+          "name": "FOX Sports",
+          "options": [
+            {
+              "name": "Opción 1 (FL)",
+              "iframe": "https://tvlibre.st/html/fl/?get=Rm94U3BvcnRz"
+            },
+            {
+              "name": "Opción 2",
+              "iframe": "https://streamtp99a.sbs/global1.php?stream=fox1ar"
+            },
+            {
+              "name": "Opción 3",
+              "iframe": "https://la18hd.su/vivo/canales.php?stream=foxsports"
+            },
+            {
+              "name": "Opción 4",
+              "iframe": "https://streamxhd.com/live1.php?stream=fox1ar"
+            },
+            {
+              "name": "Opción 5",
+              "iframe": "https://welivesportz.cfd/embed/foxsp1arg.php"
+            },
+            {
+              "name": "Opción 6 (Ads)",
+              "iframe": "https://welivesportz.cfd/futbol/foxsp1arg.php"
+            },
+            {
+              "name": "Opción 7 (Extensión)",
+              "iframe": "https://bestleague.life/tok.html?get=Rm94U3BvcnRz"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 182005141,
+      "evento": "LaLiga: Valencia vs. Real Madrid",
+      "fecha": "2026-11-07 17:00:00",
+      "competencia": "LaLiga",
+      "logoUrl": "https://angulismo-pics.pages.dev/es.png",
+      "team1Logo": "https://angulismotv.pages.dev/assets/logos/equipos/valencia-cf.png",
+      "team2Logo": "https://angulismotv.pages.dev/assets/logos/equipos/real-madrid.png",
+      "canales": [
+        {
+          "name": "DSports",
+          "options": [
+            {
+              "name": "Opción 1",
+              "iframe": "https://streamtp99a.sbs/return/dsports-fullHD-recomendado.html"
+            },
+            {
+              "name": "Opción 2",
+              "iframe": "https://streamtp99a.sbs/global1.php?stream=dsports"
+            },
+            {
+              "name": "Opción 3",
+              "iframe": "https://la18hd.su/vivo/canales.php?stream=dsports"
+            },
+            {
+              "name": "Opción 4",
+              "iframe": "https://streamxhd.com/live1.php?stream=dsports"
+            },
+            {
+              "name": "Opción 5",
+              "iframe": "https://welivesportz.cfd/embed/directvarg.php"
+            },
+            {
+              "name": "Opción 6",
+              "iframe": "https://bolaloca.my/player/2/94"
+            },
+            {
+              "name": "Opción 7 (Ads)",
+              "iframe": "https://welivesportz.cfd/futbol/directvarg.php"
+            }
+          ]
+        },
+        {
+          "name": "ESPN+",
+          "options": [
+            {
+              "name": "Opción 1",
+              "iframe": "https://streamtp99a.sbs/global1.php?stream=espnplus4"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 404236232,
+      "evento": "Liga Profesional: Boca Juniors vs. Defensa y Justicia",
+      "fecha": "2026-11-07 17:30:00",
+      "competencia": "Liga Profesional Argentina",
+      "logoUrl": "https://angulismotv.pages.dev/assets/logos/competicion/afa.png",
+      "team1Logo": "https://angulismotv.pages.dev/assets/logos/equipos/boca-juniors.png",
+      "team2Logo": "https://angulismotv.pages.dev/assets/logos/equipos/defensa-y-justicia.png",
+      "canales": [
+        {
+          "name": "ESPN Premium",
+          "options": [
+            {
+              "name": "Opción 1 (FL)",
+              "iframe": "https://tvlibre.st/html/fl/?get=Rm94X1Nwb3J0c19QcmVtaXVuX0hE"
+            },
+            {
+              "name": "Opción 2",
+              "iframe": "https://streamtp99a.sbs/global1.php?stream=espnpremium"
+            },
+            {
+              "name": "Opción 3",
+              "iframe": "https://streamxhd.com/live1.php?stream=espnpremium"
+            },
+            {
+              "name": "Opción 4",
+              "iframe": "https://la18hd.su/vivo/canales.php?stream=espnpremium"
+            },
+            {
+              "name": "Opción 5",
+              "iframe": "https://welivesportz.cfd/embed/espnpremarg.php"
+            },
+            {
+              "name": "Opción 6 (Ads)",
+              "iframe": "https://welivesportz.cfd/futbol/espnpremarg.php"
+            },
+            {
+              "name": "Opción 7 (Extensión)",
+              "iframe": "https://bestleague.life/tok.html?get=Rm94X1Nwb3J0c19QcmVtaXVuX0hE"
+            }
+          ]
+        },
+        {
+          "name": "TNT Sports",
+          "options": [
+            {
+              "name": "Opción 1 (FL)",
+              "iframe": "https://tvlibre.st/html/fl/?get=VE5UX1Nwb3J0c19IRA"
+            },
+            {
+              "name": "Opción 2",
+              "iframe": "https://streamtp99a.sbs/global1.php?stream=tntsports"
+            },
+            {
+              "name": "Opción 3",
+              "iframe": "https://streamxhd.com/live1.php?stream=tntsports"
+            },
+            {
+              "name": "Opción 4",
+              "iframe": "https://la18hd.su/vivo/canales.php?stream=tntsports"
+            },
+            {
+              "name": "Opción 5",
+              "iframe": "https://welivesportz.cfd/embed/tntsportarg.php"
+            },
+            {
+              "name": "Opción 6 (Ads)",
+              "iframe": "https://welivesportz.cfd/futbol/tntsportarg.php"
+            },
+            {
+              "name": "Opción 7 (Extensión)",
+              "iframe": "https://bestleague.life/tok.html?get=VE5UX1Nwb3J0c19IRA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 691936890,
+      "evento": "NBA: Denver Nuggets vs. Indiana Pacers",
+      "fecha": "2026-11-07 19:00:00",
+      "competencia": "NBA",
+      "logoUrl": "https://angulismo-pics.pages.dev/nba.png",
+      "team1Logo": null,
+      "team2Logo": null,
+      "canales": [
+        {
+          "name": "ESPN 4",
+          "options": [
+            {
+              "name": "Opción 1 (FL)",
+              "iframe": "https://tvlibre.st/html/fl/?get=RVNQTkhE"
+            },
+            {
+              "name": "Opción 2",
+              "iframe": "https://streamtp99a.sbs/global1.php?stream=espn4"
+            },
+            {
+              "name": "Opción 3",
+              "iframe": "https://la18hd.su/vivo/canales.php?stream=espn4"
+            },
+            {
+              "name": "Opción 4",
+              "iframe": "https://streamxhd.com/live1.php?stream=espn4"
+            },
+            {
+              "name": "Opción 5",
+              "iframe": "https://welivesportz.cfd/embed/espn4col.php"
+            },
+            {
+              "name": "Opción 6 (Extensión)",
+              "iframe": "https://bestleague.life/tok.html?get=RVNQTkhE"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "channels": [
+    {
+      "name": "Varios",
+      "logo": "https://images.seeklogo.com/logo-png/13/1/the-simpsons-tv-logo-png_seeklogo-139137.png",
+      "options": [
+        {
+          "name": "Opción 1",
+          "iframe": "https://streamx-hd.com/live1.php?stream=dsports"
+        },
+        {
+          "name": "Opción 2 (Opcion 2 + buffer)",
+          "iframe": "https://la16hd.com/dsportsar.php"
+        },
+        {
+          "name": "Opción 3 (EXTENSION PC)",
+          "iframe": "https://bestleague.life/tok.html?get=RHNwb3J0c19VWQ=="
+        },
+        {
+          "name": "Opción 4 (1080p + buffer)",
+          "iframe": "https://la16hd.com/dsports2ar.php"
+        },
+        {
+          "name": "Opción 5 (Solo Argentina)",
+          "iframe": "https://tvlibre-online.com/html/fl/?get=VGVsZWZlSEQ="
+        },
+        {
+          "name": "Opción 6",
+          "iframe": "https://stream-xhd.com/live1.php?stream=telefe"
+        },
+        {
+          "name": "Opción 7 (EXTENSION PC)",
+          "iframe": "https://bestleague.life/tok.html?get=VGVsZWZlSEQ="
+        },
+        {
+          "name": "Opción 8 (EXTENSION PC)",
+          "iframe": "https://bestleague.life/tok.html?get=VHlDU3BvcnQ"
+        },
+        {
+          "name": "Opción 9",
+          "iframe": "https://bestleague.life/cvatt.html?get=VHlDU3BvcnQ&lang=1"
+        },
+        {
+          "name": "Opción 10",
+          "iframe": "https://sudamericaplay2.com/canal_8112/1dzportsplus.html"
+        },
+        {
+          "name": "Opción 11 (EXTENSION PC)",
+          "iframe": "https://bestleague.life/tok.html?get=RHNwb3J0c19QbHVzX1VZ"
+        },
+        {
+          "name": "Opción 12 (Ingles)",
+          "iframe": "https://angulismotv.pages.dev/mpdk/fox4k"
+        },
+        {
+          "name": "Opción 13",
+          "iframe": "https://junkieembeds.pages.dev/embed/telemundo-usa"
+        }
+      ],
+      "show": false,
+      "featured": true
+    },
+    {
+      "name": "Multicam",
+      "logo": "https://angulismotv.pages.dev/assets/logos/MULTICAM.png",
+      "options": [
+        {
+          "name": "Opción 1",
+          "iframe": "https://angulismotv.pages.dev/embed-multicam"
+        }
+      ],
+      "show": true,
+      "featured": true
+    },
+    {
+      "name": "LPF Play",
+      "logo": "https://web.archive.org/web/20250720002943im_/https://p.alangulotv.blog/BNACIONAL",
+      "options": [
+        {
+          "name": "Opción 1",
+          "iframe": "https://emitiendoenvivo.com/lpf/1.m3u8"
+        },
+        {
+          "name": "Opción 2",
+          "iframe": "https://emitiendoenvivo.com/lpf/2.m3u8"
+        },
+        {
+          "name": "Opción 3",
+          "iframe": "https://emitiendoenvivo.com/lpf/3.m3u8"
+        }
+      ],
+      "show": true,
+      "featured": true
+    },
+    {
+      "name": "Discord",
+      "logo": "https://angulismotv.pages.dev/assets/logos/DISCORD.png",
+      "url": "https://discord.gg/MVqmy6EACK",
+      "show": true
+    },
+    {
+      "name": "ESPN",
+      "logo": "https://angulismotv.pages.dev/assets/logos/ESPN.png",
+      "options": [
+        {
+          "name": "Opción 1",
+          "iframe": "https://bestleague.life/cvatt.html?get=RVNQTjJIRA&lang=1"
+        },
+        {
+          "name": "Opción 2",
+          "iframe": "https://la18hd.su/vivo/canales.php?stream=espn"
+        },
+        {
+          "name": "Opción 3",
+          "iframe": "https://streamx305.sbs/global1.php?stream=espn"
+        },
+        {
+          "name": "Opción 4 (HLS)",
+          "iframe": "https://barinaslive1.boldmss.com/ESPN/ESPN.isml/ESPN.m3u8"
+        },
+        {
+          "name": "Opción 5",
+          "iframe": "https://welivesportz.cfd/futbol/espn1arg.php"
+        },
+        {
+          "name": "Opción 6 (EXTENSION PC DELAY 720P)",
+          "iframe": "https://bestleague.life/tok.html?get=RVNQTl9VWQ=="
+        },
+        {
+          "name": "Opción 7 (EXTENSION PC SIN DELAY 1080p)",
+          "iframe": "https://can05-2025vaariscandeteexteeop1.github.io/cantodsgiaaareextee.html?id=eeespee1-giaaaa"
+        }
+      ],
+      "show": true,
+      "featured": true
+    },
+    {
+      "name": "DAZN",
+      "logo": "https://tse2.mm.bing.net/th/id/OIP.1_oRiOthCWD64KIGtCh0xAHaFj?r=0&rs=1&pid=ImgDetMain&o=7&rm=3",
+      "options": [
+        {
+          "name": "Opción 1",
+          "iframe": "https://bestleague.life/tok.html?get=REFaTjE="
+        },
+        {
+          "name": "Opción 2",
+          "iframe": "https://la20hd.com/vivo/canales.php?stream=dazn1"
+        },
+        {
+          "name": "Opción 3",
+          "iframe": "https://embed.ksdjugfsddeports.com/embed2/daznf1.html"
+        },
+        {
+          "name": "Opción 4",
+          "iframe": "https://bestleague.life/tok.html?get=REFaTkxBTElHQT0="
+        },
+        {
+          "name": "Opción 5",
+          "iframe": "https://streamtpday1.xyz/global1.php?stream=daznlaliga"
+        },
+        {
+          "name": "Opción 6",
+          "iframe": "https://la18hd.com/vivo/canales.php?stream=daznlaliga"
+        },
+        {
+          "name": "Opción 7",
+          "iframe": "https://streamx061.sbs/global1.php?channel=daznf1"
+        },
+        {
+          "name": "Opción 8",
+          "iframe": "https://streamxhd.com/live1.php?stream=daznf1"
+        },
+        {
+          "name": "Opción 9 (720p)",
+          "iframe": "https://streamx305.sbs/global1.php?channel=daznf1"
+        }
+      ],
+      "show": false,
+      "featured": false
+    },
+    {
+      "name": "Juegos",
+      "logo": "https://tse4.mm.bing.net/th/id/OIP.MB8ZvMuYsJZIUGqHrpNJCAHaE8?cb=ucfimg2ucfimg=1&rs=1&pid=ImgDetMain&o=7&rm=3",
+      "options": [
+        {
+          "name": "Opción 1",
+          "iframe": "https://eaglercraft.q13x.com/1.8-wasm/?retina=true"
+        },
+        {
+          "name": "Opción 2",
+          "iframe": "https://www.minijuegos.com/embed/dragon-ball-dress-up"
+        },
+        {
+          "name": "Opción 3",
+          "iframe": "https://www.minijuegos.com/embed/gran-turismo"
+        },
+        {
+          "name": "Opción 4 (Simulation Disc)",
+          "iframe": "https://www.retrogames.cc/embed/43710-gran-turismo-2-usa-simulation-mode.html"
+        },
+        {
+          "name": "Opción 5",
+          "iframe": "https://f.kbhgames.com/emujs/play.php?c=gba&f=f12002.gba"
+        },
+        {
+          "name": "Opción 6",
+          "iframe": "https://www.play-games.com/iframe/36864.html?pg_f_l=es"
+        },
+        {
+          "name": "Opción 7",
+          "iframe": "https://www.retrogames.cc/embed/42622-pro-evolution-soccer-2.html?mp_assets=https%3A%2F%2Fs2.minijuegosgratis.com%2F&mp_embed=0&mp_game_id=238730&mp_game_uid=pro-evolution-soccer-2&mp_game_url=https%3A%2F%2Fwww.minijuegos.com%2Fjuego%2Fpro-evolution-soccer-2&mp_int=1&mp_locale=es_ES&mp_player_type=IFRAME&mp_site_https_url=https%3A%2F%2Fwww.minijuegos.com%2F&mp_site_name=minijuegos.com&mp_site_url=https%3A%2F%2Fwww.minijuegos.com%2F&mp_timezone=Europe%2FMadrid&mp_view_type="
+        },
+        {
+          "name": "Opción 8 (parte 2)",
+          "iframe": "https://earntodie.co/earn-to-die.embed"
+        },
+        {
+          "name": "Opción 9",
+          "iframe": "https://stealing-the-diamond.game-files.crazygames.com/ruffle/stealing-the-diamond/1/stealing_the_diamond.html?isNewUser=true&skipPrerollFirstSession=true&v=1.345"
+        },
+        {
+          "name": "Opción 10",
+          "iframe": "https://www.silvergames.com/es/bartender-the-right-mix/gameframe#adtest"
+        },
+        {
+          "name": "Opción 11",
+          "iframe": "https://retrogames.games/es/embed/colin-mcrae-rally-2"
+        },
+        {
+          "name": "Opción 12",
+          "iframe": "https://www.minijuegos.com/embed/fireboy-and-watergirl-the-forest-temple"
+        },
+        {
+          "name": "Opción 13",
+          "iframe": "https://www.jopi.com/flashgame/id/2053"
+        }
+      ],
+      "show": false,
+      "featured": false
+    }
+  ]
+}

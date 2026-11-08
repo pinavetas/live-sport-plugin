@@ -24,12 +24,12 @@
  *  - anything else → absolute URL as-is
  */
 
-const { createWorkerPool } = require('./WorkerBudget');
+const { createWorkerPool, resolveBudgetFile } = require('./WorkerBudget');
 const byteRangeSigner = require('./ByteRangeSigner');
 const segmentLengthService = require('./SegmentLengthService');
 
 // Legacy fallback worker pool (for explicit opt-out or testing)
-const workerPool = createWorkerPool();
+const workerPool = createWorkerPool({ persistPath: resolveBudgetFile() });
 
 /**
  * Detect whether a segment URL is a TikTok / ByteDance cloaked segment (WebP with MPEG-TS).
@@ -323,10 +323,20 @@ async function preprobeManifestSegments(manifestBody, manifestUrl, opts = {}) {
     segmentLengthService.probeContentLength(url, { referer, origin })
   );
 
-  await Promise.race([
-    Promise.allSettled(probePromises),
-    new Promise(resolve => setTimeout(resolve, 1500))
-  ]);
+  // Bound the wait at 1.5 s, but clear the timer as soon as the race settles:
+  // one timer per manifest request otherwise outlives the probes it guards.
+  let budgetTimer;
+  try {
+    await Promise.race([
+      Promise.allSettled(probePromises),
+      new Promise(resolve => {
+        budgetTimer = setTimeout(resolve, 1500);
+        if (typeof budgetTimer.unref === 'function') budgetTimer.unref();
+      })
+    ]);
+  } finally {
+    clearTimeout(budgetTimer);
+  }
 }
 
 module.exports = {
