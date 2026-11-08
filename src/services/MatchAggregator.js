@@ -1578,6 +1578,11 @@ class MatchAggregator {
       this._enrichMatchesWithBroadcasters(activeMatches);
 
       this.cacheService.setMatches(activeMatches);
+      // Identity of the snapshot just written: enrichment results are only
+      // written back while the cache still holds this sync's matches.
+      const cachedSnapshot = typeof this.cacheService.getMatchesReadOnly === 'function'
+        ? this.cacheService.getMatchesReadOnly()
+        : null;
       if (this.providerHealthService) {
         this.providerHealthService.finishSync({ matchCount: activeMatches.length, succeeded: true });
       }
@@ -1609,9 +1614,21 @@ class MatchAggregator {
             try { await this.teamLogoService.enrichMatch(m); } catch (_) {}
           }
         };
-        Promise.all(
+        // setMatches() stored CLONES, so the logos enrichMatch writes into
+        // these objects never reached the cache. Once the pool drains, write
+        // the enriched set back (still off the sync's critical path).
+        const logoSig = (m) => `${m.logo || ''}|${(m.team1 && m.team1.logo) || ''}|${(m.team2 && m.team2.logo) || ''}`;
+        const before = enrichable.map(logoSig);
+        this.logoEnrichment = Promise.all(
           Array.from({ length: Math.min(ENRICH_CONCURRENCY, enrichable.length) }, enrichWorker)
-        ).catch(() => {});
+        ).then(() => {
+          if (!enrichable.some((m, i) => logoSig(m) !== before[i])) return false;
+          // A newer sync (or a cross-worker disk reload) replaced the snapshot:
+          // its data wins, never overwrite it with this older match set.
+          if (cachedSnapshot && this.cacheService.getMatchesReadOnly() !== cachedSnapshot) return false;
+          this.cacheService.setMatches(activeMatches);
+          return true;
+        }).catch(() => false);
       }
 
       return activeMatches;
