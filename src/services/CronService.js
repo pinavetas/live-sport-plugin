@@ -4,6 +4,17 @@ const StreamResolveCache = require('../services/StreamResolveCache');
 // Catalog stale-while-revalidate window: once the cache is older than this,
 // the next catalog/meta request triggers a background re-sync (see ensureFresh).
 const REVALIDATE_AFTER_MS = parseInt(process.env.CATALOG_REVALIDATE_MS, 10) || 10 * 60 * 1000;
+// A sync that has been "in progress" longer than this is presumed stuck (a
+// provider promise that never settled); the next trigger may start a new one
+// instead of being skipped forever.
+const SYNC_WATCHDOG_MS = parseInt(process.env.SYNC_WATCHDOG_MS, 10) || 5 * 60 * 1000;
+
+// node-cron fires on schedule regardless of whether the previous run of the
+// same job finished. A prewarm tick (every 3 min, sequential mints) or a
+// custom-AI sweep can outlast its interval under load, and overlapping runs
+// pile up upstream requests and race on shared state. noOverlap (node-cron
+// >= 4) skips a tick while that job's previous execution is still pending.
+const JOB_OPTIONS = (name) => ({ name, noOverlap: true });
 
 class CronService {
   constructor({ matchAggregator, streamResolveCache, cacheService, providerHealthService }) {
@@ -12,14 +23,35 @@ class CronService {
     this.cacheService = cacheService;
     this.providerHealthService = providerHealthService;
     this.syncing = false;
+    this.syncStartedAt = 0;
+    this.syncGeneration = 0;
+    this.syncWatchdogMs = SYNC_WATCHDOG_MS;
   }
 
   get isSyncing() { return this.syncing; }
   set isSyncing(v) { this.syncing = v; }
 
+  // True while a sync is genuinely running. A sync older than the watchdog is
+  // treated as abandoned so it cannot block every later sync. (syncStartedAt
+  // is 0 when `syncing` was set externally, which is respected as-is.)
+  _syncInProgress() {
+    if (!this.syncing) return false;
+    if (this.syncStartedAt && Date.now() - this.syncStartedAt > this.syncWatchdogMs) {
+      console.warn(`[CronService] Sync running for ${Math.round((Date.now() - this.syncStartedAt) / 1000)}s exceeded the ${Math.round(this.syncWatchdogMs / 1000)}s watchdog; resetting the syncing flag.`);
+      this.syncing = false;
+      this.syncStartedAt = 0;
+      return false;
+    }
+    return true;
+  }
+
   async runSync() {
-    if (this.syncing) return;
+    if (this._syncInProgress()) return;
+    // The generation token keeps an abandoned sync that finally settles from
+    // clearing the flag of the sync that replaced it.
+    const generation = ++this.syncGeneration;
     this.syncing = true;
+    this.syncStartedAt = Date.now();
     try {
       const activeMatches = await this.matchAggregator.syncMatches();
       if (activeMatches !== null) {
@@ -32,7 +64,10 @@ class CronService {
       }
       throw error;
     } finally {
-      this.syncing = false;
+      if (this.syncGeneration === generation) {
+        this.syncing = false;
+        this.syncStartedAt = 0;
+      }
     }
   }
 
@@ -71,7 +106,7 @@ class CronService {
       const isPrimary = (process.env.NODE_APP_INSTANCE === undefined || process.env.NODE_APP_INSTANCE === '0') &&
                         (process.env.pm_id === undefined || process.env.pm_id === '0');
       if (!isPrimary) return;
-      if (this.syncing) return;
+      if (this._syncInProgress()) return;
       if (!this.cacheService || !this.cacheService.isStale(REVALIDATE_AFTER_MS)) return;
       console.log('[CronService] Catalog stale, triggering background re-sync (SWR)...');
       this.runSync().catch((err) => console.error('[CronService] SWR sync failed:', err.message));
@@ -91,7 +126,7 @@ class CronService {
       } catch (err) {
         console.error('[CronService] Match sync failed:', err.message);
       }
-    });
+    }, JOB_OPTIONS('match-sync'));
 
     // Background sync for dynamic Custom AI parsers (every 30 mins)
     cron.schedule(process.env.CUSTOM_AI_CRON_SCHEDULE || '*/30 * * * *', async () => {
@@ -119,7 +154,7 @@ class CronService {
       } catch (err) {
         console.error('[CronService] Custom AI sync job failed:', err.message);
       }
-    });
+    }, JOB_OPTIONS('custom-ai-sync'));
 
     // Prewarm LIVE matches only, so a click is near-instant.
     //
@@ -136,7 +171,7 @@ class CronService {
       } catch (err) {
         console.error('[CronService] Prewarm job failed:', err.message);
       }
-    });
+    }, JOB_OPTIONS('prewarm'));
 
     // Run first sync in background on boot so the catalog and all providers (including replays) are fresh immediately
     setImmediate(async () => {
@@ -155,11 +190,15 @@ class CronService {
         try {
           console.log(`[CronService] Pinging external URL to prevent sleep...`);
           const { request } = require('undici');
-          await request(`${externalUrl}/health`);
+          const { body } = await request(`${externalUrl}/health`);
+          // An unconsumed undici body keeps its socket checked out; drain it so
+          // the connection goes back to the pool (or closes) after every ping.
+          if (body && typeof body.dump === 'function') await body.dump();
+          else if (body && typeof body.destroy === 'function') body.destroy();
         } catch (err) {
           console.error('[CronService] Keep-alive ping failed:', err.message);
         }
-      });
+      }, JOB_OPTIONS('keep-alive'));
     }
 
     // Run first sync immediately on boot

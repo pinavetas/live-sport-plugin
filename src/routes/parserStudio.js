@@ -51,7 +51,8 @@ router.post('/test', async (req, res) => {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
       },
       timeoutMs: 15000,
-      attempts: 2
+      attempts: 2,
+      outboundGuard: true
     });
 
     if (!pageRes.ok) {
@@ -62,6 +63,9 @@ router.post('/test', async (req, res) => {
     const result = aiGenerator.testSelectors(html, selectors, url);
     return res.json({ success: true, ...result });
   } catch (err) {
+    if (err && err.code === 'EOUTBOUND_BLOCKED') {
+      return res.status(403).json({ success: false, error: err.message });
+    }
     return res.status(500).json({ success: false, error: err.message });
   }
 });

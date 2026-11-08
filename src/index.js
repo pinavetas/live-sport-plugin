@@ -17,11 +17,12 @@ const express = require('express');
 const cors    = require('cors');
 const { getRouter } = require('stremio-addon-sdk');
 const { createProxyMiddleware } = require('http-proxy-middleware');
+const { resolverProxyOptions } = require('./resolverProxyOptions');
 const child_process = require('child_process');
 const path = require('path');
 
 const { builder } = require('./manifest');
-const { handleCatalog, handleMeta, isReplayMatch, isCustomAiMatch } = require('./catalog');
+const { handleCatalog, handleMeta, isReplayMatch, hasCustomAiContent } = require('./catalog');
 const { createReplaySubcatalogHandler } = require('./routes/replaySubcatalogs');
 const { handleStream } = require('./streams');
 const { PORT, BASE_URL, getRequestBaseUrl, getLocalIp } = require('./config');
@@ -34,15 +35,10 @@ const { RESOLVER_PORT, workerOffset } = require('./resolverManager');
 
 // Removed global User-Agent fix because it causes ECONNRESET on Streamed.pk
 
-process.on('unhandledRejection', (reason) => {
-  // Client disconnects abort in-flight fetches; those rejections are expected and
-  // would otherwise spam the log with AbortError stack traces.
-  if (reason && (reason.name === 'AbortError' || reason.__expected)) return;
-  console.error('[unhandledRejection]', reason && reason.stack ? reason.stack : reason);
-});
-process.on('uncaughtException', (err) => {
-  console.error('[uncaughtException]', err && err.stack ? err.stack : err);
-});
+// unhandledRejection is logged (expected AbortErrors are ignored); an
+// uncaughtException logs and exits(1) so PM2 / Docker restart a clean process.
+const { installProcessHandlers, attachServerErrorHandler } = require('./services/processGuards');
+installProcessHandlers();
 
 // ─── Register Addon Handlers ──────────────────────────────────────────────────
 
@@ -299,6 +295,7 @@ app.get('/api/matches', (req, res) => {
 //                         placehold.co dependency.
 const imageService = require('./services/ImageService');
 const { resolveEmbedBase } = require('./services/EmbedBase');
+const { normalizeCollectionSport, findCollectionPoster } = require('./services/CollectionPoster');
 
 /**
  * Encode a fetched image as a data URI.
@@ -315,14 +312,19 @@ const { resolveEmbedBase } = require('./services/EmbedBase');
  */
 async function entryToDataUri(entry) {
   if (!entry || !entry.buffer || !entry.contentType) return null;
+  // The data URI ends up inside an SVG that sharp rasterises, so an image with
+  // absurd declared dimensions would be decoded there instead: drop it.
+  if (imageService.exceedsPixelLimit(entry)) return null;
   let buffer = entry.buffer;
   let contentType = entry.contentType;
   if (contentType.includes('webp') || contentType.includes('avif')) {
     try {
       const sharp = require('sharp');
-      buffer = await sharp(buffer).png().toBuffer();
+      buffer = await sharp(buffer, imageService.sharpInputOptions()).png().toBuffer();
       contentType = 'image/png';
-    } catch (e) {}
+    } catch (e) {
+      if (e && /pixel limit/i.test(e.message || '')) return null;
+    }
   }
   return `data:${contentType};base64,${buffer.toString('base64')}`;
 }
@@ -358,21 +360,22 @@ async function sendRasterizedIfPossible(res, svg) {
 }
 
 app.get(['/img/collection/:sport', '/:config/img/collection/:sport'], async (req, res) => {
-  const sport = (req.params.sport || 'football').toLowerCase().replace(/\.(jpg|jpeg|png|svg)$/i, '');
-  const candidatePaths = [
-    path.join(__dirname, '..', 'public', 'posters', 'collections', `${sport}.jpg`),
-    path.join(__dirname, 'public', 'posters', 'collections', `${sport}.jpg`),
-    path.join(process.cwd(), 'public', 'posters', 'collections', `${sport}.jpg`),
-    path.join(process.cwd(), 'dist', 'public', 'posters', 'collections', `${sport}.jpg`)
-  ];
-  for (const p of candidatePaths) {
-    if (fs.existsSync(p)) {
-      res.setHeader('Content-Type', 'image/jpeg');
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-      res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
-      return res.sendFile(p);
-    }
+  // Express URL-decodes :sport, so `..%2F` arrives as `../`: whitelist the key
+  // before it ever reaches a filesystem path.
+  const sport = normalizeCollectionSport(req.params.sport);
+  if (!sport) return res.status(400).end();
+  const posterPath = findCollectionPoster(sport, [
+    path.join(__dirname, '..', 'public', 'posters', 'collections'),
+    path.join(__dirname, 'public', 'posters', 'collections'),
+    path.join(process.cwd(), 'public', 'posters', 'collections'),
+    path.join(process.cwd(), 'dist', 'public', 'posters', 'collections')
+  ]);
+  if (posterPath) {
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+    return res.sendFile(posterPath);
   }
   const svg = imageService.generateSportSvg(sport, 'landscape', { badge: 'REPLAYS' });
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -784,6 +787,10 @@ app.get('/img', async (req, res) => {
       // Inline the bytes: an SVG poster never fetches external subresources, so
       // a nested URL here would render as a logo-less card.
       const imgUrl = await entryToDataUri(entry);
+      if (!imgUrl) {
+        // Over the decode pixel limit: never embed it, serve the text card.
+        return await sendRasterizedIfPossible(res, imageService.svgPlaceholder(text, color));
+      }
       const cleanTitle = String(text || '').replace(/\b(24\/7|live|stream|raw|hd)\b/gi, '').trim();
       const showTitle = cleanTitle.length > 0 && cleanTitle.length <= 36;
       // Broadcast Slate. This card previously carried its OWN near-black gradient
@@ -850,18 +857,8 @@ app.use('/api/parser', require('./routes/parserStudio'));
 // Zero-bandwidth DASH→HLS converter (must stay above the /api resolver proxy)
 app.use(require('./routes/dash'));
 // Mount the HLS Video Proxy (routes to the internal resolver on port RESOLVER_PORT)
-app.use('/api', createProxyMiddleware({
-  target: `http://127.0.0.1:${RESOLVER_PORT}/api`,
-  changeOrigin: true,
-  xfwd: true,
-  logLevel: 'debug',
-  onError: (err, req, res) => {
-    console.error('[Proxy Error] Failed to proxy /api request to internal resolver:', err.message);
-    if (!res.headersSent) {
-      res.status(502).send('Bad Gateway: Internal stream resolver is not responding.');
-    }
-  }
-}));
+// http-proxy-middleware v4 options (on.error, not the ignored legacy onError).
+app.use('/api', createProxyMiddleware(resolverProxyOptions(RESOLVER_PORT)));
 
 // ─── Universal Dynamic Base URL Response Rewriter ─────────────────────────────
 // Intercepts /manifest.json, /catalog/*, /meta/*, and /stream/* responses to
@@ -922,7 +919,7 @@ app.use((req, res, next) => {
             return `${currentBaseUrl}${url}`;
           }
           // Absolute URLs with legacy/static base or localhost/LAN IP
-          const match = url.match(/^(?:https?:\/\/[^\/]+)(\/(?:img|watch|api\/manifest|api\/dash|api\/mp4proxy|api\/fastmp4|api\/hlschunk|api\/hls|hls|logo|posters|donate)(?:[?\/].*|\.[A-Za-z0-9]+)?)$/);
+          const match = url.match(/^(?:https?:\/\/[^\/]+)(\/(?:img|watch|api\/manifest|api\/dash|api\/mp4proxy|api\/fastmp4|api\/hlschunk|api\/hls|hls|logo|posters|donate)(?:\.[A-Za-z0-9]+)?(?:[?\/].*)?)$/);
           if (match) {
             modified = true;
             return `${currentBaseUrl}${match[1]}`;
@@ -986,28 +983,8 @@ app.use((req, res, next) => {
   next();
 });
 
-/**
- * Decodes a config URL segment. Accepts URL-encoded JSON or base64url JSON.
- * Returns null when the segment is not a valid config.
- */
-function decodeConfigSegment(configStr) {
-  try {
-    let parsed;
-    if (configStr.startsWith('%7B') || configStr.startsWith('{')) {
-      parsed = JSON.parse(decodeURIComponent(configStr));
-    } else {
-      let base64 = configStr.replace(/-/g, '+').replace(/_/g, '/');
-      while (base64.length % 4) {
-        base64 += '=';
-      }
-      parsed = JSON.parse(Buffer.from(base64, 'base64').toString('utf-8'));
-    }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    return parsed;
-  } catch (e) {
-    return null;
-  }
-}
+// Config segment decoding (JSON / URL-encoded JSON / base64url), see src/configSegment.js.
+const { decodeConfigSegment } = require('./configSegment');
 app.get('/:config?/manifest.json', (req, res, next) => {
   const { manifest } = require('./manifest');
   let parsedConfig = {};
@@ -1072,13 +1049,12 @@ app.get('/:config?/manifest.json', (req, res, next) => {
   }
 
   // Hide custom AI games catalog if no dynamic parsers are configured and no custom matches exist
+  // (in-memory only: mounted providers first, then a flag scan of the cache;
+  // reading the parser storage file per match blocked the event loop).
   try {
-    const dpr = container.resolve('dynamicParserRegistry');
     const cs = container.resolve('cacheService');
-    const hasParsers = dpr && dpr.listParsers && dpr.listParsers().length > 0;
     const cachedMatches = (cs && cs.getMatchesReadOnly ? cs.getMatchesReadOnly() : (cs ? cs.getMatches() : [])) || [];
-    const hasCustomMatches = cachedMatches.some(m => isCustomAiMatch(m));
-    if (!hasParsers && !hasCustomMatches) {
+    if (!hasCustomAiContent(cachedMatches)) {
       newManifest.catalogs = newManifest.catalogs.filter(c => c.id !== 'nuvio_sports_custom_ai');
     }
   } catch (_) {}
@@ -1216,7 +1192,7 @@ if (workerOffset === 0) {
 }
 
 const BIND_HOST = process.env.HOST || process.env.IP || '0.0.0.0';
-app.listen(PORT, BIND_HOST, () => {
+const server = app.listen(PORT, BIND_HOST, () => {
   console.log('');
   console.log('╔══════════════════════════════════════════════════════╗');
   console.log('║          🔴 Nuvio Live Sports Plugin                 ║');
@@ -1229,6 +1205,9 @@ app.listen(PORT, BIND_HOST, () => {
   console.log('╚══════════════════════════════════════════════════════╝');
   console.log('');
 });
+// Without this, EADDRINUSE leaves a process that serves nothing while cron keeps
+// scraping, and PM2 / Docker never restart it.
+attachServerErrorHandler(server, { port: PORT, host: BIND_HOST });
 
 
 

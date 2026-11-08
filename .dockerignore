@@ -7,3 +7,10 @@ npm-debug.log
 dist/impit-node.win32-x64-msvc.node
 nuvio-proxy-2
 dist_wasm
+
+# Runtime caches written by the running process (matches_cache.json,
+# custom_parsers.json, ...). Never bake a local snapshot into the image; the
+# build recreates data/ from src/data seeds and docker-compose mounts a volume
+# on /app/data. Root-only patterns: src/data seeds are still copied.
+data
+caches

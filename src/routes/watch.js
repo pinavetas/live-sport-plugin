@@ -6,6 +6,7 @@
  */
 const express = require('express');
 const router = express.Router();
+const { extractYouTubeVideoId, youtubeWatchUrl } = require('../services/YouTubeRedirect');
 
 // ─── /watch — Embed Proxy Page ────────────────────────────────────────────────
 
@@ -19,15 +20,19 @@ const router = express.Router();
 
 router.get('/watch', (req, res) => {
   // If request contains a YouTube URL or video ID, directly redirect to YouTube (skip /watch iframe)
-  const candidateUrl = req.query.url || req.query.embed || req.query.v || req.query.ytId || '';
+  // The target is always rebuilt from a validated 11-char video id on a fixed
+  // YouTube host; anything else is rejected rather than redirected (open redirect).
+  const str = (v) => (typeof v === 'string' ? v : '');
+  const ytParam = str(req.query.ytId) || str(req.query.v);
+  const candidateUrl = str(req.query.url) || str(req.query.embed) || ytParam;
   if (/youtube\.com|youtu\.be/i.test(candidateUrl) || req.query.ytId || req.query.v) {
-    let ytTarget = candidateUrl;
-    const match = candidateUrl.match(/(?:embed\/|watch\?v=|\/v\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
-    const videoId = (match && match[1]) || req.query.ytId || req.query.v;
-    if (videoId) {
-      ytTarget = `https://www.youtube.com/watch?v=${videoId}`;
-    }
-    return res.redirect(ytTarget);
+    let decodedCandidate = candidateUrl;
+    try { if (candidateUrl.includes('%')) decodedCandidate = decodeURIComponent(candidateUrl); } catch (_) {}
+    const target = youtubeWatchUrl(
+      extractYouTubeVideoId(candidateUrl) || extractYouTubeVideoId(decodedCandidate) || extractYouTubeVideoId(ytParam)
+    );
+    if (target) return res.redirect(target);
+    return res.status(400).send('Invalid YouTube URL');
   }
 
   const mode     = req.query.mode;
@@ -217,7 +222,10 @@ router.get('/watch', (req, res) => {
     // If originalUrl contains youtube, redirect immediately
     const origMatch = req.originalUrl && req.originalUrl.match(/(?:youtube\.com|youtu\.be)[^\s&"']+/i);
     if (origMatch) {
-      return res.redirect('https://' + origMatch[0].replace(/^https?:\/\//, ''));
+      let fragment = origMatch[0];
+      try { fragment = decodeURIComponent(fragment); } catch (_) {}
+      const target = youtubeWatchUrl(extractYouTubeVideoId(fragment));
+      if (target) return res.redirect(target);
     }
     return res.status(400).send(`
       <!DOCTYPE html><html><body style="background:#111;color:#eee;font-family:sans-serif;text-align:center;padding-top:60px;">
@@ -244,7 +252,9 @@ router.get('/watch', (req, res) => {
 
   // Never embed YouTube in an iframe — redirect directly to YouTube
   if (/youtube\.com|youtu\.be/i.test(safeUrl)) {
-    return res.redirect(safeUrl);
+    const target = youtubeWatchUrl(extractYouTubeVideoId(safeUrl));
+    if (target) return res.redirect(target);
+    return res.status(400).send('Invalid YouTube URL');
   }
 
   const safeTitle = String(title)
@@ -521,5 +531,26 @@ router.get('/watch', (req, res) => {
 </html>`);
 });
 
+// ─── /api/sniff — Headless Browser Sniffer Endpoint ───────────────────────────
+router.get('/api/sniff', async (req, res) => {
+  const target = req.query.url;
+  const referer = req.query.referer || '';
+  if (!target) return res.status(400).json({ success: false, error: 'Missing ?url parameter' });
+  try {
+    const container = require('../container');
+    let sniffer = null;
+    try { sniffer = container.resolve('puppeteerSnifferService'); } catch (_) {}
+    if (!sniffer || !sniffer.isAvailable()) {
+      return res.status(503).json({ success: false, error: 'Headless sniffer not available' });
+    }
+    const result = await sniffer.sniff(target, { referer, timeoutMs: 15000 });
+    if (result && result.file) {
+      return res.json({ success: true, url: result.file, type: result.type, headers: result.headers });
+    }
+    return res.status(404).json({ success: false, error: 'Stream not found' });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 module.exports = router;
