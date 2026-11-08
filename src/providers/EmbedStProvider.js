@@ -8,6 +8,7 @@ class EmbedStProvider extends BaseProvider {
     this.name = 'EmbedSt';
     this.embedIndiaProvider = opts.embedIndiaProvider;
     this.streamedWasmPool = opts.streamedWasmPool || require('../services/StreamedWasmPool');
+    this.puppeteerSniffer = opts.puppeteerSnifferService || opts.puppeteerSniffer;
   }
 
   async getMatches() {
@@ -172,6 +173,23 @@ class EmbedStProvider extends BaseProvider {
         }
       } catch (err) {
         console.warn(`[${this.name}] Decryptor error for ${embedUrl}: ${err.message}`);
+      }
+    }
+
+    // ─── Tier 2: Headless Browser Sniffer Fallback ──────────────────────────
+    if (streams.length === 0 && this.puppeteerSniffer && typeof this.puppeteerSniffer.isAvailable === 'function' && this.puppeteerSniffer.isAvailable()) {
+      try {
+        const sniffed = await this.puppeteerSniffer.resolveStream(targetEmbedUrl || embedUrl, {
+          referer,
+          providerName: this.name,
+          title: matchTitle,
+          timeoutMs: 15000
+        });
+        if (sniffed) {
+          streams.push(sniffed);
+        }
+      } catch (err) {
+        console.warn(`[${this.name}] Sniffer fallback failed: ${err.message}`);
       }
     }
 
