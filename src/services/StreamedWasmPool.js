@@ -102,6 +102,15 @@ class StreamedWasmPool {
         }
       });
 
+      // Idle pool workers must not keep the process alive on their own: the
+      // module-level singleton spawns them on require, which otherwise blocks
+      // Jest workers and one-off scripts from exiting. In production the HTTP
+      // server keeps the loop alive, and an in-flight job is still held by its
+      // (ref'd) timeout timer until the worker answers. Must run after the
+      // listeners above are attached: adding a 'message' listener re-refs the
+      // worker's message port.
+      if (typeof worker.unref === 'function') worker.unref();
+
       this.workers.push(workerObj);
     } catch (err) {
       console.error(`[StreamedWasmPool] Failed to spawn worker #${index}:`, err.message);

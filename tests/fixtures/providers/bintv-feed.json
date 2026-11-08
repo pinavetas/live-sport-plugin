@@ -1,0 +1,193 @@
+{
+  "Live Events": [
+    {
+      "ID": "ev_a4cacf9a8b5e",
+      "Name": "Haltech World Cup Finals: Day Three",
+      "Poster": "https://tim-streams.com/img/vb72svkx.webp",
+      "Category": "Motorsport",
+      "Date": "2026-11-07 14:00 UTC",
+      "Status": "Live",
+      "Streams": [
+        {
+          "Name": "FDRM+",
+          "Iframe": "https://bintv-sources.pages.dev/?id=aHR0cHM6Ly9laGdlbWJ4ZS5jZmQvYmludHYvem83ODNmMWMtNjU1NQ"
+        }
+      ],
+      "Viewers": 2
+    },
+    {
+      "ID": "ev_c31a06054085",
+      "Name": "Joshua Buatsi vs Willy Hutchinson 2",
+      "Poster": "https://tim-streams.com/img/uron431793977550.jpg",
+      "Category": "Fighting",
+      "Date": "2026-11-07 16:00 UTC",
+      "Status": "Live",
+      "Streams": [
+        {
+          "Name": "DAZN",
+          "Iframe": "https://bintv-sources.pages.dev/?id=aHR0cHM6Ly9laGdlbWJ4ZS5jZmQvYmludHYvcWR1eG1vM3UtOTEyOQ"
+        }
+      ],
+      "Viewers": 42
+    },
+    {
+      "ID": "ev_1561ac7a68be",
+      "Name": "Real Madrid @ Valencia",
+      "Poster": "https://tim-streams.com/img/laliga-401882808.png",
+      "Category": "Soccer",
+      "Date": "2026-11-07 20:00 UTC",
+      "Status": "Live",
+      "Streams": [
+        {
+          "Name": "DAZN Laliga",
+          "Iframe": "https://bintv-sources.pages.dev/?id=aHR0cHM6Ly9laGdlbWJ4ZS5jZmQvYmludHYvZncyanJ1bTktNDQ4"
+        },
+        {
+          "Name": "Spanish",
+          "Iframe": "https://bintv-sources.pages.dev/?id=aHR0cHM6Ly9laGdlbWJ4ZS5jZmQvYmludHYvZncyanJ1bTktNTI3Mw"
+        },
+        {
+          "Name": "ESPN+",
+          "Iframe": "https://bintv-sources.pages.dev/?id=aHR0cHM6Ly9laGdlbWJ4ZS5jZmQvYmludHYvaHM4anhqeHgtODI2MA"
+        }
+      ],
+      "Viewers": 972
+    }
+  ],
+  "Upcoming Events": [
+    {
+      "ID": "ev_10d4aabf4dc8",
+      "Name": "Rutgers Scarlet Knights @ Wisconsin Badgers",
+      "Poster": "https://tim-streams.com/img/cfb-401858517.png",
+      "Category": "American Football",
+      "Date": "2026-11-07 21:15 UTC",
+      "Status": "Upcoming",
+      "Streams": [
+        {
+          "Name": "BTN",
+          "Iframe": "https://bintv-sources.pages.dev/?id=aHR0cHM6Ly9laGdlbWJ4ZS5jZmQvYmludHYvdGtkdHRhdjMtMTQ4MA"
+        }
+      ],
+      "Viewers": 0
+    }
+  ],
+  "24/7 Channels": [
+    {
+      "ID": "ch_4516a1fa2717",
+      "Name": "Cartoon Network",
+      "Poster": "https://1000logos.net/wp-content/uploads/2016/10/Cartoon-Network-logo.jpg",
+      "Category": null,
+      "Date": null,
+      "Status": "Live",
+      "Streams": [
+        {
+          "Name": "Cartoon Network",
+          "Iframe": "https://bintv-sources.pages.dev/?id=aHR0cHM6Ly9laGdlbWJ4ZS5jZmQvYmludHYvYjNzZmM5NG4tMjM5OQ"
+        }
+      ],
+      "Viewers": 0
+    },
+    {
+      "ID": "ch_5941ac89a238",
+      "Name": "DAZN 1 Germany",
+      "Poster": "https://image.discovery.indazn.com/ca/v2/ca/image?id=12dpnhddhmpm71228raanhyxs2_image-header_pDach_1723627450000&amp;amp;amp;amp;amp;amp;amp;amp;amp;amp;amp;amp;quality=70",
+      "Category": null,
+      "Date": null,
+      "Status": "Live",
+      "Streams": [
+        {
+          "Name": "DAZN 1 Germany",
+          "Iframe": "https://bintv-sources.pages.dev/?id=aHR0cHM6Ly9laGdlbWJ4ZS5jZmQvYmludHYvM2RrOHJ4dWktNjIxMg"
+        }
+      ],
+      "Viewers": 1
+    },
+    {
+      "ID": "ch_aaa7c0f78ebc",
+      "Name": "DAZN 1 Spain",
+      "Poster": "https://image.discovery.indazn.com/ca/v2/ca/image?id=hn9vkic8rbfi1ndrym8sw2qh7_image-header_pEs_1723035920000",
+      "Category": null,
+      "Date": null,
+      "Status": "Live",
+      "Streams": [
+        {
+          "Name": "DAZN 1 Spain",
+          "Iframe": "https://bintv-sources.pages.dev/?id=aHR0cHM6Ly9laGdlbWJ4ZS5jZmQvYmludHYvc3EyNmlueWYtMjY2MA"
+        }
+      ],
+      "Viewers": 0
+    },
+    {
+      "ID": "ch_e1949dc8115d",
+      "Name": "ESPN",
+      "Poster": "https://a1.espncdn.com/combiner/i?img=%2Fi%2Fespn%2Fespn_logos%2Fespn_red.png",
+      "Category": null,
+      "Date": null,
+      "Status": "Live",
+      "Streams": [
+        {
+          "Name": "ESPN",
+          "Iframe": "https://bintv-sources.pages.dev/?id=aHR0cHM6Ly9laGdlbWJ4ZS5jZmQvYmludHYvbzlibDhjYWktNzIyMw"
+        }
+      ],
+      "Viewers": 0
+    },
+    {
+      "ID": "ch_def2e89fc5b2",
+      "Name": "Fox Sports 501 (Cricket)",
+      "Poster": "https://i.ibb.co/Y4bTS1p7/image.webp",
+      "Category": null,
+      "Date": null,
+      "Status": "Live",
+      "Streams": [
+        {
+          "Name": "Fox Sports 501 (Cricket)",
+          "Iframe": "https://bintv-sources.pages.dev/?id=aHR0cHM6Ly9laGdlbWJ4ZS5jZmQvYmludHYvaW1pZm5lb2otMTQxNw"
+        }
+      ],
+      "Viewers": 0
+    },
+    {
+      "ID": "ch_720feac329b2",
+      "Name": "HBO",
+      "Poster": "https://static.hbo.com/2021-11/hbo-static-1920.jpg",
+      "Category": null,
+      "Date": null,
+      "Status": "Live",
+      "Streams": [
+        {
+          "Name": "HBO",
+          "Iframe": "https://bintv-sources.pages.dev/?id=aHR0cHM6Ly9laGdlbWJ4ZS5jZmQvYmludHYvb3QwM2pxcGItNDEyNg"
+        }
+      ],
+      "Viewers": 0
+    },
+    {
+      "ID": "ch_2e8bd51a1742",
+      "Name": "Sky Sports F1",
+      "Poster": "https://e0.365dm.com/21/03/1600x900/skysports-f1-2021-graphic_5299452.png",
+      "Category": null,
+      "Date": null,
+      "Status": "Live",
+      "Streams": [
+        {
+          "Name": "English",
+          "Iframe": "https://bintv-sources.pages.dev/?id=aHR0cHM6Ly9laGdlbWJ4ZS5jZmQvYmludHYvZjU5NmY5OHItNjk3Nw"
+        },
+        {
+          "Name": "Italian",
+          "Iframe": "https://bintv-sources.pages.dev/?id=aHR0cHM6Ly9laGdlbWJ4ZS5jZmQvYmludHYvdDVtcG4xOTItNjUwNA"
+        },
+        {
+          "Name": "German",
+          "Iframe": "https://bintv-sources.pages.dev/?id=aHR0cHM6Ly9laGdlbWJ4ZS5jZmQvYmludHYvNzhoeTY2bjYtODE5OA"
+        },
+        {
+          "Name": "4K HEVC",
+          "Iframe": "https://bintv-sources.pages.dev/?id=aHR0cHM6Ly9laGdlbWJ4ZS5jZmQvYmludHYvYzg5dnhydmMtNTA4Nw"
+        }
+      ],
+      "Viewers": 50
+    }
+  ]
+}

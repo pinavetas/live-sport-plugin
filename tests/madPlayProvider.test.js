@@ -2,6 +2,16 @@
 
 process.env.NODE_ENV = 'test';
 
+// impit is stubbed so no test here can open a real socket through safeFetch.
+const mockImpitFetch = jest.fn();
+jest.mock('impit', () => ({
+  Impit: class {
+    fetch(...args) {
+      return mockImpitFetch(...args);
+    }
+  },
+}));
+
 const crypto = require('crypto');
 const container = require('../src/container');
 const MatchEntity = require('../src/domain/MatchEntity');
@@ -218,11 +228,8 @@ describe('MadPlay / RBTV+ Provider & Resolver Suite', () => {
     });
 
     test('getMatches parses matches, indexes streams with O(1) hash map, and outputs MatchEntities', async () => {
-      // 1. discoverConfig fetch (landing page)
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        text: async () => '<html></html>'
-      });
+      // Sports are queried in parallel, so responses are routed by URL rather
+      // than by call order.
 
       // Handshake signature buffer
       const sigBuf = Buffer.from('sig_32_chars_12345678901234567890123456789012_ok');
@@ -258,20 +265,14 @@ describe('MadPlay / RBTV+ Provider & Resolver Suite', () => {
       ]);
       const liveProtoBuf = encodeLengthDelimited(10, field10Body);
 
-      // Set up mocks for sportType 1 (football)
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        arrayBuffer: async () => sigBuf
-      });
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        arrayBuffer: async () => liveProtoBuf
-      });
-
-      // Other sports return empty handshakes
-      mockFetch.mockResolvedValue({
-        ok: false,
-        status: 404
+      mockFetch.mockImplementation(async (url) => {
+        // 1. discoverConfig fetch (landing page)
+        if (url === DEFAULT_BASE_URL) return { ok: true, text: async () => '<html></html>' };
+        // 2. sportType 1 (football) handshake + live list
+        if (url.includes('/api/common/bs?code=100&sportType=1&')) return { ok: true, arrayBuffer: async () => sigBuf };
+        if (url.includes('/api/match/live?sportType=1&')) return { ok: true, arrayBuffer: async () => liveProtoBuf };
+        // Other sports return empty handshakes
+        return { ok: false, status: 404 };
       });
 
       const matches = await resolver.getMatches();
@@ -367,6 +368,128 @@ describe('MadPlay / RBTV+ Provider & Resolver Suite', () => {
         madplayUrl: 'https://custom-madplay.domain.com/'
       });
       expect(provider.getBaseUrl()).toBe('https://custom-madplay.domain.com/');
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // 5. Timeouts, per-user override isolation and parallel fan-out
+  // ──────────────────────────────────────────────────────────────────────────
+  describe('Timeouts, override isolation and parallelism', () => {
+    const sigBuf = Buffer.from('sig_32_chars_12345678901234567890123456789012_ok');
+
+    function detailProto(streamIds) {
+      const items = streamIds.map(id => encodeLengthDelimited(2, Buffer.concat([
+        encodeLengthDelimited(1, Buffer.from(String(id), 'utf8')),
+        encodeLengthDelimited(3, Buffer.from(`Channel ${id}`, 'utf8')),
+        encodeLengthDelimited(9, Buffer.from('2001', 'utf8'))
+      ])));
+      return encodeLengthDelimited(10, Buffer.concat(items));
+    }
+
+    function streamDetailProto(id) {
+      const enc = rot47('12345678' + `https://cdn.example/live/${id}/index.m3u8`);
+      const obj = Buffer.concat([
+        Buffer.from([0x08, 0xe7, 0x07]),
+        encodeLengthDelimited(4, Buffer.from(enc, 'utf8'))
+      ]);
+      return encodeLengthDelimited(10, encodeLengthDelimited(2, obj));
+    }
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    test('provider fetch honours timeoutMs: a hanging upstream is aborted', async () => {
+      // Neither transport ever answers (and no socket is opened): only the
+      // timeoutMs the resolver passes can end the request.
+      mockImpitFetch.mockImplementation(() => new Promise(() => {}));
+      jest.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise(() => {}));
+
+      const provider = new MadPlayProvider({});
+      const started = Date.now();
+      await expect(
+        provider.resolver.fetchFn('https://madplay-hang.example/api/common/bs', { timeoutMs: 150 })
+      ).rejects.toMatchObject({ code: 'ETIMEDOUT' });
+      expect(Date.now() - started).toBeLessThan(3000);
+    }, 10000);
+
+    test('madplayUrl override uses a per-call config and never mutates the shared resolver', async () => {
+      const fetchFn = jest.fn(async (url) => {
+        if (url === 'https://user-mirror.example/') {
+          return { ok: true, text: async () => 'CF_DA_API:"https://apis-user.example/",DIGIT_ENV:"userenv"' };
+        }
+        if (url.includes('/api/common/bs?code=102')) return { ok: true, arrayBuffer: async () => sigBuf };
+        if (url.includes('/api/match/detail')) return { ok: true, arrayBuffer: async () => detailProto([7]) };
+        if (url.includes('/api/stream/detail')) return { ok: true, headers: {}, arrayBuffer: async () => streamDetailProto(7) };
+        return { ok: false, status: 404 };
+      });
+      const resolver = new MadPlayResolver({ baseUrl: DEFAULT_BASE_URL, fetchFn });
+      const config = { madplayUrl: 'https://user-mirror.example/' };
+
+      const first = await resolver.resolveStream('1001_1', 'football', 'A vs B', {}, config, '');
+      await resolver.resolveStream('1001_1', 'football', 'A vs B', {}, config, '');
+
+      // Shared state used by every other user is untouched
+      expect(resolver.apiHost).toBe(DEFAULT_API_HOST);
+      expect(resolver.digitEnv).toBe('seth');
+      // The override's discovered host/env were used for this call
+      const urls = fetchFn.mock.calls.map(c => c[0]);
+      expect(urls.some(u => u.startsWith('https://apis-user.example/api/common/bs?code=102'))).toBe(true);
+      expect(urls.some(u => u.includes('/api/stream/detail') && u.includes('digit=userenv'))).toBe(true);
+      expect(urls.some(u => u.startsWith(DEFAULT_API_HOST))).toBe(false);
+      // The override page is fetched once and cached per URL (same TTL)
+      expect(urls.filter(u => u === 'https://user-mirror.example/')).toHaveLength(1);
+      expect(first[0].url).toContain('cdn.example/live/7/');
+    });
+
+    test('stream detail fetches run in parallel and keep upstream order', async () => {
+      const pending = [];
+      const fetchFn = jest.fn((url) => {
+        if (url.includes('/api/common/bs?code=102')) return Promise.resolve({ ok: true, arrayBuffer: async () => sigBuf });
+        if (url.includes('/api/match/detail')) return Promise.resolve({ ok: true, arrayBuffer: async () => detailProto([1, 2, 3]) });
+        if (url.includes('/api/stream/detail')) {
+          const id = new URL(url).searchParams.get('streamId');
+          return new Promise((resolve) => pending.push({ id, resolve }));
+        }
+        return Promise.resolve({ ok: false, status: 404 });
+      });
+      const resolver = new MadPlayResolver({ baseUrl: DEFAULT_BASE_URL, fetchFn });
+
+      const p = resolver.resolveStream('1001_1', 'football', 'A vs B', {}, {}, '');
+      for (let i = 0; i < 20 && pending.length < 3; i++) await new Promise(r => setImmediate(r));
+      // All three detail requests are in flight before any of them answered
+      expect(pending.map(x => x.id).sort()).toEqual(['1', '2', '3']);
+
+      // Answer out of order; stream 2 fails
+      const byId = Object.fromEntries(pending.map(x => [x.id, x.resolve]));
+      byId['3']({ ok: true, headers: {}, arrayBuffer: async () => streamDetailProto(3) });
+      byId['2']({ ok: false, status: 500 });
+      byId['1']({ ok: true, headers: {}, arrayBuffer: async () => streamDetailProto(1) });
+
+      const streams = await p;
+      expect(streams.map(s => s.title)).toEqual([
+        'Channel 1 [HD Direct]',
+        'Channel 3 [HD Direct]',
+        'A vs B (Web Player)'
+      ]);
+    });
+
+    test('getMatches queries all sports in parallel and tolerates one failing', async () => {
+      let inFlight = 0;
+      let maxInFlight = 0;
+      const fetchFn = jest.fn(async (url) => {
+        if (url === DEFAULT_BASE_URL) return { ok: true, text: async () => '' };
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise(r => setTimeout(r, 20));
+        inFlight--;
+        if (url.includes('sportType=2&')) throw new Error('basketball down');
+        return { ok: false, status: 404 };
+      });
+      const resolver = new MadPlayResolver({ baseUrl: 'https://other-host.example/', fetchFn });
+
+      await expect(resolver.getMatches()).resolves.toEqual([]);
+      expect(maxInFlight).toBe(5);
     });
   });
 });
