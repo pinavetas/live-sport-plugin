@@ -1,0 +1,163 @@
+{
+  "etag": "2e369eda82fa3e2062048c300575ae52",
+  "generated": 1794052840,
+  "day": "2026-11-07",
+  "live_games": [
+    {
+      "id": 13,
+      "espn_id": "401909938",
+      "espn_state": "pre",
+      "espn_completed": false,
+      "espn_ended_ms": 0,
+      "home": "Indiana Pacers",
+      "away": "Denver Nuggets",
+      "home_logo": "/uploads/46a7fd8296af25092e51.png",
+      "away_logo": "/uploads/9e555cba90fcf5d48bdc.png",
+      "status": "",
+      "kickoff_ms": 1794088800000,
+      "live_start_ms": 1794082800000,
+      "ended_ms": 1794105600000,
+      "links": [
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/smartplayer.php?hd=indiana-pacers=ch01"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/smartplayer.php?hd=indiana-pacers=ch02"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/smartplayer.php?hd=indiana-pacers=ch03"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/smartplayer.php?hd=indiana-pacers=ch04"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/smartplayer.php?hd=indiana-pacers=ch05"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/smartplayer.php?hd=indiana-pacers=ch06"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/smartplayer.php?hd=indiana-pacers=ch07"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "espn_id": "401909939",
+      "espn_state": "pre",
+      "espn_completed": false,
+      "espn_ended_ms": 0,
+      "home": "Atlanta Hawks",
+      "away": "Brooklyn Nets",
+      "home_logo": "/uploads/67ab7ae074b8579f2c6a.png",
+      "away_logo": "/uploads/935632b0e4fa3533b1ac.png",
+      "status": "",
+      "kickoff_ms": 1794097800000,
+      "live_start_ms": 1794091800000,
+      "ended_ms": 1794114600000,
+      "links": [
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/smartplayer.php?hd=atlanta-hawks=ch01"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/smartplayer.php?hd=atlanta-hawks=ch02"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/smartplayer.php?hd=atlanta-hawks=ch03"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/smartplayer.php?hd=atlanta-hawks=ch04"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/smartplayer.php?hd=atlanta-hawks=ch05"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/smartplayer.php?hd=atlanta-hawks=ch06"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/smartplayer.php?hd=atlanta-hawks=ch07"
+        }
+      ]
+    }
+  ],
+  "channels": [
+    {
+      "id": 2,
+      "name": "ESPN PLUS",
+      "logo": "/uploads/76cc91929185a0c5b965.webp",
+      "slug": "espn-plus-live",
+      "links": [
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/live/player.php?hd=espn=ch01"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/live/player.php?hd=espn=ch02"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/live/player.php?hd=espn=ch03"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "NBA TV",
+      "logo": "/uploads/c2659a0d79935fc8be86.svg",
+      "slug": "nba-tv-live-streaming",
+      "links": [
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/live/player.php?hd=nbatv=ch01"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/live/player.php?hd=nbatv=ch02"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/live/player.php?hd=nbatv=ch03"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/live/player.php?hd=nbatv=ch04"
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "name": "NHL Network",
+      "logo": "/uploads/84f89efa1076324b3db1.webp",
+      "slug": "nhl-network-live-streaming",
+      "links": [
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/live/player.php?hd=nhlnetwork=ch01"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/live/player.php?hd=nhlnetwork=ch02"
+        },
+        {
+          "Name": "",
+          "URL": "https://piratecat.store/live/player.php?hd=nhlnetwork=ch02"
+        }
+      ]
+    }
+  ]
+}
