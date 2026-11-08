@@ -3,6 +3,17 @@ const zlib = require('zlib');
 
 jest.mock('undici', () => ({ request: jest.fn() }));
 
+// ImageService runs every fetch target through the SSRF guard, which resolves
+// the hostname. img.test does not resolve, so let the guard pass here and keep
+// this suite offline; the guard itself is covered by ssrfGuardEntryPoints.test.js.
+jest.mock('../src/services/OutboundUrlGuard', () => {
+  const actual = jest.requireActual('../src/services/OutboundUrlGuard');
+  return {
+    ...actual,
+    checkOutboundUrl: jest.fn(async (url) => ({ ok: true, url, hostname: new URL(url).hostname, addresses: [] })),
+  };
+});
+
 // ── Minimal PNG builder: lets a test declare any dimensions cheaply ──────────
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);

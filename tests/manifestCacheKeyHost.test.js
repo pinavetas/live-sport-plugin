@@ -10,6 +10,17 @@ jest.mock('../src/manifestProxy', () => {
   return { ...actual, fetchUpstreamManifest: jest.fn() };
 });
 
+// The manifest proxy now vets every fetch target with the SSRF guard, whose DNS
+// step cannot resolve the fake upstream host. Let the guard pass here; it is
+// covered by ssrfGuardEntryPoints.test.js.
+jest.mock('../src/services/OutboundUrlGuard', () => {
+  const actual = jest.requireActual('../src/services/OutboundUrlGuard');
+  return {
+    ...actual,
+    checkOutboundUrl: jest.fn(async (url) => ({ ok: true, url, hostname: new URL(url).hostname, addresses: [] })),
+  };
+});
+
 const http = require('http');
 const express = require('express');
 const manifestProxy = require('../src/manifestProxy');
