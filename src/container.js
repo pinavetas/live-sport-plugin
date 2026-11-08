@@ -41,6 +41,7 @@ const BroadcasterMatchService = require('./services/BroadcasterMatchService');
 const DashToHlsService = require('./services/DashToHlsService');
 const adaptiveDnsResolver = require('./services/AdaptiveDnsResolver');
 const dynamicParserRegistry = require('./services/DynamicParserRegistry');
+const PuppeteerSnifferService = require('./services/PuppeteerSnifferService');
 
 const container = createContainer({
   injectionMode: InjectionMode.PROXY
@@ -63,6 +64,7 @@ container.register({
   broadcasterMatchService: asValue(new BroadcasterMatchService()),
   adaptiveDnsResolver: asValue(adaptiveDnsResolver),
   dynamicParserRegistry: asValue(dynamicParserRegistry),
+  puppeteerSnifferService: asClass(PuppeteerSnifferService).singleton(),
   // Self-healing iframe-domain knowledge base (DaddyLive family). Singleton so
   // runtime discoveries accumulate for the process lifetime.
   iframeDomainRegistry: asValue(new IframeDomainRegistry())

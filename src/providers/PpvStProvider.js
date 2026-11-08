@@ -12,6 +12,7 @@ class PpvStProvider extends BaseProvider {
   constructor(opts = {}) {
     super(opts);
     this.name = 'PpvSt';
+    this.puppeteerSniffer = (opts && (opts.puppeteerSnifferService || opts.puppeteerSniffer)) || null;
   }
 
   async getMatches() {
@@ -162,6 +163,22 @@ class PpvStProvider extends BaseProvider {
       }
     } catch(e) {
       console.warn(`[${this.name}] WASM extraction failed: ${e.message}`);
+    }
+
+    if (streams.length === 0 && this.puppeteerSniffer && typeof this.puppeteerSniffer.isAvailable === 'function' && this.puppeteerSniffer.isAvailable()) {
+      try {
+        const sniffed = await this.puppeteerSniffer.resolveStream(embedUrl, {
+          referer,
+          providerName: this.name,
+          title: matchTitle,
+          timeoutMs: 15000
+        });
+        if (sniffed) {
+          streams.push(sniffed);
+        }
+      } catch (err) {
+        console.warn(`[${this.name}] Sniffer fallback failed: ${err.message}`);
+      }
     }
     
     if (streams.length === 0) {
