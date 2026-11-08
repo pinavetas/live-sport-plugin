@@ -251,7 +251,9 @@ async function readLimitedBody(body, maxBytes) {
  * safeFetch - fetches a URL using impit when available, falls back to undici.
  *
  * @param {string} url
- * @param {object} opts   - { method, headers, body, signal, timeoutMs, attempts, proxyUrl, maxBodyBytes }
+ * @param {object} opts   - { method, headers, body, signal, timeoutMs, attempts, proxyUrl, maxBodyBytes, outboundGuard }
+ *   outboundGuard: true (or a checker fn) for caller-supplied URLs: every URL in
+ *   the redirect chain is vetted by the SSRF guard before it is requested.
  *   attempts: how many times to try the impit path before falling back to
  *   undici (default 3). timeoutMs is one total budget across headers, body,
  *   retries, backoff and fallback. External retry policies still add calls;
@@ -311,12 +313,71 @@ async function safeFetch(url, opts = {}) {
   )), timeoutMs);
   try {
     return await Promise.race([
-      fetchWithinDeadline(url, { ...opts, signal: controller.signal }, deadlineAt),
+      opts.outboundGuard
+        ? guardedFetch(url, { ...opts, signal: controller.signal }, deadlineAt)
+        : fetchWithinDeadline(url, { ...opts, signal: controller.signal }, deadlineAt),
       cancelled,
     ]);
   } finally {
     clearTimeout(timer);
     callerSignal?.removeEventListener('abort', onCallerAbort);
+  }
+}
+
+/** Reads one response header from either a WHATWG Headers or undici's plain object. */
+function readHeader(headers, name) {
+  if (!headers) return null;
+  if (typeof headers.get === 'function') return headers.get(name);
+  const v = headers[name] !== undefined ? headers[name] : headers[name.toLowerCase()];
+  return Array.isArray(v) ? v[0] : (v == null ? null : String(v));
+}
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * safeFetch with opts.outboundGuard: vets the URL with the SSRF guard
+ * (OutboundUrlGuard.checkOutboundUrl, or a custom checker passed as
+ * outboundGuard) and follows redirects manually, vetting every Location before
+ * it is requested. Without this, impit and the undici path follow redirects
+ * internally, so a public URL answering 302 -> http://192.168.1.1/ or the cloud
+ * metadata address was fetched and its body returned to the caller.
+ *
+ * Throws an Error with code 'EOUTBOUND_BLOCKED' (and reason/detail) when a hop
+ * is refused. Same total deadline as any safeFetch call.
+ */
+async function guardedFetch(url, opts, deadlineAt) {
+  const check = typeof opts.outboundGuard === 'function'
+    ? opts.outboundGuard
+    : require('./services/OutboundUrlGuard').checkOutboundUrl;
+  let currentUrl = url;
+  let method = opts.method || 'GET';
+  let body = opts.body;
+  let headers = opts.headers || {};
+  for (let hop = 0; ; hop++) {
+    if (opts.signal && opts.signal.aborted) throw opts.signal.reason;
+    const verdict = await check(currentUrl);
+    if (!verdict || !verdict.ok) {
+      const reason = (verdict && verdict.reason) || 'blocked';
+      const detail = (verdict && verdict.detail) || currentUrl;
+      throw Object.assign(new Error(`safeFetch blocked outbound URL (${reason}): ${detail}`), {
+        code: 'EOUTBOUND_BLOCKED', reason, detail,
+      });
+    }
+    const res = await fetchWithinDeadline(currentUrl, { ...opts, method, body, headers, redirect: 'manual' }, deadlineAt);
+    if (!REDIRECT_STATUSES.has(res.status) || hop >= MAX_REDIRECT_HOPS) return res;
+    const location = readHeader(res.headers, 'location');
+    if (!location) return res;
+    let nextUrl;
+    try { nextUrl = new URL(location, currentUrl); } catch (_) { return res; }
+    if (method !== 'HEAD' && res.status !== 307 && res.status !== 308) {
+      method = 'GET';
+      body = undefined;
+      if (headers && headers.constructor === Object && 'content-length' in headers) {
+        headers = Object.assign({}, headers);
+        delete headers['content-length'];
+      }
+    }
+    currentUrl = nextUrl.toString();
   }
 }
 
@@ -346,6 +407,9 @@ async function fetchWithinDeadline(url, opts, deadlineAt) {
   const impit = proxyUrl ? getProxyImpit(proxyUrl)
     : (isDamitv ? (getVanillaImpit() || getImpit()) : (impitTlsBlocked(url) ? null : getImpit()));
   const maxAttempts = Math.max(1, attempts);
+  // redirect: 'manual' returns 3xx responses as-is on both engines so the
+  // caller (guardedFetch) can vet every hop before following it.
+  const manualRedirect = opts.redirect === 'manual';
 
   if (isDamitv) {
     const headerKeys = Object.keys(headers || {});
@@ -391,6 +455,7 @@ async function fetchWithinDeadline(url, opts, deadlineAt) {
         const res = await impit.fetch(url, {
           method, headers, body, signal,
           timeout: Math.max(1, Math.ceil(deadlineAt - performance.now())),
+          ...(manualRedirect ? { redirect: 'manual' } : {}),
         });
         const { buffer: buf, truncated: bodyTruncated } = Number.isSafeInteger(opts.maxBodyBytes) && opts.maxBodyBytes > 0
           ? await readLimitedBody(res.body, opts.maxBodyBytes)
@@ -520,7 +585,7 @@ async function fetchWithinDeadline(url, opts, deadlineAt) {
 
     const isRedirect = res.statusCode === 301 || res.statusCode === 302
       || res.statusCode === 303 || res.statusCode === 307 || res.statusCode === 308;
-    if (!isRedirect || hop >= MAX_REDIRECT_HOPS) break;
+    if (!isRedirect || hop >= MAX_REDIRECT_HOPS || manualRedirect) break;
 
     const rawLocation = Array.isArray(res.headers.location) ? res.headers.location[0] : res.headers.location;
     // Drain the redirect body: an unconsumed one holds the keep-alive socket.

@@ -33,6 +33,11 @@ const path = require('path');
 
 const DATA_FILE = path.join(__dirname, '..', 'data', 'iframe_domains.json');
 
+// Upper bound on families learned at runtime. learn() is fed hosts scraped from
+// volatile player pages, so without a cap the registry grows for the life of
+// the process. File-seeded families are never evicted.
+const MAX_RUNTIME_FAMILIES = 500;
+
 // Domains that are platform/CDN noise rather than stream embeds. Learned but
 // never persisted, and not offered as candidates.
 const IGNORED_SLUGS = new Set([
@@ -207,6 +212,14 @@ class IframeDomainRegistry {
       first_seen: new Date().toISOString().slice(0, 10),
       source: 'runtime'
     }, meta.role ? { role: meta.role } : {}));
+    // FIFO eviction of the oldest runtime-learned family once over the cap.
+    // _learnedStrategies holds exactly the runtime slugs, in insertion order.
+    while (this._learnedStrategies.size > MAX_RUNTIME_FAMILIES) {
+      const oldest = this._learnedStrategies.keys().next().value;
+      this._learnedStrategies.delete(oldest);
+      const rec = this.families.get(oldest);
+      if (rec && rec.source === 'runtime') this.families.delete(oldest);
+    }
     return true;
   }
 
@@ -254,3 +267,4 @@ module.exports = IframeDomainRegistry;
 module.exports.toSlug = toSlug;
 module.exports.normalizeHost = normalizeHost;
 module.exports.IGNORED_SLUGS = IGNORED_SLUGS;
+module.exports.MAX_RUNTIME_FAMILIES = MAX_RUNTIME_FAMILIES;

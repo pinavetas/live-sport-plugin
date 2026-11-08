@@ -12,6 +12,25 @@ const cheerio = require('cheerio');
 const { safeFetch } = require('../impitClient');
 const SpaHydrator = require('./SpaHydrator');
 
+// Default Gemini cascade: only the active 3.x generation (1.5, 2.0, 2.5 were
+// sunset by Google). Override with AI_GEMINI_MODELS (comma-separated).
+const DEFAULT_GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.5-flash'];
+const DEFAULT_TOTAL_TIMEOUT_MS = 60000;
+const GEMINI_ATTEMPT_TIMEOUT_MS = 20000;
+const OPENAI_ATTEMPT_TIMEOUT_MS = 25000;
+const GEMINI_503_RETRY_DELAY_MS = 1200;
+
+function parseModelList(raw) {
+  if (typeof raw !== 'string') return null;
+  const list = raw.split(',').map(m => m.trim()).filter(Boolean);
+  return list.length ? list : null;
+}
+
+function positiveInt(raw) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
 class AiParserGeneratorService {
   constructor(opts = {}) {
     this.defaultBaseUrl = opts.baseUrl || process.env.AI_BASE_URL || process.env.OPENCODE_API_URL || 'https://api.openai.com/v1';
@@ -19,6 +38,35 @@ class AiParserGeneratorService {
     this.defaultModel = opts.model || process.env.AI_MODEL || 'deepseek-chat';
     this.maxHtmlTokens = opts.maxHtmlTokens || 12000; // ~3000-4000 tokens
     this.fetchFn = opts.fetchFn || safeFetch;
+    // Overall wall-clock budget for ONE queryLlm call (all models, retries and the
+    // native fallback together). Every attempt's timeout is clamped to what is left.
+    this.totalTimeoutMs = positiveInt(opts.totalTimeoutMs)
+      || positiveInt(process.env.AI_TOTAL_TIMEOUT_MS)
+      || DEFAULT_TOTAL_TIMEOUT_MS;
+    this.geminiModels = (Array.isArray(opts.geminiModels) && opts.geminiModels.length ? opts.geminiModels : null)
+      || parseModelList(process.env.AI_GEMINI_MODELS)
+      || DEFAULT_GEMINI_MODELS;
+  }
+
+  /**
+   * Timeout for the next LLM attempt: the per-attempt cap, clamped to the time left
+   * in the queryLlm budget. Throws once the budget is spent so no further attempt
+   * (or cascade step) starts.
+   */
+  _attemptTimeout(deadline, perAttemptMs, lastError) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      const suffix = lastError && lastError.message ? `; last error: ${lastError.message}` : '';
+      const err = new Error(`LLM request budget of ${this.totalTimeoutMs}ms exhausted (AI_TOTAL_TIMEOUT_MS)${suffix}`);
+      err.budgetExhausted = true;
+      throw err;
+    }
+    return Math.min(perAttemptMs, remaining);
+  }
+
+  async _sleepWithinBudget(deadline, ms) {
+    const wait = Math.min(ms, Math.max(0, deadline - Date.now()));
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
   }
 
   /**
@@ -63,6 +111,7 @@ class AiParserGeneratorService {
    * - OpenAI-compatible providers (OpenCode, Freebuff, OpenAI, Ollama, DeepSeek, vLLM).
    */
   async queryLlm({ prompt, systemPrompt, config = {} }) {
+    const deadline = Date.now() + this.totalTimeoutMs;
     const apiKey = config.apiKey !== undefined ? config.apiKey : this.defaultApiKey;
     let rawBaseUrl = config.baseUrl || this.defaultBaseUrl;
 
@@ -70,7 +119,7 @@ class AiParserGeneratorService {
                      (rawBaseUrl && rawBaseUrl.includes('generativelanguage.googleapis.com'));
 
     if (isGemini) {
-      return this._queryGemini({ prompt, systemPrompt, apiKey, requestedModel: config.model });
+      return this._queryGemini({ prompt, systemPrompt, apiKey, requestedModel: config.model, deadline });
     }
 
     return this._queryOpenAiCompatible({ 
@@ -78,20 +127,15 @@ class AiParserGeneratorService {
       systemPrompt, 
       apiKey, 
       rawBaseUrl, 
-      model: config.model || this.defaultModel 
+      model: config.model || this.defaultModel,
+      deadline
     });
   }
 
   /**
    * Resilient Google Gemini handler with automatic model cascading and native API fallback.
    */
-  async _queryGemini({ prompt, systemPrompt, apiKey, requestedModel }) {
-    // Models to attempt: only active 3.x generation (1.5, 2.0, 2.5 were sunset by Google)
-    const defaultGeminiCandidates = [
-      'gemini-3.8-flash',
-      'gemini-3.5-flash-lite',
-      'gemini-3.5-flash'
-    ];
+  async _queryGemini({ prompt, systemPrompt, apiKey, requestedModel, deadline = Date.now() + this.totalTimeoutMs }) {
     const candidates = [];
 
     let normalizedRequested = requestedModel ? String(requestedModel).trim().toLowerCase() : '';
@@ -99,13 +143,13 @@ class AiParserGeneratorService {
       normalizedRequested = 'gemini-3.8-flash';
     }
 
-    if (normalizedRequested && 
-        normalizedRequested !== 'deepseek-chat' && 
-        !normalizedRequested.startsWith('gemini-1.') &&
-        !normalizedRequested.startsWith('gemini-2.')) {
+    // An explicitly requested model is always tried first, even an older
+    // generation: the caller asked for it, so never drop it silently. Only
+    // 'deepseek-chat' (the generic non-Gemini default) is ignored here.
+    if (normalizedRequested && normalizedRequested !== 'deepseek-chat') {
       candidates.push(normalizedRequested);
     }
-    for (const c of defaultGeminiCandidates) {
+    for (const c of this.geminiModels) {
       if (!candidates.includes(c)) candidates.push(c);
     }
 
@@ -120,6 +164,7 @@ class AiParserGeneratorService {
 
       // Try up to 2 attempts per model if 503 High Demand occurs
       for (let attempt = 1; attempt <= 2; attempt++) {
+        const timeoutMs = this._attemptTimeout(deadline, GEMINI_ATTEMPT_TIMEOUT_MS, primaryError || lastError);
         try {
           const payload = {
             model: modelCandidate,
@@ -139,7 +184,7 @@ class AiParserGeneratorService {
               'User-Agent': 'Nuvio-AI-Parser-Studio/1.0'
             },
             body: JSON.stringify(payload),
-            timeoutMs: 20000,
+            timeoutMs,
             attempts: 1
           });
 
@@ -155,8 +200,8 @@ class AiParserGeneratorService {
 
           // If 503 high demand on first attempt, wait 1.2s before retrying or cascading
           if (res.status === 503 && attempt === 1) {
-            console.warn(`[AiParserGenerator] Gemini model '${modelCandidate}' is experiencing high demand (503). Retrying in 1200ms...`);
-            await new Promise(r => setTimeout(r, 1200));
+            console.warn(`[AiParserGenerator] Gemini model '${modelCandidate}' is experiencing high demand (503). Retrying in ${GEMINI_503_RETRY_DELAY_MS}ms...`);
+            await this._sleepWithinBudget(deadline, GEMINI_503_RETRY_DELAY_MS);
             continue;
           }
 
@@ -172,8 +217,8 @@ class AiParserGeneratorService {
           if (isPrimary && !primaryError) primaryError = err;
 
           if (err.message && err.message.includes('503') && attempt === 1) {
-            console.warn(`[AiParserGenerator] Gemini model '${modelCandidate}' 503 retry in 1200ms...`);
-            await new Promise(r => setTimeout(r, 1200));
+            console.warn(`[AiParserGenerator] Gemini model '${modelCandidate}' 503 retry in ${GEMINI_503_RETRY_DELAY_MS}ms...`);
+            await this._sleepWithinBudget(deadline, GEMINI_503_RETRY_DELAY_MS);
             continue;
           }
 
@@ -191,9 +236,11 @@ class AiParserGeneratorService {
     for (let i = 0; i < candidates.length; i++) {
       const modelCandidate = candidates[i];
       const isPrimary = (i === 0);
+      const timeoutMs = this._attemptTimeout(deadline, GEMINI_ATTEMPT_TIMEOUT_MS, primaryError || lastError);
 
       try {
-        const nativeEndpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelCandidate}:generateContent?key=${apiKey}`;
+        // Key goes in a header, never in the URL (URLs end up in logs and error messages).
+        const nativeEndpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelCandidate)}:generateContent`;
         const nativePayload = {
           contents: [
             {
@@ -212,10 +259,11 @@ class AiParserGeneratorService {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            'x-goog-api-key': apiKey,
             'User-Agent': 'Nuvio-AI-Parser-Studio/1.0'
           },
           body: JSON.stringify(nativePayload),
-          timeoutMs: 20000,
+          timeoutMs,
           attempts: 1
         });
 
@@ -313,7 +361,7 @@ class AiParserGeneratorService {
   /**
    * Standard OpenAI-compatible /chat/completions query.
    */
-  async _queryOpenAiCompatible({ prompt, systemPrompt, apiKey, rawBaseUrl, model }) {
+  async _queryOpenAiCompatible({ prompt, systemPrompt, apiKey, rawBaseUrl, model, deadline = Date.now() + this.totalTimeoutMs }) {
     const cleanBaseUrl = (rawBaseUrl || this.defaultBaseUrl).replace(/\/+$/, '');
     const endpoint = cleanBaseUrl.endsWith('/chat/completions') 
       ? cleanBaseUrl 
@@ -341,7 +389,7 @@ class AiParserGeneratorService {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
-      timeoutMs: 25000,
+      timeoutMs: this._attemptTimeout(deadline, OPENAI_ATTEMPT_TIMEOUT_MS),
       attempts: 1
     });
 
@@ -460,7 +508,8 @@ class AiParserGeneratorService {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
       },
       timeoutMs: 15000,
-      attempts: 2
+      attempts: 2,
+      outboundGuard: true
     });
 
     if (!pageRes.ok) {

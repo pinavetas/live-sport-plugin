@@ -34,6 +34,7 @@ const SOURCE_PRIORITY = {
   damitv: 2,
   ak47live: 2,
   madplay: 2,
+  tdtchannels: 2,
   golf: 2,
   delta: 2,
   echo: 2,
@@ -52,6 +53,9 @@ const SOURCE_PRIORITY = {
   embedindia: 3,
   embedst: 3,
   cdnlive: 3,
+  bintv: 3,
+  angulismo: 3,
+  nbamonster: 3,
   strumyk: 3.5,
   streamsports99: 4,
   timstreams: 9,
@@ -61,8 +65,8 @@ const SOURCE_PRIORITY = {
 const VERIFY_BODY_MAX_BYTES = 64 * 1024;
 
 const KNOWN_REPLAY_SOURCES = ['replayzone', 'livetv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive'];
-const KNOWN_LIVE_SOURCES = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'damitv', 'sktech', 'vavoo', 'ak47live', 'leaf', 'madplay', 'vipleague', 'strumyk'];
-const KNOWN_FALLBACKS = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'replayzone', 'livetv', 'damitv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive', 'sktech', 'vavoo', 'ak47live', 'leaf', 'madplay', 'vipleague', 'strumyk'];
+const KNOWN_LIVE_SOURCES = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'damitv', 'sktech', 'vavoo', 'ak47live', 'leaf', 'madplay', 'bintv', 'angulismo', 'tdtchannels', 'nbamonster', 'vipleague', 'strumyk'];
+const KNOWN_FALLBACKS = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'replayzone', 'livetv', 'damitv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive', 'sktech', 'vavoo', 'ak47live', 'leaf', 'madplay', 'bintv', 'angulismo', 'tdtchannels', 'nbamonster', 'vipleague', 'strumyk'];
 
 // Labeling tables hoisted to module scope: they were allocated per request
 // (handleStream) and per formatChannelStreamTitle call.
@@ -92,6 +96,10 @@ const NICE_NAMES = {
   'hockeyreplays': 'HockeyReplays',
   'mlblive': 'MLBLive',
   madplay: 'MadPlay',
+  bintv: 'BINTV',
+  angulismo: 'AngulismoTV',
+  tdtchannels: 'TDTChannels',
+  nbamonster: 'NBAMonster',
   admin: 'Streamed.pk',
   echo: 'Streamed.pk',
   golf: 'Streamed.pk',
@@ -123,6 +131,10 @@ const CHANNEL_TITLE_NICE_NAMES = {
   ak47live: 'AK47Live',
   leaf: 'Leaf',
   madplay: 'MadPlay',
+  bintv: 'BINTV',
+  angulismo: 'AngulismoTV',
+  tdtchannels: 'TDTChannels',
+  nbamonster: 'NBAMonster',
   vipleague: 'VIPLeague',
   strumyk: 'Strumyk'
 };
@@ -155,44 +167,59 @@ function selectSources(matchSources, config, match = null) {
     return enabledList.includes(srcName);
   };
 
+  // A source-list setting restricts only when it is an explicit list or
+  // 'none'. 'all' is the manifest default (src/manifest.js) that Stremio's
+  // native config form sends back verbatim, so it means "no restriction",
+  // exactly like an absent key.
+  const sourceSetting = (value) => {
+    if (typeof value !== 'string') return null;
+    const v = value.trim();
+    if (v.toLowerCase() === 'all') return null;
+    return v.toLowerCase() === 'none' ? 'none' : v;
+  };
+  const toList = (setting) => setting.split(',').map(s => s.trim());
+
+  const liveSetting = config ? sourceSetting(config.liveSources) : null;
+  const replaySetting = config ? sourceSetting(config.replaySources) : null;
+  const legacySetting = config ? sourceSetting(config.sources) : null;
+
   // Case 1: Granular Live and/or Replay sources configuration
-  const hasLiveConfig = config && typeof config.liveSources === 'string';
-  const hasReplayConfig = config && typeof config.replaySources === 'string';
+  const hasLiveConfig = liveSetting !== null;
+  const hasReplayConfig = replaySetting !== null;
 
   if (hasLiveConfig || hasReplayConfig) {
-    const liveAllowed = hasLiveConfig && config.liveSources !== 'none'
-      ? config.liveSources.split(',').map(s => s.trim())
-      : (hasLiveConfig && config.liveSources === 'none' ? [] : null);
-
-    const replayAllowed = hasReplayConfig && config.replaySources !== 'none'
-      ? config.replaySources.split(',').map(s => s.trim())
-      : (hasReplayConfig && config.replaySources === 'none' ? [] : null);
+    const liveAllowed = hasLiveConfig && liveSetting !== 'none' ? toList(liveSetting) : [];
+    const replayAllowed = hasReplayConfig && replaySetting !== 'none' ? toList(replaySetting) : [];
 
     return sortedSources.filter(src => {
       if (src.source.startsWith('yaml_')) return true;
       const isReplay = isReplaySource(src.source);
       if (isReplay) {
         if (!hasReplayConfig) return KNOWN_FALLBACKS.includes(src.source);
-        if (config.replaySources === 'none') return false;
+        if (replaySetting === 'none') return false;
+        // Custom-AI sources are not in the configure UI's checkbox list, so a
+        // narrowed list can never name them; only 'none' turns them off.
+        if (isDynamicCustomSource(src.source)) return true;
         return checkAllowed(src.source, replayAllowed);
       } else {
         if (!hasLiveConfig) return KNOWN_FALLBACKS.includes(src.source);
-        if (config.liveSources === 'none') return false;
+        if (liveSetting === 'none') return false;
         return checkAllowed(src.source, liveAllowed);
       }
     });
   }
 
   // Case 2: Legacy combined sources configuration (config.sources)
-  if (config && typeof config.sources === 'string') {
-    if (config.sources === 'none') {
+  if (legacySetting !== null) {
+    if (legacySetting === 'none') {
       return sortedSources.filter(src => src.source.startsWith('yaml_'));
     }
-    const enabled = config.sources.split(',').map(s => s.trim());
+    const enabled = toList(legacySetting);
     return sortedSources.filter(src => {
       if (src.source.startsWith('yaml_')) return true;
       const isFallback = KNOWN_FALLBACKS.includes(src.source);
       if (!isFallback) return false;
+      if (isDynamicCustomSource(src.source)) return true;
       return checkAllowed(src.source, enabled);
     });
   }
@@ -283,6 +310,18 @@ async function dispatchToProvider(sourceName, src, match, config = {}) {
     resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
   } else if (sourceName === 'strumyk') {
     const provider = container.resolve('strumykProvider');
+    resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
+  } else if (sourceName === 'bintv') {
+    const provider = container.resolve('bintvProvider');
+    resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
+  } else if (sourceName === 'angulismo') {
+    const provider = container.resolve('angulismoProvider');
+    resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
+  } else if (sourceName === 'tdtchannels') {
+    const provider = container.resolve('tdtChannelsProvider');
+    resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
+  } else if (sourceName === 'nbamonster') {
+    const provider = container.resolve('nbaMonsterProvider');
     resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
   } else if (sourceName.startsWith('yaml_')) {
     const yamlProviders = container.resolve('yamlProviders');

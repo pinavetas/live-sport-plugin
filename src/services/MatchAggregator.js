@@ -458,8 +458,8 @@ const sourceIdentityKey = (s) => [
 ].join('\u0000');
 
 class MatchAggregator {
-  constructor({ timStreamsProvider, watchFootyProvider, cdnLiveProvider, streamSports99Provider, streamedPkProvider, cacheService, yamlProviders, replayzoneProvider, daddyLiveProvider, teamLogoService, liveTvProvider, damiTvProvider, ppvStProvider, soccerFullProvider, basketballVideoProvider, nflVideoProvider, skTechProvider, fullRacesProvider, hockeyReplaysProvider, mlbLiveProvider, vavooProvider, ak47LiveProvider, leafProvider, madplayProvider, vipLeagueProvider, strumykProvider, providerHealthService, broadcasterMatchService } = {}) {
-    this.providers = [timStreamsProvider, streamedPkProvider, watchFootyProvider, cdnLiveProvider, ...(yamlProviders || []), replayzoneProvider, ...(liveTvProvider ? [liveTvProvider] : []), ...(daddyLiveProvider ? [daddyLiveProvider] : []), ...(damiTvProvider ? [damiTvProvider] : []), ...(ppvStProvider ? [ppvStProvider] : []), ...(soccerFullProvider ? [soccerFullProvider] : []), ...(basketballVideoProvider ? [basketballVideoProvider] : []), ...(nflVideoProvider ? [nflVideoProvider] : []), ...(skTechProvider ? [skTechProvider] : []), ...(fullRacesProvider ? [fullRacesProvider] : []), ...(hockeyReplaysProvider ? [hockeyReplaysProvider] : []), ...(mlbLiveProvider ? [mlbLiveProvider] : []), ...(vavooProvider ? [vavooProvider] : []), ...(ak47LiveProvider ? [ak47LiveProvider] : []), ...(leafProvider ? [leafProvider] : []), ...(madplayProvider ? [madplayProvider] : []), ...(vipLeagueProvider ? [vipLeagueProvider] : []), ...(strumykProvider ? [strumykProvider] : [])];
+  constructor({ timStreamsProvider, watchFootyProvider, cdnLiveProvider, streamSports99Provider, streamedPkProvider, cacheService, yamlProviders, replayzoneProvider, daddyLiveProvider, teamLogoService, liveTvProvider, damiTvProvider, ppvStProvider, soccerFullProvider, basketballVideoProvider, nflVideoProvider, skTechProvider, fullRacesProvider, hockeyReplaysProvider, mlbLiveProvider, vavooProvider, ak47LiveProvider, leafProvider, madplayProvider, bintvProvider, angulismoProvider, tdtChannelsProvider, nbaMonsterProvider, vipLeagueProvider, strumykProvider, providerHealthService, broadcasterMatchService } = {}) {
+    this.providers = [timStreamsProvider, streamedPkProvider, watchFootyProvider, cdnLiveProvider, ...(yamlProviders || []), replayzoneProvider, ...(liveTvProvider ? [liveTvProvider] : []), ...(daddyLiveProvider ? [daddyLiveProvider] : []), ...(damiTvProvider ? [damiTvProvider] : []), ...(ppvStProvider ? [ppvStProvider] : []), ...(soccerFullProvider ? [soccerFullProvider] : []), ...(basketballVideoProvider ? [basketballVideoProvider] : []), ...(nflVideoProvider ? [nflVideoProvider] : []), ...(skTechProvider ? [skTechProvider] : []), ...(fullRacesProvider ? [fullRacesProvider] : []), ...(hockeyReplaysProvider ? [hockeyReplaysProvider] : []), ...(mlbLiveProvider ? [mlbLiveProvider] : []), ...(vavooProvider ? [vavooProvider] : []), ...(ak47LiveProvider ? [ak47LiveProvider] : []), ...(leafProvider ? [leafProvider] : []), ...(madplayProvider ? [madplayProvider] : []), ...(bintvProvider ? [bintvProvider] : []), ...(angulismoProvider ? [angulismoProvider] : []), ...(tdtChannelsProvider ? [tdtChannelsProvider] : []), ...(nbaMonsterProvider ? [nbaMonsterProvider] : []), ...(vipLeagueProvider ? [vipLeagueProvider] : []), ...(strumykProvider ? [strumykProvider] : [])];
     this.streamSports99Provider = streamSports99Provider;
     this.cacheService = cacheService;
     this.teamLogoService = teamLogoService;
@@ -1578,6 +1578,11 @@ class MatchAggregator {
       this._enrichMatchesWithBroadcasters(activeMatches);
 
       this.cacheService.setMatches(activeMatches);
+      // Identity of the snapshot just written: enrichment results are only
+      // written back while the cache still holds this sync's matches.
+      const cachedSnapshot = typeof this.cacheService.getMatchesReadOnly === 'function'
+        ? this.cacheService.getMatchesReadOnly()
+        : null;
       if (this.providerHealthService) {
         this.providerHealthService.finishSync({ matchCount: activeMatches.length, succeeded: true });
       }
@@ -1609,9 +1614,21 @@ class MatchAggregator {
             try { await this.teamLogoService.enrichMatch(m); } catch (_) {}
           }
         };
-        Promise.all(
+        // setMatches() stored CLONES, so the logos enrichMatch writes into
+        // these objects never reached the cache. Once the pool drains, write
+        // the enriched set back (still off the sync's critical path).
+        const logoSig = (m) => `${m.logo || ''}|${(m.team1 && m.team1.logo) || ''}|${(m.team2 && m.team2.logo) || ''}`;
+        const before = enrichable.map(logoSig);
+        this.logoEnrichment = Promise.all(
           Array.from({ length: Math.min(ENRICH_CONCURRENCY, enrichable.length) }, enrichWorker)
-        ).catch(() => {});
+        ).then(() => {
+          if (!enrichable.some((m, i) => logoSig(m) !== before[i])) return false;
+          // A newer sync (or a cross-worker disk reload) replaced the snapshot:
+          // its data wins, never overwrite it with this older match set.
+          if (cachedSnapshot && this.cacheService.getMatchesReadOnly() !== cachedSnapshot) return false;
+          this.cacheService.setMatches(activeMatches);
+          return true;
+        }).catch(() => false);
       }
 
       return activeMatches;

@@ -531,5 +531,26 @@ router.get('/watch', (req, res) => {
 </html>`);
 });
 
+// ─── /api/sniff — Headless Browser Sniffer Endpoint ───────────────────────────
+router.get('/api/sniff', async (req, res) => {
+  const target = req.query.url;
+  const referer = req.query.referer || '';
+  if (!target) return res.status(400).json({ success: false, error: 'Missing ?url parameter' });
+  try {
+    const container = require('../container');
+    let sniffer = null;
+    try { sniffer = container.resolve('puppeteerSnifferService'); } catch (_) {}
+    if (!sniffer || !sniffer.isAvailable()) {
+      return res.status(503).json({ success: false, error: 'Headless sniffer not available' });
+    }
+    const result = await sniffer.sniff(target, { referer, timeoutMs: 15000 });
+    if (result && result.file) {
+      return res.json({ success: true, url: result.file, type: result.type, headers: result.headers });
+    }
+    return res.status(404).json({ success: false, error: 'Stream not found' });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 module.exports = router;

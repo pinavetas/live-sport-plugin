@@ -190,7 +190,11 @@ class CronService {
         try {
           console.log(`[CronService] Pinging external URL to prevent sleep...`);
           const { request } = require('undici');
-          await request(`${externalUrl}/health`);
+          const { body } = await request(`${externalUrl}/health`);
+          // An unconsumed undici body keeps its socket checked out; drain it so
+          // the connection goes back to the pool (or closes) after every ping.
+          if (body && typeof body.dump === 'function') await body.dump();
+          else if (body && typeof body.destroy === 'function') body.destroy();
         } catch (err) {
           console.error('[CronService] Keep-alive ping failed:', err.message);
         }

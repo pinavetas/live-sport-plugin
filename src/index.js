@@ -17,6 +17,7 @@ const express = require('express');
 const cors    = require('cors');
 const { getRouter } = require('stremio-addon-sdk');
 const { createProxyMiddleware } = require('http-proxy-middleware');
+const { resolverProxyOptions } = require('./resolverProxyOptions');
 const child_process = require('child_process');
 const path = require('path');
 
@@ -855,18 +856,8 @@ app.use('/api/parser', require('./routes/parserStudio'));
 // Zero-bandwidth DASH→HLS converter (must stay above the /api resolver proxy)
 app.use(require('./routes/dash'));
 // Mount the HLS Video Proxy (routes to the internal resolver on port RESOLVER_PORT)
-app.use('/api', createProxyMiddleware({
-  target: `http://127.0.0.1:${RESOLVER_PORT}/api`,
-  changeOrigin: true,
-  xfwd: true,
-  logLevel: 'debug',
-  onError: (err, req, res) => {
-    console.error('[Proxy Error] Failed to proxy /api request to internal resolver:', err.message);
-    if (!res.headersSent) {
-      res.status(502).send('Bad Gateway: Internal stream resolver is not responding.');
-    }
-  }
-}));
+// http-proxy-middleware v4 options (on.error, not the ignored legacy onError).
+app.use('/api', createProxyMiddleware(resolverProxyOptions(RESOLVER_PORT)));
 
 // ─── Universal Dynamic Base URL Response Rewriter ─────────────────────────────
 // Intercepts /manifest.json, /catalog/*, /meta/*, and /stream/* responses to
@@ -927,7 +918,7 @@ app.use((req, res, next) => {
             return `${currentBaseUrl}${url}`;
           }
           // Absolute URLs with legacy/static base or localhost/LAN IP
-          const match = url.match(/^(?:https?:\/\/[^\/]+)(\/(?:img|watch|api\/manifest|api\/dash|api\/mp4proxy|api\/fastmp4|api\/hlschunk|api\/hls|hls|logo|posters|donate)(?:[?\/].*|\.[A-Za-z0-9]+)?)$/);
+          const match = url.match(/^(?:https?:\/\/[^\/]+)(\/(?:img|watch|api\/manifest|api\/dash|api\/mp4proxy|api\/fastmp4|api\/hlschunk|api\/hls|hls|logo|posters|donate)(?:\.[A-Za-z0-9]+)?(?:[?\/].*)?)$/);
           if (match) {
             modified = true;
             return `${currentBaseUrl}${match[1]}`;
@@ -991,28 +982,8 @@ app.use((req, res, next) => {
   next();
 });
 
-/**
- * Decodes a config URL segment. Accepts URL-encoded JSON or base64url JSON.
- * Returns null when the segment is not a valid config.
- */
-function decodeConfigSegment(configStr) {
-  try {
-    let parsed;
-    if (configStr.startsWith('%7B') || configStr.startsWith('{')) {
-      parsed = JSON.parse(decodeURIComponent(configStr));
-    } else {
-      let base64 = configStr.replace(/-/g, '+').replace(/_/g, '/');
-      while (base64.length % 4) {
-        base64 += '=';
-      }
-      parsed = JSON.parse(Buffer.from(base64, 'base64').toString('utf-8'));
-    }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    return parsed;
-  } catch (e) {
-    return null;
-  }
-}
+// Config segment decoding (JSON / URL-encoded JSON / base64url), see src/configSegment.js.
+const { decodeConfigSegment } = require('./configSegment');
 app.get('/:config?/manifest.json', (req, res, next) => {
   const { manifest } = require('./manifest');
   let parsedConfig = {};

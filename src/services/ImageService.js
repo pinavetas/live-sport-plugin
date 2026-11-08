@@ -16,6 +16,7 @@
  */
 
 const { request } = require('undici');
+const { checkOutboundUrl } = require('./OutboundUrlGuard');
 
 // Disable sharp/libvips's decoded-image operation cache. Measured on the live
 // server: every burst of image work left a permanent 15-22 MB anonymous block
@@ -151,6 +152,10 @@ function svgPlaceholder(text, color, w = 800, h = 450, shape = 'landscape') {
 async function fetchImage(rawUrl, attempts = 2) {
   const url = normalizeUrl(rawUrl);
   if (!url) return { ok: false, bytes: 0 };
+  // SSRF gate: the source URL is caller-controlled (query string), so it must
+  // never reach loopback / LAN / cloud-metadata addresses.
+  const verdict = await checkOutboundUrl(url);
+  if (!verdict.ok) return { ok: false, bytes: 0 };
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
       const res = await request(url, {
@@ -375,6 +380,17 @@ async function getImage(rawUrl) {
 
   const p = (async () => {
     let result = null;
+    // SSRF gate: /img, /img/badge and /img/match all pass a caller-supplied URL
+    // straight through to here. A blocked target is treated like a dead source
+    // (negative-cached, caller falls back to its placeholder) and is never dialled.
+    const verdict = await checkOutboundUrl(url);
+    if (!verdict.ok) {
+      console.warn(`[ImageService] Blocked outbound URL (${verdict.reason}): ${verdict.detail}`);
+      inFlight.delete(url);
+      if (negatives.size > 500) negatives.clear();
+      negatives.set(url, Date.now() + NEG_TTL_MS);
+      return null;
+    }
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         // AbortSignal caps the TOTAL request (headers + body): a slow-loris upstream
