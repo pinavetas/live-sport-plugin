@@ -9,7 +9,12 @@ const router = express.Router();
 const AiParserGeneratorService = require('../services/AiParserGeneratorService');
 const dynamicParserRegistry = require('../services/DynamicParserRegistry');
 const { safeFetch } = require('../impitClient');
+const { parserStudioAuth } = require('../services/parserStudioAuth');
+const { checkOutboundUrl, rejectBlockedUrl } = require('../services/OutboundUrlGuard');
 
+// Auth runs before body parsing: an unauthorized caller gets 401 without the
+// server doing any work on its payload.
+router.use(parserStudioAuth);
 router.use(express.json());
 
 const aiGenerator = new AiParserGeneratorService();
@@ -29,6 +34,7 @@ router.post('/generate', async (req, res) => {
     const result = await aiGenerator.generateParser({ url, aiConfig });
     return res.json(result);
   } catch (err) {
+    if (err && err.outboundVerdict) return rejectBlockedUrl(res, err.outboundVerdict, 'parser-studio');
     console.error('[ParserStudio] Generation failed:', err.message);
     return res.status(422).json({ success: false, error: err.message });
   }
@@ -44,6 +50,11 @@ router.post('/test', async (req, res) => {
   if (!url || !selectors) {
     return res.status(400).json({ success: false, error: 'URL and selectors are required' });
   }
+
+  // SSRF gate: never fetch loopback / private / metadata addresses. The stream
+  // proxy host allowlist does not apply to scraping targets.
+  const verdict = await checkOutboundUrl(url, { allowedHosts: null });
+  if (!verdict.ok) return rejectBlockedUrl(res, verdict, 'parser-studio');
 
   try {
     const pageRes = await safeFetch(url, {

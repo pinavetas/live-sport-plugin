@@ -1456,10 +1456,41 @@
 
     let currentGeneratedConfig = null;
 
+    // /api/parser/* only answers direct local requests or callers presenting
+    // PARSER_STUDIO_TOKEN. The token is kept in this browser only.
+    const PARSER_STUDIO_TOKEN_KEY = 'parserStudioToken';
+    function getParserStudioToken() {
+      try { return localStorage.getItem(PARSER_STUDIO_TOKEN_KEY) || ''; } catch (_) { return ''; }
+    }
+    function setParserStudioToken(token) {
+      try {
+        if (token) localStorage.setItem(PARSER_STUDIO_TOKEN_KEY, token);
+        else localStorage.removeItem(PARSER_STUDIO_TOKEN_KEY);
+      } catch (_) {}
+    }
+    // interactive: on 401, ask once for the token and retry (user-initiated actions only).
+    async function studioFetch(url, opts = {}, interactive = false) {
+      const send = () => {
+        const headers = Object.assign({}, opts.headers || {});
+        const token = getParserStudioToken();
+        if (token) headers['x-parser-studio-token'] = token;
+        return fetch(url, Object.assign({}, opts, { headers }));
+      };
+      let res = await send();
+      if (res.status === 401 && interactive) {
+        const token = window.prompt('Parser Studio token (PARSER_STUDIO_TOKEN):', '');
+        if (token && token.trim()) {
+          setParserStudioToken(token.trim());
+          res = await send();
+        }
+      }
+      return res;
+    }
+
     async function loadActiveParsers() {
       if (!activeParsersList) return;
       try {
-        const res = await fetch('/api/parser/list');
+        const res = await studioFetch('/api/parser/list');
         const data = await res.json();
         if (data.success && Array.isArray(data.parsers) && data.parsers.length > 0) {
           activeParsersList.innerHTML = data.parsers.map(p => `
@@ -1482,7 +1513,7 @@
     window.deleteCustomParser = async function(name) {
       if (!confirm(`¿Eliminar parser '${name}'?`)) return;
       try {
-        const res = await fetch(`/api/parser/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        const res = await studioFetch(`/api/parser/${encodeURIComponent(name)}`, { method: 'DELETE' }, true);
         const data = await res.json();
         if (data.success) {
           loadActiveParsers();
@@ -1517,11 +1548,11 @@
           if (aiApiKey && aiApiKey.value.trim()) aiConfig.apiKey = aiApiKey.value.trim();
           if (aiModel && aiModel.value.trim()) aiConfig.model = aiModel.value.trim();
 
-          const res = await fetch('/api/parser/generate', {
+          const res = await studioFetch('/api/parser/generate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url, aiConfig })
-          });
+          }, true);
 
           const data = await res.json();
           if (!data.success) {
@@ -1563,11 +1594,11 @@
         aiSaveBtn.textContent = 'Guardando...';
 
         try {
-          const res = await fetch('/api/parser/save', {
+          const res = await studioFetch('/api/parser/save', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ config: currentGeneratedConfig })
-          });
+          }, true);
 
           const data = await res.json();
           if (!data.success) throw new Error(data.error || 'Error al guardar');

@@ -306,6 +306,8 @@ describe('AiParserGeneratorService & DynamicParserRegistry', () => {
 
   describe('AiParserGeneratorService - Full Generation with Self-Correction', () => {
     test('triggers 1-shot self-correction loop when initial selectors fail', async () => {
+      // Keep the test hermetic: the real SSRF guard would resolve example.com via DNS.
+      aiService.urlGuard = async () => ({ ok: true });
       aiService.fetchFn = jest.fn().mockResolvedValue({
         ok: true,
         text: async () => SAMPLE_PAGE_HTML
