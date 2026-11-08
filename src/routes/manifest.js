@@ -18,6 +18,21 @@ const {
 const { rewriteHlsUri, rewriteHlsPlaylist, preprobeManifestSegments } = require('../services/HlsRewriteService');
 const { safeFetch: _safeFetch } = require('../impitClient');
 const { getRequestBaseUrl } = require('../config');
+const { checkOutboundUrl, rejectBlockedUrl } = require('../services/OutboundUrlGuard');
+
+/**
+ * SSRF gate for URLs fetched inside the shared manifest promise (re-minted
+ * upstreams differ from the URL validated at the route entry). Throws an error
+ * carrying the verdict so the route can answer with the canonical 403.
+ */
+async function assertOutboundAllowed(url) {
+  const verdict = await checkOutboundUrl(url);
+  if (!verdict.ok) {
+    const err = new Error(`Blocked outbound URL (${verdict.reason})`);
+    err.blockedVerdict = verdict;
+    throw err;
+  }
+}
 
 // Variant BANDWIDTH declarations seen in master playlists, keyed by the
 // absolute upstream URL of the child media playlist. When that child is served
@@ -65,6 +80,11 @@ router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
     return res.send(entry.body);
   }
 
+  // SSRF gate — the cache above only ever holds URLs that already passed it, so
+  // it runs here, before the first outbound request for this key.
+  const verdict = await checkOutboundUrl(targetUrl);
+  if (!verdict.ok) return rejectBlockedUrl(res, verdict, 'ManifestProxy');
+
   try {
     let fetchPromise = manifestInFlight.get(cacheKey);
     if (!fetchPromise) {
@@ -83,8 +103,10 @@ router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
 
         let out;
         try {
+          if (effectiveUrl !== targetUrl) await assertOutboundAllowed(effectiveUrl);
           out = await fetchUpstreamManifest(effectiveUrl, referer, origin);
         } catch (firstErr) {
+          if (firstErr && firstErr.blockedVerdict) throw firstErr;
           const fresh = (isExpiryStatus(firstErr) && rck) ? await attemptRemint(rck, effectiveUrl || targetUrl) : null;
           if (!fresh || fresh === effectiveUrl) throw firstErr;
           
@@ -113,6 +135,7 @@ router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
           // Preserve the variant the player asked for (see mergeRemintedUrl).
           effectiveUrl = mergeRemintedUrl(targetUrl, fresh, rck);
           reminted = true;
+          await assertOutboundAllowed(effectiveUrl);
           out = await fetchUpstreamManifest(effectiveUrl, referer, origin);
         }
         if (!out.includes('#EXT')) {
@@ -189,6 +212,7 @@ router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
     res.setHeader('X-Manifest-Cache', 'MISS');
     res.send(finalBody);
   } catch (err) {
+    if (err && err.blockedVerdict) return rejectBlockedUrl(res, err.blockedVerdict, 'ManifestProxy');
     // Preserve the old 404 semantics so players can fail over to another stream.
     // Failures are negatively cached (15 s) so player polls stop hammering the dead upstream.
     // In parallel, drop the originating resolve-cache entry so the next click mints fresh.
@@ -388,6 +412,10 @@ function parseClearKeyToken(token) {
 async function handleDashManifestProxy(req, res) {
   const targetUrl = req.query.url;
   if (!targetUrl) return res.status(400).send('Missing url');
+
+  // SSRF gate — must run before the upstream MPD fetch below.
+  const verdict = await checkOutboundUrl(targetUrl);
+  if (!verdict.ok) return rejectBlockedUrl(res, verdict, 'DashManifestProxy');
 
   const token = req.query.token || req.query.keys || '';
   const referer = req.query.referer || '';
