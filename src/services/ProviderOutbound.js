@@ -45,9 +45,65 @@ async function fetch(url, options = {}) {
   return wrapped;
 }
 
+/**
+ * Node Readable -> WHATWG ReadableStream that cannot crash the process.
+ *
+ * Readable.toWeb() calls controller.enqueue() from the source's 'data' handler.
+ * When the web side is already closed (reader.cancel() after a bounded probe
+ * read, or the transport's deadline erroring the body) and the undici body is
+ * still resumed with buffered data, that enqueue throws ERR_INVALID_STATE
+ * ("Controller is already closed") from an event handler: an uncaughtException
+ * that took the whole addon down. Here late chunks are dropped instead, and
+ * flow control is pull-based (pause when the queue is full, resume on pull).
+ */
+function nodeToWebStream(source) {
+  let finished = false;
+  const finish = () => { finished = true; };
+  return new ReadableStream({
+    start(controller) {
+      source.on('data', (chunk) => {
+        if (finished) return;
+        try {
+          controller.enqueue(chunk instanceof Uint8Array ? chunk : Buffer.from(chunk));
+        } catch (_) {
+          finish();
+          source.destroy();
+          return;
+        }
+        if (controller.desiredSize !== null && controller.desiredSize <= 0) source.pause();
+      });
+      source.once('end', () => {
+        if (finished) return;
+        finish();
+        try { controller.close(); } catch (_) {}
+      });
+      source.once('error', (err) => {
+        if (finished) return;
+        finish();
+        try { controller.error(err); } catch (_) {}
+      });
+      source.once('close', () => {
+        // 'close' without 'end' means the body was cut short.
+        if (finished) return;
+        finish();
+        try { controller.error(Object.assign(new Error('Response body closed prematurely'), { code: 'ERR_STREAM_PREMATURE_CLOSE' })); } catch (_) {}
+      });
+      source.pause();
+    },
+    pull() {
+      if (!finished) source.resume();
+    },
+    cancel(reason) {
+      finish();
+      source.on('error', () => {});
+      source.destroy(reason instanceof Error ? reason : undefined);
+    },
+  });
+}
+
 async function streamingFetch(url, options = {}) {
   const response = await require('./GuardedOutbound').guardedRequest(String(url), options);
-  const body = [204, 205, 304].includes(response.statusCode) || options.method === 'HEAD' ? null : Readable.toWeb(response.body);
+  const body = [204, 205, 304].includes(response.statusCode) || options.method === 'HEAD' ? null : nodeToWebStream(response.body);
   if (!body) response.body.destroy();
   const wrapped = new Response(body, { status: response.statusCode, headers: response.headers });
   Object.defineProperty(wrapped, 'url', { value: response.url || String(url) });
@@ -55,4 +111,4 @@ async function streamingFetch(url, options = {}) {
 }
 
 const fetchUndici = (url, options = {}) => fetch(url, { ...options, transport: 'undici' });
-module.exports = { safeFetch, request, fetch, fetchUndici, streamingFetch };
+module.exports = { safeFetch, request, fetch, fetchUndici, streamingFetch, nodeToWebStream };
