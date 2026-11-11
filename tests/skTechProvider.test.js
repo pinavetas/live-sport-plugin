@@ -1,3 +1,16 @@
+// These parser/extractor unit tests do not exercise or launch WASM workers.
+jest.mock('../src/services/StreamedWasmPool', () => ({
+  resolveWasmStream: jest.fn(() => { throw new Error('Unexpected WASM execution in provider unit fixture'); }),
+  destroy: jest.fn(async () => {})
+}));
+
+jest.mock('../src/services/ProviderOutbound', () => ({
+  fetchUndici: (...args) => {
+    if (!jest.isMockFunction(global.fetch)) throw new Error('Unexpected SK Tech I/O in unit fixture');
+    return global.fetch(...args);
+  }
+}));
+
 'use strict';
 
 process.env.NODE_ENV = 'test';
@@ -120,7 +133,7 @@ describe('SK Tech TV Dual-Pillar Resolver & Provider', () => {
       expect(epoch).toBe(expectedUtc);
     });
 
-    test('resolves match streams prioritizing direct HLS over converted DASH HLS', async () => {
+    test('resolves direct HLS and R2, and drops ClearKey DASH by bandwidth policy', async () => {
       const mockRawOptions = [
         {
           name: 'Server 1 DASH',
@@ -144,26 +157,20 @@ describe('SK Tech TV Dual-Pillar Resolver & Provider', () => {
       });
 
       const streams = await matchResolver.resolveMatchStreams('pro/test.txt', 'Arsenal vs Chelsea');
-      expect(streams).toHaveLength(3);
+      expect(streams).toHaveLength(2);
 
-      // Verify Priority Order: Direct HLS & R2 first, converted DASH HLS last
+      // Bandwidth policy: ClearKey DASH would relay every segment through
+      // /api/dash, so it is never emitted — only the direct HLS and R2 remain.
       expect(streams[0].title).toContain('Server 2 HLS');
       expect(streams[0].url).toContain('amagi.tv');
       expect(streams[1].title).toContain('Server 3 R2');
-      expect(streams[2].title).toContain('Server 1 DASH');
+      expect(streams.some((s) => s.url.includes('/api/dash/'))).toBe(false);
+      expect(streams.some((s) => s.title.includes('Server 1 DASH'))).toBe(false);
 
-      // DASH entries now route through the zero-bandwidth /api/dash converter
-      // with the ClearKey embedded in the base64url payload
-      expect(streams[2].url).toMatch(/\/api\/dash\/index\.m3u8\?d=.+$/);
-      const payload = JSON.parse(Buffer.from(streams[2].url.split('d=')[1], 'base64url').toString('utf8'));
-      expect(payload.mpdUrl).toBe('https://otte.cache.aiv-cdn.net/live/cenc.mpd');
-      expect(payload.key).toBe('17d2ac8dbc5429bd70af3433aa12158d');
-      expect(payload.kid).toBe('14eeabf30c14b7fbf3008c03099ce011');
-      expect(streams[2].behaviorHints.notWebReady).toBe(false);
-
-      // Verify Zero Server Bandwidth: URLs are direct CDNs or in-addon dash routes
+      // Zero server bandwidth: direct CDNs only — no relay of any kind.
       for (const s of streams) {
         expect(s.url).not.toContain('/api/manifest');
+        expect(s.url).not.toContain('/api/dash');
         expect(s.url).not.toContain('localhost');
       }
     });
@@ -315,6 +322,16 @@ https://cdn.example.com/sony1.m3u8|User-Agent=ExoPlayer
       expect(network.sources[0].source).toBe('sktech');
     });
 
+    test('does not poison cache when fetchChannels returns empty array', async () => {
+      jest.spyOn(matchResolver, 'fetchLiveMatches').mockResolvedValue([]);
+      jest.spyOn(channelResolver, 'fetchChannels').mockResolvedValueOnce([]);
+
+      provider.clearCache();
+      const matches = await provider.getMatches();
+      expect(matches).toEqual([]);
+      expect(provider._cachedChannelEntities).toBeNull();
+      expect(provider._cachedChannelEntitiesTime).toBe(0);
+    });
     test('resolveStream returns StreamEntities with direct CDN links and proxyHeaders', async () => {
       jest.spyOn(matchResolver, 'resolveMatchStreams').mockResolvedValueOnce([
         {

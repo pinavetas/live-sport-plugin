@@ -22,6 +22,12 @@ const MAX_ENTRIES = 200;
 // hung provider call would hold the single-flight slot for the key forever.
 const RESOLVE_HARD_TIMEOUT_MS = Number(process.env.RESOLVE_HARD_TIMEOUT_MS) || 25000;
 const CHANNEL_MATCH_ID = '__channel__'; // evergreen 24/7 keys survive pruneEnded
+const sharedRevision = value => typeof value === 'string' && /^[a-f0-9-]{36}$/i.test(value) ? value : null;
+const { withTimingWork } = require('./TimingContext');
+const resolverConflictState = require('./ResolverConflictState');
+const { allowsLegacyResolverTcp } = require('./ResolverTrustPolicy');
+const { createDeferredResolution, isDeferredResolution, isInconclusiveResolutionError,
+  inconclusiveStreamsReason, DIRECT_RETRY_HINT } = require('./StreamResolutionOutcome');
 
 // behaviorHints are small plain-JSON trees; a tight recursive copy beats V8's
 // generic structuredClone serializer by 5-15x on these shapes, and cloneStream
@@ -51,6 +57,22 @@ function cloneStream(stream) {
   return copy;
 }
 
+function clonePublicStream(stream) {
+  const copy = cloneStream(stream);
+  delete copy[DIRECT_RETRY_HINT];
+  return copy;
+}
+
+// A short positive web fallback can cross the unchanged L2 ok/failed protocol.
+// Accept its internal hint only on a web-only payload; never alter direct media
+// or treat an arbitrary provider control field as evidence of a failure.
+function webRetryReason(streams) {
+  if (!Array.isArray(streams) || !streams.length || !streams.every(s => s && !s.url && typeof s.externalUrl === 'string')) return null;
+  const descriptor = Object.getOwnPropertyDescriptor(streams[0], DIRECT_RETRY_HINT);
+  const reason = descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : null;
+  return ['timeout', 'capacity', 'cancelled', 'unavailable'].includes(reason) ? reason : null;
+}
+
 // ─── Shared L2 (resolver-hosted) ─────────────────────────────────────────────
 // Both cluster workers point at the same resolver child (127.0.0.1:7003), so a
 // stream minted by one worker is a cache hit for the other. Read as L2 after
@@ -78,13 +100,17 @@ function _sharedDown() {
   _sharedFailStreak = 0;
 }
 
-async function _sharedJson(path, opts = {}, timeoutMs = 1500) {
+async function _sharedJson(path, opts = {}, timeoutMs = 1500, requester = fetch, conflictSignal = null) {
   const base = _sharedBase();
   if (!base) return null;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(base + path, { signal: ctrl.signal, ...opts });
+    const signals = [ctrl.signal, ...(conflictSignal ? [conflictSignal] : []), ...(opts.signal ? [opts.signal] : [])];
+    // Do not invoke an adapter at all when cancellation already happened; it
+    // may not honor a pre-aborted signal and could otherwise send a request.
+    if (signals.some(signal => signal.aborted)) return null;
+    const res = await requester(base + path, { ...opts, signal: AbortSignal.any(signals) });
     if (!res.ok) return null;
     const out = await res.json();
     _sharedFailStreak = 0;
@@ -114,12 +140,19 @@ class StreamResolveCache {
     this.negativeTtlMs = opts.negativeTtlMs ?? NEGATIVE_TTL_MS;
     this.maxEntries = opts.maxEntries ?? MAX_ENTRIES;
     this.resolveTimeoutMs = opts.resolveTimeoutMs ?? RESOLVE_HARD_TIMEOUT_MS;
+    // Experimental opt-in observer; absent in normal operation. An operation
+    // may end in an L2 hit, so it is not proof that a provider was invoked.
+    this.timingRelations = opts.timingRelations ?? null;
+    // Optional prototype seam only. A real adapter must bind each request to
+    // a verified resolver connection. Merely returning true is not proof.
+    this.sharedResolver = opts.sharedResolver ?? null;
+    this.resolverConflictState = opts.resolverConflictState ?? resolverConflictState;
 
     this.entries = new Map();   // key -> { streams, matchId, status, resolvedAt, expiresAt, lastAccess }
     this.inFlight = new Map();  // key -> Promise (mint in progress)
     this.pendingOperations = new Map(); // key -> locally prunable operation
     this.ttl = new Map();       // sourceName -> learned TTL ms
-    this.statsCounters = { hits: 0, misses: 0, negativeHits: 0, evictions: 0 };
+    this.statsCounters = { hits: 0, misses: 0, negativeHits: 0, deferredHits: 0, deferrals: 0, evictions: 0 };
   }
 
   _extractTokenRemainingMs(url) {
@@ -130,12 +163,27 @@ class StreamResolveCache {
         const u = new URL(target, 'http://localhost');
         target = u.searchParams.get('url') || target;
       }
+      if (target.includes('/api/leaf/manifest.m3u8?') || target.includes('/api/leaf/live.m3u8?')) {
+        const u = new URL(target, 'http://localhost');
+        target = u.searchParams.get('url') || target;
+      }
       const u = new URL(target, 'http://localhost');
       const e = u.searchParams.get('e') || u.searchParams.get('exp') || u.searchParams.get('expires');
       if (e && /^\d+$/.test(e)) {
         const exp = parseInt(e, 10);
         const expMs = exp < 1e11 ? exp * 1000 : exp;
         return expMs - Date.now();
+      }
+      const ft = u.searchParams.get('ft');
+      if (ft && ft.includes('.')) {
+        const parts = ft.split('.');
+        if (parts.length >= 2) {
+          const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+          if (payload && typeof payload.exp === 'number') {
+            const expMs = payload.exp < 1e11 ? payload.exp * 1000 : payload.exp;
+            return expMs - Date.now();
+          }
+        }
       }
       const token = u.searchParams.get('token');
       if (token) {
@@ -153,11 +201,15 @@ class StreamResolveCache {
   }
 
   _ttlFor(sourceName) {
-    const val = this.ttl.get(sourceName) || this.defaultTtlMs;
     if (sourceName === 'daddylive') {
+      const val = this.ttl.get(sourceName) || this.defaultTtlMs;
       return Math.min(val, 150 * 1000);
     }
-    return val;
+    if (sourceName === 'leaf') {
+      const val = this.ttl.get(sourceName);
+      return Math.min(val || (4 * 3600 * 1000), 4 * 3600 * 1000);
+    }
+    return this.ttl.get(sourceName) || this.defaultTtlMs;
   }
 
   /**
@@ -190,9 +242,20 @@ class StreamResolveCache {
     return e.status === 'ok';
   }
 
+  /** Local inconclusive cooldown only; never treats a negative result as one. */
+  isDeferred(key) {
+    const entry = this.entries.get(key);
+    if (!entry) return false;
+    if (Date.now() >= entry.expiresAt) {
+      this.entries.delete(key);
+      return false;
+    }
+    return entry.status === 'deferred' || (entry.status === 'ok' && Boolean(entry.retryReason));
+  }
+
   /**
-   * O(1) check if a key is currently resolved (positive 'ok' OR negative 'failed')
-   * and unexpired — prevents duplicate prewarm re-minting of processed sources.
+   * O(1) check if a key has an unexpired positive, negative or short local
+   * deferred result — prevents duplicate prewarm work during its cooldown.
    */
   isResolved(key, minRemainingMs = 0) {
     const e = this.entries.get(key);
@@ -227,7 +290,7 @@ class StreamResolveCache {
     this.entries.delete(key);
     this.entries.set(key, e);
     if (e.status !== 'ok') return null;
-    return e.streams.map(cloneStream);
+    return e.streams.map(clonePublicStream);
   }
 
   /**
@@ -243,16 +306,44 @@ class StreamResolveCache {
     if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) return false;
     const matchId = key.split(':')[1] || '';
     const streams = Array.isArray(remote.streams) ? remote.streams : [];
+    const retryReason = remote.status === 'ok' ? webRetryReason(streams) : null;
     this.entries.delete(key);
     this.entries.set(key, {
       streams: streams.map(cloneStream),
       matchId,
       status: remote.status === 'ok' ? 'ok' : 'failed',
-      expiresAt,
+      expiresAt: retryReason ? Math.min(expiresAt, Date.now() + 2000) : expiresAt,
       lastAccess: Date.now(),
+      sharedRevision: sharedRevision(remote.revision),
+      ...(retryReason ? { retryReason } : {}),
     });
     this._evictIfNeeded();
     return true;
+  }
+
+  _sharedAvailable() {
+    try { if (this.resolverConflictState.hasConflict() !== false) return false; }
+    catch (_) { return false; }
+    if (!_sharedAvailable()) return false;
+    if (this.sharedResolver === null) return allowsLegacyResolverTcp();
+    try {
+      return typeof this.sharedResolver.available === 'function' &&
+        typeof this.sharedResolver.request === 'function' && this.sharedResolver.available() === true;
+    } catch (_) { return false; }
+  }
+
+  async _sharedJson(path, opts = {}, timeoutMs = 1500) {
+    if (!this._sharedAvailable()) return null;
+    const requester = this.sharedResolver === null ? fetch : this.sharedResolver.request.bind(this.sharedResolver);
+    let conflictSignal = null;
+    try { conflictSignal = this.resolverConflictState.signal?.() || null; } catch (_) { return null; }
+    const result = await _sharedJson(path, opts, timeoutMs, requester, conflictSignal);
+    // An adapter might ignore AbortSignal or finish concurrently with the
+    // conflict. Never accept its late response after this worker has revoked
+    // access. Cancellation cannot retract data already sent to the endpoint.
+    try { if (this.resolverConflictState.hasConflict() !== false || conflictSignal?.aborted) return null; }
+    catch (_) { return null; }
+    return result;
   }
 
   // Poll the shared cache while another worker holds the mint claim.
@@ -260,15 +351,15 @@ class StreamResolveCache {
     const deadline = Date.now() + SHARED_POLL_MAX_MS;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, SHARED_POLL_INTERVAL_MS));
-      if (!_sharedAvailable()) return null;
-      const r = await _sharedJson(_sharedKey(key));
+      if (!this._sharedAvailable()) return null;
+      const r = await this._sharedJson(_sharedKey(key));
       if (!r || r.status === 'miss') return null;
       if (r.status === 'ok' || r.status === 'failed') return r;
     }
     return null;
   }
 
-  async getOrCreate(key, mintFn) {
+  async getOrCreate(key, mintFn, timingStream = null) {
     const now = Date.now();
     const existing = this.entries.get(key);
 
@@ -277,15 +368,17 @@ class StreamResolveCache {
       this.entries.delete(key);
       this.entries.set(key, existing);
       if (existing.status !== 'ok') {
-        this.statsCounters.negativeHits++;
+        if (existing.status === 'deferred') this.statsCounters.deferredHits++;
+        else this.statsCounters.negativeHits++;
         return [];
       }
       this.statsCounters.hits++;
-      return existing.streams.map(cloneStream);
+      return existing.streams.map(clonePublicStream);
     }
 
     const pending = this.inFlight.get(key);
     if (pending) {
+      this._linkTiming(timingStream, this.pendingOperations.get(key)?.timingWork);
       await pending.catch(() => {});
       return this.get(key) || [];
     }
@@ -303,19 +396,48 @@ class StreamResolveCache {
       .finally(() => {
         this.inFlight.delete(key);
         this.pendingOperations.delete(key);
+        if (operation.timingWork) {
+          try { this.timingRelations?.endWork(operation.timingWork); } catch (_) { /* diagnostic only */ }
+        }
       });
     this.inFlight.set(key, p);
+    // Reserve before invoking any diagnostic callback: a synchronous sink can
+    // itself call getOrCreate and must observe this same in-flight operation.
+    if (this.timingRelations) {
+      try { operation.timingWork = this.timingRelations.work(key.split(':', 1)[0]); } catch (_) { /* diagnostic only */ }
+      this._linkTiming(timingStream, operation.timingWork);
+    }
     await p.catch(() => {});
     return this.get(key) || [];
+  }
+
+  _linkTiming(stream, work) {
+    if (!this.timingRelations || !stream || !work) return;
+    try { this.timingRelations.link(stream, work); } catch (_) { /* diagnostic only */ }
+  }
+
+  async _timedMint(operation, mintFn) {
+    const work = operation.timingWork;
+    if (work) { try { this.timingRelations?.startMint(work); } catch (_) { /* diagnostic only */ } }
+    let outcome = 'threw';
+    try {
+      const value = await withTimingWork(work, mintFn);
+      outcome = 'returned';
+      return value;
+    } finally {
+      if (work) { try { this.timingRelations?.endMint(work, outcome); } catch (_) { /* diagnostic only */ } }
+    }
   }
 
   async _resolveAndStore(key, mintFn, operation) {
 
     // ── Shared L2: another worker may have minted (or be minting) this key ──
     let claimed = false;
-    if (_sharedAvailable()) {
+    let ownerToken;
+    let supportsVacantClaim = false;
+    if (this._sharedAvailable()) {
       const enc = _sharedKey(key);
-      let remote = await _sharedJson(enc);
+      let remote = await this._sharedJson(enc);
       if (operation.pruned) return;
       if (remote && remote.status === 'minting') remote = await this._sharedWaitMinting(key);
       if (operation.pruned) return;
@@ -330,10 +452,10 @@ class StreamResolveCache {
         }
         remote = null; // expired in transit: claim and mint instead
       }
-      if (_sharedAvailable() && (!remote || remote.status === 'miss')) {
-        const claim = await _sharedJson(`${enc}?claim=1`);
+      if (this._sharedAvailable() && (!remote || remote.status === 'miss')) {
+        const claim = await this._sharedJson(`${enc}?claim=1&fenced=1`);
         if (operation.pruned) return;
-        if (claim && claim.ok === false) {
+        if (claim && claim.ok === false && claim.reason !== 'claim-capacity') {
           // Another worker holds the claim — wait for its result.
           remote = await this._sharedWaitMinting(key);
           if (operation.pruned) return;
@@ -347,15 +469,33 @@ class StreamResolveCache {
               return;
             }
           }
-        } else if (claim && claim.ok) {
-          claimed = true; // we own the mint; write the result back below
+        } else if (claim && claim.ok && typeof claim.ownerToken === 'string' && claim.ownerToken) {
+          ownerToken = claim.ownerToken;
+          supportsVacantClaim = claim.supportsVacantClaim === true;
+          claimed = true;
         }
+        // An older resolver may grant a claim without a token; keep local
+        // playback available but skip an unsafe shared write/release.
       }
     }
 
     const parts = key.split(':');
     const sourceName = parts[0];
     const matchId = parts[1];
+    const releaseOwnedClaim = async () => {
+      if (!claimed || typeof ownerToken !== 'string' || !ownerToken || !this._sharedAvailable()) return;
+      // A stale token is rejected atomically by the resolver. Never send an
+      // unfenced DELETE or replace a newer owner's result on a deferral.
+      try {
+        await this._sharedJson(`${_sharedKey(key)}?ownerToken=${encodeURIComponent(ownerToken)}`, { method: 'DELETE' }, 1000);
+      } catch (_) { /* retain local cooldown; the fenced claim self-expires */ }
+    };
+    const storeDeferred = outcome => {
+      const entry = this._set(key, sourceName, matchId, [], 'deferred', outcome.retryAfterMs);
+      entry.reason = outcome.reason;
+      this.statsCounters.deferrals++;
+    };
+    let deferred = null;
     const p = (async () => {
       let hardTimer = null;
       try {
@@ -369,16 +509,46 @@ class StreamResolveCache {
           );
           if (hardTimer && typeof hardTimer.unref === 'function') hardTimer.unref();
         });
-        const streams = await Promise.race([mintFn(), timeout]);
+        const streams = await Promise.race([
+          operation.timingWork
+            ? this._timedMint(operation, mintFn)
+            : withTimingWork(null, mintFn),
+          timeout
+        ]);
         clearTimeout(hardTimer);
         // Pruning can run while the provider is resolving. Discard both
         // positive and negative late answers before touching either cache.
-        if (operation.pruned) return;
+        if (operation.pruned) {
+          await releaseOwnedClaim();
+          return;
+        }
+        if (isDeferredResolution(streams)) {
+          deferred = streams;
+          storeDeferred(streams);
+          // The resolver protocol remains ok/failed/minting only. A short
+          // local cooldown must not become a shared 30-second dead verdict.
+          await releaseOwnedClaim();
+          return;
+        }
         let status = 'failed';
         let ttl = this.negativeTtlMs;
+        let localEntry;
+        let storedStreams = [];
         if (Array.isArray(streams) && streams.length > 0) {
           status = 'ok';
           ttl = this._ttlFor(sourceName);
+          storedStreams = streams.map(clonePublicStream);
+          const retryReason = inconclusiveStreamsReason(streams);
+          if (retryReason && storedStreams.every(s => s && !s.url && typeof s.externalUrl === 'string')) {
+            storedStreams[0][DIRECT_RETRY_HINT] = retryReason;
+            ttl = Math.min(ttl, 2000);
+            this.statsCounters.deferrals++;
+          }
+          // A PPV web fallback is usable as a hand-off, but it must not delay
+          // another direct-playback attempt longer than an empty result did.
+          if (sourceName === 'ppvst' && streams.every(s => s && !s.url && s.externalUrl)) {
+            ttl = Math.min(ttl, this.negativeTtlMs);
+          }
           for (const s of streams) {
             if (s && s.url) {
               const rem = this._extractTokenRemainingMs(s.url);
@@ -387,33 +557,95 @@ class StreamResolveCache {
               }
             }
           }
-          this._set(key, sourceName, matchId, streams, 'ok', ttl);
+          localEntry = this._set(key, sourceName, matchId, storedStreams, 'ok', ttl);
         } else {
-          this._set(key, sourceName, matchId, [], 'failed', ttl);
+          localEntry = this._set(key, sourceName, matchId, [], 'failed', ttl);
         }
+        // Keep publication authority until the RPC settles, even if an expiry
+        // reader has already removed this entry from the local map.
+        operation.publicationEntry = localEntry;
         // Write-through so the other worker inherits the mint instantly.
-        if (claimed && _sharedAvailable()) {
-          await _sharedJson(
+        if (claimed && this._sharedAvailable()) {
+          const publish = token => this._sharedJson(
             _sharedKey(key),
             {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ streams: status === 'ok' ? streams : [], ttlMs: ttl, status }),
+              body: JSON.stringify({ streams: status === 'ok' ? storedStreams : [], ttlMs: ttl, status, ownerToken: token }),
             },
             2000
           );
+          const rememberPublication = async result => {
+            const revision = result?.ok === true && sharedRevision(result.revision);
+            if (!revision) return;
+            localEntry.sharedRevision = revision;
+            // Failure/pruning may have happened while the POST was in flight.
+            if (localEntry.invalidated || operation.pruned) await this._invalidateShared(key, revision);
+          };
+          const write = await publish(ownerToken);
+          await rememberPublication(write);
+          // Background mints can outlive the original lease. Retry once with
+          // a fresh lease only if the resolver atomically confirms no cached
+          // result or active owner would be displaced. Older resolvers must
+          // explicitly advertise this protocol before we attempt recovery.
+          if (write && write.ok === false && write.reason === 'stale-owner' && supportsVacantClaim && !operation.pruned && this._sharedAvailable()) {
+            const fresh = await this._sharedJson(`${_sharedKey(key)}?claim=1&fenced=1&vacant=1`);
+            if (!operation.pruned && fresh && fresh.ok && fresh.vacantOnly === true && typeof fresh.ownerToken === 'string' && fresh.ownerToken) {
+              ownerToken = fresh.ownerToken;
+              await rememberPublication(await publish(ownerToken));
+            }
+          }
         }
-      } catch (_) {
+        if (operation.pruned || localEntry.invalidated) {
+          await releaseOwnedClaim();
+          return;
+        }
+        // Publishing can consume the entire two-second retry window. Start
+        // that cooldown when this mint finishes so its first caller still
+        // receives the verified web fallback. Never rearm media, an explicit
+        // invalidation, a pruned operation, or a newer local publication.
+        const current = this.entries.get(key);
+        if (localEntry.retryReason && !operation.publicationEvicted &&
+            this.pendingOperations.get(key) === operation &&
+            (!current || current === localEntry)) {
+          const completedAt = Date.now();
+          localEntry.resolvedAt = completedAt;
+          localEntry.expiresAt = Math.max(localEntry.expiresAt, completedAt + ttl);
+          localEntry.lastAccess = completedAt;
+          this.entries.delete(key);
+          this.entries.set(key, localEntry);
+          this._evictIfNeeded();
+        }
+      } catch (error) {
         clearTimeout(hardTimer);
-        if (operation.pruned) return;
+        if (operation.pruned) {
+          await releaseOwnedClaim();
+          return;
+        }
+        if (deferred || isDeferredResolution(error) || isInconclusiveResolutionError(error)) {
+          if (!deferred) {
+            let reason = 'timeout';
+            // The predicate has already validated this finite cause chain.
+            // Keep the local reason accurate even when a wrapper has its own
+            // unrelated code instead of masking the underlying capacity error.
+            for (let current = error, depth = 0; current && typeof current === 'object' && depth < 8; current = current.cause, depth++) {
+              if (current.name === 'AbortError') { reason = 'cancelled'; break; }
+              if (current.code === 'ERR_OUTBOUND_CAPACITY' || /^ERR_NATIVE_(POOL|SLOT)_(BUSY|CAPACITY)$/.test(current.code || '')) reason = 'capacity';
+            }
+            deferred = isDeferredResolution(error) ? error : createDeferredResolution(reason);
+            storeDeferred(deferred);
+          }
+          await releaseOwnedClaim();
+          return;
+        }
         this._set(key, sourceName, matchId, [], 'failed', this.negativeTtlMs);
         // Release the shared mint claim so other workers don't stall up to
         // SHARED_POLL_MAX_MS waiting for a result we failed to produce.
         // (Claims self-expire at 30s, but an immediate release lets the next
         // worker retry right away.) Releasing also restores retry diversity:
         // the other worker's attempt may succeed where ours failed.
-        if (claimed && _sharedAvailable()) {
-          _sharedJson(_sharedKey(key), { method: 'DELETE' }, 1000).catch(() => {});
+        if (claimed && this._sharedAvailable()) {
+          this._sharedJson(`${_sharedKey(key)}?ownerToken=${encodeURIComponent(ownerToken)}`, { method: 'DELETE' }, 1000).catch(() => {});
         }
       }
     })();
@@ -424,25 +656,29 @@ class StreamResolveCache {
   _set(key, sourceName, matchId, streams, status, ttlMs) {
     const now = Date.now();
     this.entries.delete(key);
-    this.entries.set(key, {
+    const entry = {
       streams: streams.map(cloneStream), // store our own copy
       matchId, status,
       resolvedAt: now,
       expiresAt: now + ttlMs,
       lastAccess: now
-    });
+    };
+    const retryReason = status === 'ok' ? webRetryReason(streams) : null;
+    if (retryReason) entry.retryReason = retryReason;
+    this.entries.set(key, entry);
     this._evictIfNeeded();
+    return entry;
   }
 
   /** Pre-flight passed: double the source TTL (capped) and extend the entry. */
   noteSuccess(key) {
     if (!key) return;
     const sourceName = key.split(':')[0];
-    const maxTtl = sourceName === 'daddylive' ? 150 * 1000 : this.maxTtlMs;
+    const maxTtl = sourceName === 'daddylive' ? 150 * 1000 : (sourceName === 'leaf' ? 4 * 3600 * 1000 : this.maxTtlMs);
     const next = Math.min(this._ttlFor(sourceName) * 2, maxTtl);
     this.ttl.set(sourceName, next);
     const e = this.entries.get(key);
-    if (e && e.status === 'ok') {
+    if (e && e.status === 'ok' && !e.retryReason && e.expiresAt > Date.now()) {
       e.expiresAt = Math.max(e.expiresAt, Date.now() + next);
     }
   }
@@ -453,10 +689,20 @@ class StreamResolveCache {
     const sourceName = key.split(':')[0];
     const next = Math.max(Math.floor(this._ttlFor(sourceName) / 2), this.minTtlMs);
     this.ttl.set(sourceName, next);
+    const entry = this.entries.get(key);
+    if (entry) entry.invalidated = true;
+    const publicationEntry = this.pendingOperations.get(key)?.publicationEntry;
+    if (publicationEntry) publicationEntry.invalidated = true;
     this.entries.delete(key);
-    if (_sharedAvailable()) {
-      _sharedJson(_sharedKey(key), { method: 'DELETE' }, 1000).catch(() => {});
-    }
+    this._invalidateShared(key, entry?.sharedRevision || publicationEntry?.sharedRevision).catch(() => {});
+  }
+
+  async _invalidateShared(key, revision) {
+    // An older resolver supplies no revision. Keep its bounded L2 entry rather
+    // than sending an unconditional delete. PATCH is rejected by old resolver
+    // code even if the peer was downgraded after we received this revision.
+    if (!sharedRevision(revision) || !this._sharedAvailable()) return;
+    await this._sharedJson(`${_sharedKey(key)}?revision=${encodeURIComponent(revision)}`, { method: 'PATCH' }, 1000);
   }
 
   /** Drop entries whose match is no longer in the active match set. */
@@ -473,8 +719,8 @@ class StreamResolveCache {
     }
     // Mirror the prune into the shared cache so ended matches don't linger
     // for the other worker either.
-    if (_sharedAvailable()) {
-      _sharedJson(
+    if (this._sharedAvailable()) {
+      this._sharedJson(
         '/api/cache/prune',
         {
           method: 'POST',
@@ -489,6 +735,8 @@ class StreamResolveCache {
   _evictIfNeeded() {
     while (this.entries.size > this.maxEntries) {
       const oldestKey = this.entries.keys().next().value;
+      const operation = this.pendingOperations.get(oldestKey);
+      if (operation && operation.publicationEntry === this.entries.get(oldestKey)) operation.publicationEvicted = true;
       this.entries.delete(oldestKey);
       this.statsCounters.evictions++;
     }
@@ -501,6 +749,8 @@ class StreamResolveCache {
       hits: this.statsCounters.hits,
       misses: this.statsCounters.misses,
       negativeHits: this.statsCounters.negativeHits,
+      deferredHits: this.statsCounters.deferredHits,
+      deferrals: this.statsCounters.deferrals,
       evictions: this.statsCounters.evictions,
       learnedTtls: Object.fromEntries(this.ttl)
     };

@@ -1,10 +1,11 @@
 'use strict';
 
 jest.mock('node-cron', () => ({ schedule: jest.fn() }));
-jest.mock('undici', () => ({ ...jest.requireActual('undici'), request: jest.fn() }));
+// The keep-alive ping goes through the guarded provider transport.
+jest.mock('../src/services/ProviderOutbound', () => ({ ...jest.requireActual('../src/services/ProviderOutbound'), request: jest.fn() }));
 
 const cron = require('node-cron');
-const undici = require('undici');
+const providerOutbound = require('../src/services/ProviderOutbound');
 const CronService = require('../src/services/CronService');
 const IframeDomainRegistry = require('../src/services/IframeDomainRegistry');
 const { preprobeManifestSegments } = require('../src/services/HlsRewriteService');
@@ -17,7 +18,7 @@ describe('CronService keep-alive ping', () => {
   beforeEach(() => {
     process.env.RENDER_EXTERNAL_URL = 'https://addon.example.invalid';
     cron.schedule.mockReset();
-    undici.request.mockReset();
+    providerOutbound.request.mockReset();
     logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     // start() also queues the boot-time syncs on timers; keep them from firing.
     jest.useFakeTimers();
@@ -33,7 +34,7 @@ describe('CronService keep-alive ping', () => {
 
   test('drains the response body so the socket is released', async () => {
     const body = { dump: jest.fn().mockResolvedValue(undefined), destroy: jest.fn() };
-    undici.request.mockResolvedValue({ statusCode: 200, body });
+    providerOutbound.request.mockResolvedValue({ statusCode: 200, body });
 
     const svc = new CronService({});
     svc.runSync = jest.fn().mockResolvedValue(undefined);
@@ -43,7 +44,7 @@ describe('CronService keep-alive ping', () => {
     expect(keepAlive).toBeDefined();
     await keepAlive[1]();
 
-    expect(undici.request).toHaveBeenCalledWith('https://addon.example.invalid/health');
+    expect(providerOutbound.request).toHaveBeenCalledWith('https://addon.example.invalid/health');
     expect(body.dump).toHaveBeenCalledTimes(1);
   });
 });

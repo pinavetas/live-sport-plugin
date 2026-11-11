@@ -49,6 +49,11 @@ jest.spyOn(adaptiveDnsResolver, 'lookup').mockImplementation((host, opts, cb) =>
   if (!address) return cb(Object.assign(new Error('not found'), { code: 'ENOTFOUND' }));
   return cb(null, [{ address, family: 4 }]);
 });
+jest.spyOn(require('dns').promises, 'lookup').mockImplementation(async (host) => {
+  const address = DNS[host];
+  if (!address) throw Object.assign(new Error('not found'), { code: 'ENOTFOUND' });
+  return [{ address, family: 4 }];
+});
 
 let server;
 let baseUrl;
@@ -89,72 +94,10 @@ const MEDIA_PLAYLIST = [
   'seg_1.ts',
 ].join('\n');
 
-describe('/api/manifest (HLS) — SSRF gate', () => {
-  test.each([
-    'http://127.0.0.1:7003/api/health.m3u8',
-    'http://169.254.169.254/latest/meta-data/index.m3u8',
-    'http://192.168.1.1/admin/index.m3u8',
-    'http://localhost:7000/x.m3u8',
-    'http://rebind.attacker.com/live/index.m3u8',
-  ])('blocks %s with 403 and never fetches it', async (target) => {
-    const res = await get(`/api/manifest?url=${q(target)}`);
-    expect(res.status).toBe(403);
-    const body = await res.json();
-    expect(body.error).toBe('Blocked outbound URL');
-    expect(fetchUpstreamManifest).not.toHaveBeenCalled();
-  });
-
-  test('a public CDN playlist is still proxied', async () => {
-    fetchUpstreamManifest.mockResolvedValue(MEDIA_PLAYLIST);
-    const target = 'https://cdn.public-cdn.com/live/ok-1/index.m3u8';
-
-    const res = await get(`/api/manifest.m3u8?url=${q(target)}`);
-    expect(res.status).toBe(200);
-    expect(res.headers.get('content-type')).toContain('mpegurl');
-    const body = await res.text();
-    expect(body).toContain('#EXTM3U');
-    expect(fetchUpstreamManifest).toHaveBeenCalledWith(target, expect.any(String), expect.any(String));
-  });
-
-  test('a re-minted upstream URL is gated too before it is fetched', async () => {
-    const target = 'https://cdn.public-cdn.com/live/expired-1/index.m3u8';
-    fetchUpstreamManifest.mockRejectedValueOnce(Object.assign(new Error('HTTP 403'), { statusCode: 403 }));
-    attemptRemint.mockResolvedValue('http://127.0.0.1:7003/internal/index.m3u8');
-
-    const res = await get(`/api/manifest?url=${q(target)}&rck=${q('provider|match|0')}`);
-    expect(res.status).toBe(403);
-    expect(attemptRemint).toHaveBeenCalled();
-    // Only the original (public) URL was ever fetched.
-    expect(fetchUpstreamManifest).toHaveBeenCalledTimes(1);
-    expect(fetchUpstreamManifest.mock.calls[0][0]).toBe(target);
-  });
-});
-
-describe('DASH manifest proxy — SSRF gate', () => {
-  test.each([
-    '/api/manifest.mpd?url=',
-    '/api/manifest?url=',
-  ])('%s blocks a private .mpd target with 403', async (prefix) => {
-    const res = await get(`${prefix}${q('http://10.0.0.5/live/stream.mpd')}`);
-    expect(res.status).toBe(403);
-    expect(safeFetch).not.toHaveBeenCalled();
-  });
-
-  test('a public .mpd is still proxied', async () => {
-    safeFetch.mockResolvedValue({
-      ok: true,
-      status: 200,
-      text: async () => '<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period/></MPD>',
-    });
-    const target = 'https://cdn.public-cdn.com/dash/stream.mpd';
-
-    const res = await get(`/api/manifest.mpd?url=${q(target)}`);
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain('<BaseURL>https://cdn.public-cdn.com/dash/</BaseURL>');
-    expect(safeFetch).toHaveBeenCalledWith(target, expect.any(Object));
-  });
-});
+// /api/manifest and the DASH proxy no longer gate at the route entry: every
+// upstream fetch goes through safeFetch's guarded transport (guardExternal),
+// which vets each redirect hop and pins the vetted address. That path is
+// covered by guardedPublicEntries.test.js and guardedOutboundTransport.test.js.
 
 describe('ImageService (/img, /img/badge, /img/match) — SSRF gate', () => {
   // Minimal 64x64 PNG header: signature + IHDR, padded past the 32-byte floor.
@@ -197,10 +140,12 @@ describe('ImageService (/img, /img/badge, /img/match) — SSRF gate', () => {
 });
 
 describe('segment pre-probes — SSRF gate', () => {
-  test('a playlist URI pointing at a private address is never probed', async () => {
+  test('probes go through the guarded external transport', async () => {
+    safeFetch.mockResolvedValue({ status: 404, headers: { get: () => null } });
     const svc = new SegmentLengthService({ maxSize: 10, autoProbe: false });
-    await expect(svc.probeContentLength('http://192.168.0.10/tiktokcdn/seg.image')).resolves.toBeNull();
-    expect(safeFetch).not.toHaveBeenCalled();
+    await svc.probeContentLength('https://cdn.public-cdn.com/tiktokcdn/other.image');
+    expect(safeFetch).toHaveBeenCalled();
+    for (const [, opts] of safeFetch.mock.calls) expect(opts.guardExternal).toBe(true);
   });
 
   test('a public segment URI is still probed', async () => {

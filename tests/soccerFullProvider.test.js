@@ -1,4 +1,17 @@
+// These parser/extractor unit tests do not exercise or launch WASM workers.
+jest.mock('../src/services/StreamedWasmPool', () => ({
+  resolveWasmStream: jest.fn(() => { throw new Error('Unexpected WASM execution in provider unit fixture'); }),
+  destroy: jest.fn(async () => {})
+}));
+
 'use strict';
+
+jest.mock('../src/services/ProviderOutbound', () => ({
+  request: jest.fn(() => { throw new Error('Unexpected provider I/O in unit fixture'); }),
+  safeFetch: jest.fn(() => { throw new Error('Unexpected provider I/O in unit fixture'); }),
+  fetch: jest.fn(() => { throw new Error('Unexpected provider I/O in unit fixture'); })
+}));
+
 
 const SoccerFullProvider = require('../src/providers/SoccerFullProvider');
 const MatchEntity = require('../src/domain/MatchEntity');
@@ -132,7 +145,7 @@ describe('SoccerFullProvider', () => {
     });
 
     test('handles missing data-config gracefully', async () => {
-      const undici = require('undici');
+      const undici = require('../src/services/ProviderOutbound');
       jest.spyOn(undici, 'request').mockResolvedValueOnce({
         statusCode: 200,
         body: { text: async () => '<html><body>No player here</body></html>' }
@@ -145,7 +158,7 @@ describe('SoccerFullProvider', () => {
 
   describe('Vidara Extractor (extractVidara)', () => {
     test('extracts streaming_url from backend API', async () => {
-      const undici = require('undici');
+      const undici = require('../src/services/ProviderOutbound');
       const mockStreamUrl = 'https://s8.97bf1.com/hls/test/master.m3u8';
 
       jest.spyOn(undici, 'request').mockResolvedValueOnce({
@@ -158,7 +171,7 @@ describe('SoccerFullProvider', () => {
     });
 
     test('returns null on API failure', async () => {
-      const undici = require('undici');
+      const undici = require('../src/services/ProviderOutbound');
       jest.spyOn(undici, 'request').mockResolvedValueOnce({
         statusCode: 500,
         body: { text: async () => 'Server error' }
@@ -180,7 +193,7 @@ describe('SoccerFullProvider', () => {
 
       jest.spyOn(provider.fetchPage, 'fire').mockResolvedValueOnce(fakeMatchHtml);
 
-      const undici = require('undici');
+      const undici = require('../src/services/ProviderOutbound');
       // SID 1 -> Vixeo
       // SID 2 -> embed.st (Live stream, should be dropped)
       jest.spyOn(undici, 'request')
@@ -232,7 +245,7 @@ describe('SoccerFullProvider', () => {
       expect(isReplayMatch(match)).toBe(true);
     });
 
-    test('merges seamlessly with existing ReplayZone fixture and preserves default artwork', () => {
+    test('keeps an undated SoccerFull replay separate until fixture date evidence exists', () => {
       const aggregator = container.resolve('matchAggregator');
       const rzMatch = {
         id: 'rz_coventry-city-vs-newcastle-united-12-10-2026',
@@ -266,8 +279,10 @@ describe('SoccerFullProvider', () => {
       // 2. Date unanchored
       expect(sfMatch.date).toBe('');
 
-      // 3. MatchAggregator recognizes as same event
-      expect(aggregator.isSameEvent(rzMatch, sfMatch)).toBe(true);
+      // Same teams alone cannot identify which archived meeting this is.
+      expect(aggregator.isSameEvent(rzMatch, sfMatch)).toBe(false);
+      // A real supplied fixture date can establish the compatible meeting.
+      expect(aggregator.isSameEvent(rzMatch, { ...sfMatch, date: rzMatch.date })).toBe(true);
     });
     test('ReplayZone strictly excludes soccer entries so SoccerFull is the dedicated provider', async () => {
       const ReplayZoneProvider = require('../src/providers/ReplayZoneProvider');
@@ -302,7 +317,7 @@ describe('SoccerFullProvider', () => {
     });
 
     test('extracts OK.ru direct 1080p MP4 and Auto HLS streams with okcdn.ru URLs', async () => {
-      const undici = require('undici');
+      const undici = require('../src/services/ProviderOutbound');
       const fakeOkHtml = `
         <div data-module="OKVideo" data-options='{"flashvars":{"metadata":"{\\"videos\\":[{\\"name\\":\\"full\\",\\"url\\":\\"https://vd517.okcdn.ru/video.mp4\\"},{\\"name\\":\\"sd\\",\\"url\\":\\"https://vd517.okcdn.ru/video_sd.mp4\\"}],\\"hlsManifestUrl\\":\\"https://vd517.okcdn.ru/video.m3u8\\"}"}}'></div>
       `;
@@ -460,6 +475,102 @@ describe('SoccerFullProvider', () => {
       if (ltvIdx !== -1) {
         expect(hlsIdx).toBeLessThan(ltvIdx);
       }
+    });
+  });
+
+  describe('ArtPlayer & HGCloud Stream Resolution', () => {
+    test('extracts links.hls2 from packed hgcloud fixture with zero network hops', async () => {
+      const fs = require('fs');
+      const path = require('path');
+      const fixturePath = path.join(__dirname, 'fixtures', 'hgcloud-packed.txt');
+      const packedContent = fs.readFileSync(fixturePath, 'utf8');
+
+      const undici = require('../src/services/ProviderOutbound');
+      jest.spyOn(undici, 'request').mockImplementation(async (url) => {
+        if (typeof url === 'string' && url.includes('hgcloud.to')) {
+          return {
+            statusCode: 200,
+            body: { text: async () => '<html><body><script src="/main.js"></script></body></html>' }
+          };
+        }
+        if (typeof url === 'string' && url.includes('audinifer.com')) {
+          return {
+            statusCode: 200,
+            body: { text: async () => `<html><body><script>${packedContent}</script></body></html>` }
+          };
+        }
+        return { statusCode: 404, body: { text: async () => '' } };
+      });
+
+      const streams = await provider.extractHgCloud('https://hgcloud.to/e/hb7sq8m5o1hh', '1st Half');
+      expect(streams).toHaveLength(1);
+      const s = streams[0];
+      expect(s).toBeInstanceOf(StreamEntity);
+      expect(s.name).toBe('SoccerFull');
+      expect(s.title).toBe('SoccerFull | 1st Half (Auto)');
+      expect(s.resolution).toBe('Auto');
+      expect(s.url).toContain('https://g4vsrqvtrj.cdn-centaurus.com/hls2/01/14931/hb7sq8m5o1hh_o/master.m3u8');
+      expect(s.behaviorHints.notWebReady).toBe(false);
+      expect(s.behaviorHints.proxyHeaders.request.Referer).toBe('https://audinifer.com/');
+      expect(s.behaviorHints.proxyHeaders.request.Origin).toBe('https://audinifer.com');
+    });
+
+    test('extracts ArtPlayer /hls/<sid>.m3u8 shape when no iframe is present', async () => {
+      const undici = require('../src/services/ProviderOutbound');
+      const artHtml = '<!doctype html><html><body><div class="artplayer-app"></div><script>(function(){ var m3u8Url = "/hls/18113.m3u8"; var art = new Artplayer({ url: m3u8Url }); })();</script></body></html>';
+
+      jest.spyOn(undici, 'request').mockResolvedValueOnce({
+        statusCode: 200,
+        body: { text: async () => artHtml }
+      });
+
+      const streams = await provider._resolveServerStream({ sid: '18113', label: '1st Half' }, 'https://soccerfull.net/match.html');
+      expect(streams).toHaveLength(1);
+      const s = streams[0];
+      expect(s.name).toBe('SoccerFull');
+      expect(s.title).toBe('SoccerFull | 1st Half (Auto)');
+      expect(s.resolution).toBe('Auto');
+      expect(s.url).toContain('/api/soccerfull/manifest?url=');
+      expect(s.url).toContain(encodeURIComponent('https://soccerfull.net/hls/18113.m3u8'));
+      expect(s.behaviorHints.notWebReady).toBe(false);
+      expect(s.isTikTok).toBe(true);
+    });
+    test('extracts direct CDN m3u8 URL without manifest proxy wrapping when hosted externally', async () => {
+      const undici = require('../src/services/ProviderOutbound');
+      const extCdnUrl = 'https://s12-s501740.s1q2105.com/hls/testcode/master.m3u8?token=123';
+      const artHtml = '<!doctype html><html><body><div class="artplayer-app"></div><script>var m3u8Url = "' + extCdnUrl + '";</script></body></html>';
+
+      jest.spyOn(undici, 'request')
+        .mockResolvedValueOnce({
+          statusCode: 200,
+          body: { text: async () => artHtml }
+        })
+        .mockResolvedValueOnce({
+          statusCode: 200,
+          body: { text: async () => '#EXTM3U' }
+        });
+
+      const streams = await provider._resolveServerStream({ sid: '18313', label: 'EXTENDED in En' }, 'https://soccerfull.net/match.html');
+      expect(streams).toHaveLength(1);
+      const s = streams[0];
+      expect(s.url).toBe(extCdnUrl);
+      expect(s.url).not.toContain('/api/soccerfull/manifest');
+      expect(s.behaviorHints.notWebReady).toBe(false);
+      expect(s.behaviorHints.proxyHeaders.request.Referer).toBe('https://soccerfull.net/');
+    });
+
+    test('ignores post-id when default iframe /play/<sid> exists to avoid cross-match pollution', () => {
+      const realMatchHtml = `
+        <div id="video" post-id="4789"></div>
+        <iframe src="/play/18308" width="100%"></iframe>
+        <a href="?sid=18308" class="video-server bt_active">Full Match</a>
+        <a href="?sid=18300" class="video-server">Full Match</a>
+      `;
+      const servers = provider._extractServerOptions(realMatchHtml);
+      const sids = servers.map(s => s.sid);
+      expect(sids).toContain('18308');
+      expect(sids).toContain('18300');
+      expect(sids).not.toContain('4789');
     });
   });
 });

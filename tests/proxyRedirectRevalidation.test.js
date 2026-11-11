@@ -22,6 +22,13 @@ jest.spyOn(adaptiveDnsResolver, 'lookup').mockImplementation((host, opts, cb) =>
   if (!address) return cb(Object.assign(new Error('not found'), { code: 'ENOTFOUND' }));
   return cb(null, [{ address, family: 4 }]);
 });
+// The guard asks system DNS first and only falls back to the adaptive resolver
+// on a sinkhole/NXDOMAIN answer, so stub both or real DNS leaks into the test.
+jest.spyOn(require('dns').promises, 'lookup').mockImplementation(async (host) => {
+  const address = DNS[host];
+  if (!address) throw Object.assign(new Error('not found'), { code: 'ENOTFOUND' });
+  return [{ address, family: 4 }];
+});
 
 const START = 'https://cdn.public-cdn.com/video/1.mp4';
 const EDGE = 'https://edge.public-cdn.com/video/1.mp4';

@@ -1,9 +1,15 @@
-name: Auto Deploy to VPS
+name: Deploy to VPS
 
+# Manual only. This workflow used to fire on every push to main/stable, which
+# meant whatever happened to be on that branch was live on the box a minute
+# later. Deploy is now an explicit action:
+#
+#   GitHub -> Actions -> "Deploy to VPS" -> Run workflow -> pick the branch
+#
+# The branch selector is what the job pulls: BRANCH comes from github.ref_name,
+# so dispatching with stable deploys stable and nothing else. Pushing stays a
+# branch-only operation and never touches production.
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
@@ -20,14 +26,21 @@ jobs:
           script_stop: true
           script: |
             cd /root/nuvio-live-sports
+            # Deploy the branch that triggered this run. The production checkout
+            # lives on stable, so a hardcoded "main" here would merge main into it
+            # instead of pulling the branch that was actually pushed.
+            BRANCH="${{ github.ref_name }}"
 
+            echo "==> Deploying branch $BRANCH"
             echo "==> Resetting any broken merge state..."
             git reset --hard HEAD
+            git fetch origin "$BRANCH"
+            git checkout "$BRANCH"
 
             LOCK_BEFORE="$(md5sum package-lock.json 2>/dev/null | awk '{print $1}')"
 
-            echo "==> Pulling latest changes from main..."
-            git pull origin main
+            echo "==> Pulling latest changes from $BRANCH..."
+            git pull --ff-only origin "$BRANCH"
 
             LOCK_AFTER="$(md5sum package-lock.json 2>/dev/null | awk '{print $1}')"
 
@@ -66,8 +79,8 @@ jobs:
               echo ""
               echo "  Finish this deploy by hand (brief restart, done deliberately):"
               echo "    cd /root/nuvio-live-sports && pm2 stop nuvio-sports \\"
-              echo "      && npm install --no-audit --no-fund && npm run build \\"
-              echo "      && pm2 start nuvio-sports && pm2 save"
+              echo "      && npm install --no-audit --no-fund && npm run build:local \\"
+              echo "      && pm2 start ecosystem.config.js --update-env && pm2 save"
               echo "================================================================"
               echo ""
               exit 1
@@ -75,16 +88,51 @@ jobs:
 
             echo "==> Dependencies unchanged - skipping npm install (nothing kills workers)."
 
-            echo "==> Building distribution bundle (atomic staging to prevent SIGSEGV in live workers)..."
-            rm -rf dist_build
-            npx @vercel/ncc build src/index.js -o dist_build --minify -e sharp && npx -y copyfiles -f "src/providers/*.wasm" "src/providers/*.js" dist_build && npx -y copyfiles -u 2 "resolver/src/**/*" dist_build/src && node -e "require('fs').writeFileSync('dist_build/src/package.json', JSON.stringify({type:'module'},null,2))" && npx -y copyfiles -u 1 "public/**/*" dist_build/public && npx -y copyfiles -f "src/data/*.json" dist_build/data && npx -y copyfiles -f "src/data/*.json" dist_build/src/data
-            rm -rf dist_old
-            mv dist dist_old 2>/dev/null || true
-            mv dist_build dist
+            echo "==> Verifying candidate timezone data before build or cluster changes..."
+            export ICU_TIMEZONE_FILES_DIR="${ICU_TIMEZONE_FILES_DIR:-$PWD/.timezone-data/2026f-le}"
+            node scripts/prepare-timezone-data.cjs --directory "$ICU_TIMEZONE_FILES_DIR"
+            node scripts/check-timezone-runtime.cjs
 
-            echo "==> Reloading PM2 cluster (rolling - workers restart one at a time)..."
-            pm2 reload nuvio-sports
-            rm -rf dist_old 2>/dev/null || true
+            echo "==> Building distribution bundle (atomic staging to prevent SIGSEGV in live workers)..."
+            rm -rf dist.next
+            npx @vercel/ncc build src/index.js -o dist.next --minify -e sharp && npx -y copyfiles -f "src/providers/*.wasm" "src/providers/*.js" dist.next && node scripts/copy-guarded-worker-deps.js dist.next && npx -y copyfiles -u 2 "resolver/src/**/*" dist.next/src && node -e "require('fs').writeFileSync('dist.next/src/package.json', JSON.stringify({type:'module'},null,2))" && npx -y copyfiles -u 1 "public/**/*" dist.next/public && npx -y copyfiles -f "src/data/*.json" dist.next/data && npx -y copyfiles -f "src/data/*.json" dist.next/src/data
+
+            echo "==> Verifying the staged artifact before it can reach the cluster..."
+            node --check dist.next/index.js
+            # Guard the invariant this deploy depends on: the bundle must resolve its
+            # cache from MATCHES_CACHE_PATH at runtime. ncc rewrites the source's
+            # path.join(process.cwd(), 'data') and drops the "data" segment, so if
+            # this branch ever disappears the app silently reverts to writing inside
+            # dist/ - the exact drift this deploy exists to remove.
+            if ! grep -q 'MATCHES_CACHE_PATH' dist.next/index.js; then
+              echo "ERROR: bundle has no MATCHES_CACHE_PATH branch - refusing to deploy"
+              exit 1
+            fi
+
+            # A host with nothing at the configured path would boot an empty catalog
+            # until the first sync. The bundle carries a copy (ncc traces data/), so
+            # use it rather than starting blank. After the first sync this never runs.
+            if [ ! -s data/matches_cache.json ]; then
+              if [ -s dist.next/matches_cache.json ]; then
+                cp -p dist.next/matches_cache.json data/matches_cache.json
+                echo "    primed data/matches_cache.json from the bundle"
+              else
+                echo "    WARNING: no cache at data/ and none in the bundle - will boot empty until the first sync"
+              fi
+            fi
+
+            echo "==> Swapping trees (rename only; running workers keep their inode)..."
+            rm -rf dist.prev
+            mv dist dist.prev 2>/dev/null || true
+            mv dist.next dist
+
+            echo "==> Reloading PM2 cluster with the ecosystem env (rolling)..."
+            # --update-env is required, not cosmetic: without it pm2 reuses the env
+            # stored in the process list, so an env block change deploys the new code
+            # while the setting stays inert (which is how MATCHES_CACHE_PATH would
+            # have shipped doing nothing). It also applies the file's 1500M ceiling.
+            pm2 reload ecosystem.config.js --update-env
+            rm -rf dist.prev 2>/dev/null || true
 
             echo "==> Deployment complete. Cluster stayed up throughout."
             echo "==> Health:"

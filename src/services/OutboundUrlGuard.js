@@ -275,7 +275,7 @@ function isReservedHostname(hostname) {
 
 // ─── Default resolver ────────────────────────────────────────────────────────
 
-async function defaultResolve(hostname) {
+function adaptiveResolve(hostname) {
   return new Promise((resolve, reject) => {
     adaptiveDnsResolver.lookup(hostname, { all: true, verbatim: true }, (err, records) => {
       if (err) return reject(err);
@@ -285,6 +285,33 @@ async function defaultResolve(hostname) {
       return resolve([typeof records === 'string' ? records : records.address]);
     });
   });
+}
+
+// System DNS first. Only when the answer looks like an ISP block (a sinkhole
+// address, or NXDOMAIN / EAI_AGAIN for a public name) is the adaptive resolver
+// (DNS-over-HTTPS) consulted. Its answer is vetted by the same gate, so a name
+// that really points at loopback/private space is still rejected.
+async function defaultResolve(hostname) {
+  let addresses = null;
+  let systemErr = null;
+  try {
+    const records = await dns.promises.lookup(hostname, { all: true, verbatim: true });
+    addresses = records.map(record => record.address);
+  } catch (err) {
+    systemErr = err;
+  }
+  const sinkholed = Array.isArray(addresses) && addresses.some(ip => adaptiveDnsResolver.isSinkholedIp(ip));
+  const blockedLookup = systemErr && (systemErr.code === 'ENOTFOUND' || systemErr.code === 'EAI_AGAIN');
+  if (!sinkholed && !blockedLookup) {
+    if (systemErr) throw systemErr;
+    return addresses;
+  }
+  try {
+    return await adaptiveResolve(hostname);
+  } catch (_) {
+    if (systemErr) throw systemErr;
+    return addresses;
+  }
 }
 
 // ─── The gate ────────────────────────────────────────────────────────────────
@@ -320,7 +347,7 @@ async function checkOutboundUrl(rawUrl, options = {}) {
     return { ok: false, reason: 'protocol_not_allowed', detail: parsed.protocol.replace(/:$/, '') };
   }
 
-  let hostname = parsed.hostname.toLowerCase();
+  let hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
   if (hostname.startsWith('[') && hostname.endsWith(']')) hostname = hostname.slice(1, -1);
   if (!hostname) {
     return { ok: false, reason: 'invalid_url', detail: 'missing hostname' };
@@ -357,6 +384,9 @@ async function checkOutboundUrl(rawUrl, options = {}) {
   }
 
   for (const address of addresses) {
+    if (!net.isIP(address)) {
+      return { ok: false, reason: 'invalid_dns_answer', detail: hostname };
+    }
     const label = classifyAddress(address);
     if (label) return { ok: false, reason: 'blocked_address', detail: `${address} (${label})` };
   }

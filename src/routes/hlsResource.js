@@ -21,6 +21,10 @@ const byteRangeSigner = require('../services/ByteRangeSigner');
  * Server outbound bandwidth: 0 KB/s.
  */
 function handleSegmentRedirect(req, res) {
+  if (!byteRangeSigner.enabled) {
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(503).send('Signed HLS redirects are unavailable');
+  }
   const token = req.params.token;
   const psig = req.query.psig;
 

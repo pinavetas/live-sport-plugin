@@ -77,7 +77,7 @@ const REPLAY_SPORTS = [
 ];
 
 // Sources whose matches qualify for the replay retention window and replay hubs.
-const REPLAY_SOURCES = new Set(['replayzone', 'livetv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive']);
+const REPLAY_SOURCES = new Set(['replayzone', 'livetv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive', 'leaf_recap']);
 
 // Static tables hoisted to module scope: mapMatchToMetaPreview runs per meta
 // per page, and allocating these per call churned ~7 RegExp objects + a 15-key
@@ -580,6 +580,13 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
   if (providerThumb && (/ppvservices\.st/i.test(providerThumb) || /unique-tournament/i.test(providerThumb) || /ondemand\.st/i.test(providerThumb))) providerThumb = null;
   if (providerLogo && (/ppvservices\.st/i.test(providerLogo) || /unique-tournament/i.test(providerLogo) || /ondemand\.st/i.test(providerLogo))) providerLogo = null;
 
+  // Filter out PitSport posters/thumbnails for non-motorsport events
+  const isMotorsportOrF1 = match.category === 'motorsport' || /formula|rally|supercar|motocross|karting|motor/i.test(match.category || '');
+  if (!isMotorsportOrF1) {
+    if (providerPoster && /pitsport/i.test(providerPoster)) providerPoster = null;
+    if (providerThumb && /pitsport/i.test(providerThumb)) providerThumb = null;
+  }
+
   // 24/7 TV channels are continuous network stations (Fox Cricket, Willow, NHL Network, etc.),
   // not sporting fixtures with posters. Always generate clean official TV network cards.
   if (match.category === 'networks') {
@@ -605,7 +612,7 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
   // Check if we have a locally defined, verified hi-res logo for this specific channel name.
   // ONLY for continuous 24/7 TV channels (e.g. networks catalog) — NEVER discard provider thumbnails
   // for sporting events, motorsport, or replays!
-  const is247Channel = (match.category === 'networks' || match.isChannel || (match.id && (match.id.startsWith('dlv_ch_') || match.id.startsWith('cdn_ch_') || match.id.startsWith('sktech_ch_') || match.id.startsWith('vavoo_') || match.id.includes('_ch_')))) && !isMatchup;
+  const is247Channel = (match.category === 'networks' || match.isChannel || (match.id && (match.id.startsWith('dlv_ch_') || match.id.startsWith('cdn_ch_') || match.id.startsWith('sktech_ch_') || match.id.startsWith('vavoo_') || match.id.startsWith('scorezone_ch_') || match.id.includes('_ch_')))) && !isMatchup;
   const customLogo = (is247Channel || (!isReplay && !isMotorsport)) ? getChannelLogo(match.title) : null;
   if (customLogo && !isMatchup && !isReplay && !isMotorsport) {
     isChannelThumbnail = false; // We want to use it as the main artwork, not a tiny badge
@@ -871,7 +878,7 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
     const getReplaySourceRank = (s) => {
       const name = (s.name || '').toLowerCase();
       const prov = s.source || '';
-      if (prov === 'soccerfull' || prov === 'replayzone' || prov === 'fullraces' || prov === 'basketballvideo' || prov === 'nflvideo' || prov === 'hockeyreplays') {
+      if (prov === 'soccerfull' || prov === 'replayzone' || prov === 'fullraces' || prov === 'basketballvideo' || prov === 'nflvideo' || prov === 'hockeyreplays' || prov === 'mlblive' || prov === 'leaf_recap') {
         if (/part\s*1|1st\s*half|full/i.test(name)) return 1;
         if (/part\s*2|2nd\s*half/i.test(name)) return 2;
         return 3;
@@ -960,12 +967,41 @@ const _metaCache = new Map(); // key → { data, expiresAt, revision }
 const HUB_META_CACHE_MAX = 24;
 const _hubMetaCache = new Map(); // key → { data, expiresAt, revision }
 
+let _liveOverlayRef;
+/**
+ * Resolve the live overlay service once per process.
+ *
+ * Guarded rather than required: catalog.js is also loaded by tests that build a
+ * partial container, and a missing registration must degrade to "no overlay"
+ * (the exact pre-feature behaviour) instead of throwing on a request path.
+ */
+function _liveOverlay() {
+  if (_liveOverlayRef !== undefined) return _liveOverlayRef;
+  try {
+    if (typeof container.hasRegistration === 'function' && !container.hasRegistration('liveOverlayService')) {
+      _liveOverlayRef = null;
+      return null;
+    }
+    _liveOverlayRef = container.resolve('liveOverlayService') || null;
+  } catch (_) {
+    _liveOverlayRef = null;
+  }
+  return _liveOverlayRef;
+}
+
 function _metaCacheRevision() {
   const cacheService = container.resolve('cacheService');
   // Poll for cross-worker snapshots before trusting a memo hit. This returns
   // the internal read-only array without cloning or projecting any matches.
   if (typeof cacheService.getMatchesReadOnly === 'function') cacheService.getMatchesReadOnly();
-  return cacheService.rev || 0;
+  // The overlay is a second source of truth for stream availability. Meta
+  // projections do not list sources today, so this is an invariant guard rather
+  // than a bug fix: it stops a memoised projection from ever disagreeing with
+  // what /streams is about to return if availability reaches the preview later.
+  // Cheap - getRevision() polls the shared file, throttled to 1s.
+  const overlay = _liveOverlay();
+  const overlayRev = overlay ? overlay.getRevision() : 0;
+  return `${cacheService.rev || 0}:${overlayRev}`;
 }
 
 function _metaCacheKey(id, config, responseType) {
@@ -1134,7 +1170,7 @@ async function buildReplayHubMeta(id, config = {}) {
 
     const dateObj = new Date(targetDate + 'T00:00:00Z');
     const displayDate = !isNaN(dateObj.getTime())
-      ? dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+      ? dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
       : targetDate;
 
     const titleName = sportDef ? `${sportDef.name} — 📅 ${displayDate}` : `📅 ${displayDate} Replays`;
@@ -1242,7 +1278,7 @@ async function buildReplayHubMeta(id, config = {}) {
     const seasonNum = sIdx + 1;
     const dateObj = new Date(dStr + 'T00:00:00Z');
     const displayDate = !isNaN(dateObj.getTime())
-      ? dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+      ? dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
       : dStr;
 
     seasons.push({
@@ -1298,7 +1334,7 @@ async function buildReplayHubMeta(id, config = {}) {
   const dateGuide = sortedDates.slice(0, 5).map((d, i) => {
     const dobj = new Date(d + 'T00:00:00Z');
     const dname = !isNaN(dobj.getTime())
-      ? dobj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+      ? dobj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
       : d;
     return `• Season ${i + 1}: ${dname} (${dateGroups.get(d).length} matches)`;
   }).join('\n');
@@ -1637,7 +1673,7 @@ async function handleCatalogUncached(type, id, extra, config) {
       const count = dateMap.get(dStr);
       const dateObj = new Date(dStr + 'T00:00:00Z');
       const displayDate = !isNaN(dateObj.getTime())
-        ? dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+        ? dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
         : dStr;
       
       const isSportSpecific = selectedSport && selectedSport !== 'all';

@@ -10,8 +10,100 @@ const { BASE_URL } = require('../config');
 const cheerio = require('cheerio');
 const os = require('os');
 const { BREAKER_TIMEOUT_MS } = require('../services/CircuitBreakerService');
+const { createHash } = require('node:crypto');
+const { checkDaddyLiveMedia } = require('../services/DaddyLiveMediaCheck');
+const { inconclusiveErrorReason, markInconclusiveStreams } = require('../services/StreamResolutionOutcome');
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36';
+const MEDIA_CHECK_BUDGET_MS = 1200;
+
+function throwIfStopped(control = {}) {
+  control.signal?.throwIfAborted();
+  control.mediaController?.signal.throwIfAborted();
+}
+
+function discoverySignal(control = {}) {
+  return AbortSignal.any([
+    AbortSignal.timeout(6000),
+    ...(control.signal ? [control.signal] : []),
+    ...(control.mediaController ? [control.mediaController.signal] : [])
+  ]);
+}
+
+function hardResolutionFailure(error) {
+  if (inconclusiveErrorReason(error)) return false;
+  try {
+    const seen = new Set();
+    for (let item = error; item && typeof item === 'object'; item = item.cause) {
+      if (seen.has(item) || seen.size >= 8) return true;
+      seen.add(item);
+      if (item.code === 'ERR_OUTBOUND_BLOCKED' || item.isFatal === true) return true;
+    }
+    return false;
+  } catch (_) { return true; }
+}
+
+function preserveResolutionFailure(error, control) {
+  control.signal?.throwIfAborted();
+  if (hardResolutionFailure(error)) throw error;
+  throwIfStopped(control);
+  if (inconclusiveErrorReason(error)) throw error;
+}
+
+async function boundedDiscovery(run, signal) {
+  signal.throwIfAborted();
+  let abort;
+  try {
+    return await Promise.race([Promise.resolve().then(() => {
+      signal.throwIfAborted();
+      return run();
+    }), new Promise((_, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort();
+    })]);
+  } finally { signal.removeEventListener('abort', abort); }
+}
+
+function discoveryRequest(provider, url, options, control) {
+  const signal = discoverySignal(control);
+  return boundedDiscovery(() => provider.proxyFetch(url, { ...options, signal }), signal);
+}
+
+function discoveryText(response, control) {
+  return boundedDiscovery(
+    () => typeof response.text === 'function' ? response.text() : response.text,
+    discoverySignal(control)
+  );
+}
+
+// A channel broadcasts many events, and one event can have many channels. Its
+// first feed therefore cannot identify the fixture. Retain that old ID as a
+// lookup alias, but key new cards on the explicit event/squad/kickoff metadata.
+function fixtureId({ title, category, date, league, team1, team2 }) {
+  const text = value => String(value || '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
+  const identity = [title, category, String(date), league, team1?.name, team2?.name].map(text);
+  return `dlv_event_${createHash('sha256').update(JSON.stringify(identity)).digest('hex').slice(0, 24)}`;
+}
+
+function explicitTitleDate(title, time, currentYear) {
+  const dayFirst = title.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)(?:,?\s+(\d{4}))?\b/i);
+  const monthFirst = dayFirst ? null : title.match(/\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?\b/i);
+  const found = dayFirst || monthFirst;
+  if (!found) return null;
+  const day = Number(dayFirst ? found[1] : found[2]);
+  const monthText = dayFirst ? found[2] : found[1];
+  const month = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(monthText.slice(0, 3).toLowerCase());
+  const year = found[3] ? Number(found[3]) : currentYear;
+  const clock = String(time || '00:00').match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+  if (!clock) return { valid: false };
+  const timestamp = Date.UTC(year, month, day, Number(clock[1]), Number(clock[2]));
+  const date = new Date(timestamp);
+  // Date.UTC normalizes February 30 into March; an explicit bad date must not
+  // become either that other day or the enclosing schedule's date.
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month || date.getUTCDate() !== day) return { valid: false };
+  return { valid: true, timestamp };
+}
 
 function decodeHtmlEntities(str) {
   if (!str || typeof str !== 'string') return '';
@@ -70,9 +162,48 @@ function _cleanManifestUrl(url) {
     .replace(/[\\"']+$/, '');     // trailing JSON/quote leftovers
 }
 
+const CLOAKED_STREAM_PATTERN = /(?:cowedd\d*[a-z0-9]*|wedd\d+[a-z0-9]*|tiktokcdn|tiktokx-origin|\.png(?:$|\?))/i;
+
+function isCloakedStream(url) {
+  if (!url || typeof url !== 'string') return false;
+  return CLOAKED_STREAM_PATTERN.test(url);
+}
+
 function isTikTokCloakedStream(url) {
   if (!url || typeof url !== 'string') return false;
-  return /cowedd4855ws|tiktokcdn|tiktokx-origin/i.test(url);
+  return isCloakedStream(url);
+}
+
+/**
+ * Embed hosts that can no longer serve a manifest.
+ *
+ * `ksohls.ru` hosted the "premiumtv/daddyhd" player skin - the HD variant of the
+ * same player that now runs on dembed.st. It answered 410 for the `/player`
+ * folder's iframes and the domain has since been dropped from DNS (NXDOMAIN),
+ * so every probe is a guaranteed miss: one ~650 KB folder page (the iframe sits
+ * at byte ~649 000 of 682 000, so the whole padding is downloaded) plus a doomed
+ * DNS/TLS cycle per uncached channel.
+ *
+ * Only the HOST is skipped, never the folder: `player` must stay first because
+ * it is the only route to the plain-TS supplier (wideiptv.top -> cdn.hdm1.net),
+ * which costs the addon no bandwidth at all.
+ *
+ * Extend with DADDYLIVE_DEAD_EMBED_HOSTS="host1,host2".
+ */
+const DEAD_EMBED_HOSTS = new Set(
+  String(process.env.DADDYLIVE_DEAD_EMBED_HOSTS || 'ksohls.ru,www.ksohls.ru')
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean)
+);
+
+function isDeadEmbedHost(urlOrHost) {
+  if (!urlOrHost || typeof urlOrHost !== 'string') return false;
+  let host = urlOrHost;
+  if (/^https?:\/\//i.test(urlOrHost)) {
+    try { host = new URL(urlOrHost).hostname; } catch (_) { return false; }
+  }
+  return DEAD_EMBED_HOSTS.has(String(host).toLowerCase());
 }
 
 /**
@@ -99,12 +230,12 @@ function isTikTokCloakedStream(url) {
  */
 function resolveSyncTimeoutMs() {
   const fixed = parseInt(process.env.DADDYLIVE_SYNC_TIMEOUT_MS, 10);
-  if (Number.isFinite(fixed) && fixed > 0) return fixed;
+  if (Number.isFinite(fixed) && fixed > 0) return Math.min(fixed, 30000);
 
   // 12000 is the value these fetches used before f15846b lowered them to
   // 6000. Restored rather than replaced: the original budget was known-good,
   // and 6000 is what made DaddyLive fail first under load.
-  const baseMs = parseInt(process.env.SYNC_TIMEOUT_BASE_MS, 10) || 12000;
+  const baseMs = Math.max(1, parseInt(process.env.SYNC_TIMEOUT_BASE_MS, 10) || 12000);
   // The circuit breaker aborts a wrapped call at BREAKER_TIMEOUT_MS, so an
   // inner timeout at or above it is silently truncated - the configured
   // ceiling would be unreachable and the breaker, not this setting, would
@@ -125,7 +256,7 @@ function resolveSyncTimeoutMs() {
   // The floor stays at the restored baseline, so an idle box is never worse
   // off than the pre-regression behaviour.
   const scaled = Math.round(baseMs + Math.max(0, load) * 2000);
-  return Math.max(baseMs, Math.min(scaled, maxMs));
+  return Math.min(30000, Math.max(baseMs, Math.min(scaled, maxMs)));
 }
 
 // Mirror racing for the sync fetches (schedule / 24-7 channels).
@@ -216,6 +347,10 @@ class DaddyLiveProvider extends BaseProvider {
            /\bevent\s*(sd\s*)?stream\b/i.test(clean);
   }
 
+  static isCloakedStream(url) {
+    return isCloakedStream(url);
+  }
+
   constructor(opts = {}) {
     super(opts);
     this.name = 'DaddyLive';
@@ -228,8 +363,12 @@ class DaddyLiveProvider extends BaseProvider {
     // even when the schedule fails, so 'did it return anything' is not a
     // usable health signal - fixtures and channels fail independently.
     this.lastScheduleOk = null;
-    this.baseDomains = ['https://thedaddy.pk', 'https://dlive.sx', 'https://dlstreams.st'];
-    this.folders = ['player', 'stream', 'watch', 'plus', 'casting', 'cast', 'hub'];
+    this.baseDomains = ['https://thedaddy.li'];
+    // `player` stays FIRST: it is the only folder that can reach the plain-TS
+    // supplier (wideiptv.top -> cdn.hdm1.net), whose segments are served as
+    // video/MP2T straight to the player, so it costs the addon no bandwidth.
+    // Its other target (ksohls.ru) is dead and is skipped per host below.
+    this.folders = ['player', 'cast', 'plus', 'casting'];
     this._decoded = new Map(); // sourceId -> { streams, expiresAt }
 
     // Self-healing domain knowledge. The container injects `iframeDomainRegistry`
@@ -264,10 +403,15 @@ class DaddyLiveProvider extends BaseProvider {
             },
             signal,
             timeoutMs,
+            maxBodyBytes: 8 * 1024 * 1024,
+            diagnosticOwner: 'catalog',
             attempts: 1
           });
+          if (homeRes && homeRes.bodyTruncated) throw new Error('DaddyLive schedule exceeds its 8 MiB limit');
           if (homeRes && homeRes.ok) {
             const homeHtml = typeof homeRes.text === 'function' ? await homeRes.text() : homeRes.text;
+            const sizeBytes = typeof homeHtml === 'string' ? Buffer.byteLength(homeHtml, 'utf8') : 0;
+            if (sizeBytes > 5 * 1024 * 1024) console.warn(`[${this.name}] Schedule exceeds 5 MiB`, JSON.stringify({ sizeBytes }));
             const parsed = this.parseScheduleHtml(homeHtml);
             if (parsed) return parsed;
           }
@@ -285,6 +429,7 @@ class DaddyLiveProvider extends BaseProvider {
             },
             signal,
             timeoutMs,
+            diagnosticOwner: 'catalog',
             attempts: 1
           });
           if (res.ok) {
@@ -374,7 +519,8 @@ class DaddyLiveProvider extends BaseProvider {
    * @returns {{url: string, referer: string}|null} referer is the page the
    *          manifest was served from, so the caller can set Referer correctly.
    */
-  async _resolveFromHtml(html, pageUrl, depth = 0) {
+  async _resolveFromHtml(html, pageUrl, depth = 0, control = {}) {
+    throwIfStopped(control);
     if (!html || typeof html !== 'string') return null;
 
     // 1. DaddyLive _econfig
@@ -438,12 +584,11 @@ class DaddyLiveProvider extends BaseProvider {
       const sep = phpUrl.includes('?') ? '&' : '?';
       const callUrl = /[?&]id=/.test(phpUrl) ? phpUrl : phpUrl + sep + 'id=' + channelId;
       try {
-        const pr = await this.proxyFetch(callUrl, {
+        const pr = await discoveryRequest(this, callUrl, {
           headers: { 'User-Agent': UA, 'Referer': pageUrl, 'Accept': 'application/json,text/plain,*/*' },
-          signal: AbortSignal.timeout(6000)
-        });
+        }, control);
         if (pr.ok) {
-          const body = await pr.text();
+          const body = await discoveryText(pr, control);
           let target = null;
           try {
             const j = JSON.parse(body);
@@ -453,7 +598,7 @@ class DaddyLiveProvider extends BaseProvider {
             if (m) target = m[1];
           }
           if (target) {
-            const nested = await this._resolveFromUrl(target, pageUrl, depth + 1);
+            const nested = await this._resolveFromUrl(target, pageUrl, depth + 1, control);
             if (nested) {
               // This page needed the JSON hop; remember that about THIS host so a
               // newly-rotated wrapper is recognised next time.
@@ -462,7 +607,7 @@ class DaddyLiveProvider extends BaseProvider {
             }
           }
         }
-      } catch (_) {}
+      } catch (error) { preserveResolutionFailure(error, control); }
     }
 
     // 5. Nested iframe (recursive, bounded).
@@ -475,7 +620,7 @@ class DaddyLiveProvider extends BaseProvider {
         if (raw.startsWith('//')) return 'https:' + raw;
         if (raw.startsWith('/')) { try { return new URL(raw, pageUrl).toString(); } catch (_) { return raw; } }
         return raw;
-      });
+      }).filter((u) => !isDeadEmbedHost(u));
 
       let ordered = abs;
       if (this.domainRegistry) {
@@ -492,7 +637,7 @@ class DaddyLiveProvider extends BaseProvider {
       }
 
       for (const nestedUrl of ordered.slice(0, 3)) {
-        const nested = await this._resolveFromUrl(nestedUrl, pageUrl, depth + 1);
+        const nested = await this._resolveFromUrl(nestedUrl, pageUrl, depth + 1, control);
         if (nested) {
           this._learnHostStrategy(pageUrl, 'nested', 'wrapper');
           return nested;
@@ -508,10 +653,11 @@ class DaddyLiveProvider extends BaseProvider {
    * _resolveFromHtml so the JSON hop and the nested-iframe hop recurse through a
    * single code path with one shared depth counter.
    */
-  async _resolveFromUrl(embedUrl, referer, depth = 0) {
+  async _resolveFromUrl(embedUrl, referer, depth = 0, control = {}) {
+    throwIfStopped(control);
     if (!embedUrl || !/^https?:/i.test(embedUrl)) return null;
     try {
-      const res = await this.proxyFetch(embedUrl, {
+      const res = await discoveryRequest(this, embedUrl, {
         headers: {
           'User-Agent': UA,
           'Referer': referer,
@@ -520,11 +666,10 @@ class DaddyLiveProvider extends BaseProvider {
           'Sec-Fetch-Site': 'cross-site',
           'Accept': 'text/html,application/xhtml+xml,application/json,*/*;q=0.8'
         },
-        signal: AbortSignal.timeout(6000)
-      });
+      }, control);
       if (!res.ok) return null;
-      const html = await res.text();
-      const result = await this._resolveFromHtml(html, embedUrl, depth);
+      const html = await discoveryText(res, control);
+      const result = await this._resolveFromHtml(html, embedUrl, depth, control);
 
       // Self-healing: when THIS page supplied the manifest directly, the strategy
       // that worked is a fact about THIS host - remember it. Recursive strategies
@@ -534,7 +679,8 @@ class DaddyLiveProvider extends BaseProvider {
       }
 
       return result;
-    } catch (_) {
+    } catch (error) {
+      preserveResolutionFailure(error, control);
       return null;
     }
   }
@@ -575,9 +721,16 @@ class DaddyLiveProvider extends BaseProvider {
     return new StreamEntity({
       name: 'DaddyLive',
       title: channelName ? `DaddyLive (${channelName})` : `DaddyLive Stream ${sourceId}`,
-      url: `${BASE_URL}/api/manifest?url=${encodeURIComponent(m3u8Url)}&referer=${encodeURIComponent(referer)}&origin=${encodeURIComponent(origin)}`,
+      url: `${BASE_URL}/api/manifest?url=${encodeURIComponent(m3u8Url)}&referer=${encodeURIComponent(referer)}&origin=${encodeURIComponent(origin)}&hlsua=${encodeURIComponent(UA)}`,
       behaviorHints: {
-        notWebReady: false
+        notWebReady: false,
+        proxyHeaders: {
+          request: {
+            'Referer': referer,
+            'Origin': origin,
+            'User-Agent': UA
+          }
+        }
       },
       resolution: 'HD'
     });
@@ -681,7 +834,12 @@ class DaddyLiveProvider extends BaseProvider {
 
       for (const dayHeader of Object.keys(scheduleOk ? data : {})) {
         // Parse date header (e.g. "Friday 18th Sep 2026 - Schedule Time UK GMT")
-        const dateMatch = dayHeader.match(/(\d+)(?:st|nd|rd|th)\s+([A-Za-z]+)(?:\s+(\d{4}))?/i);
+        // Do not require a well-formed ordinal: upstream ships typos such as
+        // "Wednesday 28h Oct 2026" and headers with no suffix at all. When this
+        // match failed, dayStr became '' for the whole block and every kickoff
+        // fell through to the time-only branch below, publishing the overnight
+        // slate one day late.
+        const dateMatch = dayHeader.match(/(\d{1,2})\s*[a-z]{0,3}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{4})/i);
         const currentYear = new Date().getUTCFullYear();
         const year = dateMatch && dateMatch[3] ? parseInt(dateMatch[3], 10) : currentYear;
         const dayStr = dateMatch ? `${dateMatch[1]} ${dateMatch[2]} ${year}` : '';
@@ -763,16 +921,10 @@ class DaddyLiveProvider extends BaseProvider {
             // Parse kickoff timestamp (UK GMT / UTC)
             let matchTime = null;
             // If category is "Upcoming Events" or raw title specifies an explicit future date, extract it
-            if (cleanCat.toLowerCase().includes('upcoming') || rawEvent.includes(' 202')) {
-              const titleDateMatch = rawEvent.match(/(\d{1,2})\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)(?:\s+(\d{4}))?/i);
-              if (titleDateMatch) {
-                const year = titleDateMatch[3] ? parseInt(titleDateMatch[3], 10) : currentYear;
-                const timePart = ev.time ? `${ev.time}:00 UTC` : '00:00:00 UTC';
-                const parsed = Date.parse(`${titleDateMatch[1]} ${titleDateMatch[2]} ${year} ${timePart}`);
-                if (!Number.isNaN(parsed) && parsed > 0) {
-                  matchTime = parsed;
-                }
-              }
+            if (cleanCat.toLowerCase().includes('upcoming') || /\b20\d{2}\b/.test(rawEvent)) {
+              const explicit = explicitTitleDate(rawEvent, ev.time, currentYear);
+              if (explicit && !explicit.valid) continue;
+              if (explicit) matchTime = explicit.timestamp;
             }
 
             if (!matchTime && dayStr && ev.time) {
@@ -788,12 +940,11 @@ class DaddyLiveProvider extends BaseProvider {
               }
             }
             if (!matchTime && ev.time) {
-              const parsed = parseTimezone(ev.time, 'UTC');
-              if (parsed && ev.time < '06:00') {
-                matchTime = parsed + (24 * 3600 * 1000);
-              } else {
-                matchTime = parsed;
-              }
+              // No usable day header, so there is no block date to roll a late
+              // kickoff into: parseTimezone already resolves the wall clock
+              // relative to today, and adding a day on top of it moved the whole
+              // overnight slate 24 h into the future.
+              matchTime = parseTimezone(ev.time, 'UTC');
             }
             if (!matchTime) {
               continue; // Do not guess unparseable times
@@ -847,7 +998,8 @@ class DaddyLiveProvider extends BaseProvider {
             }
 
             matches.push(new MatchEntity({
-              id: `dlv_${firstId}_${slug}`,
+              id: fixtureId({ title, category: eventCategory, date: matchTime, league, team1, team2 }),
+              aliasIds: [`dlv_${firstId}_${slug}`],
               title,
               category: eventCategory,
               status,
@@ -887,10 +1039,12 @@ class DaddyLiveProvider extends BaseProvider {
           const identityKey = ident.identityKey;
           const channelNumber = ident.channelNumber;
           const slug = canonicalTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+          const legacySlug = ident.legacyCanonicalTitle?.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
           const logoUrl = getChannelLogo(canonicalTitle) || getChannelLogo(rawName);
 
           const entity = new MatchEntity({
             id: `dlv_ch_${chId}_${slug}`,
+            ...(legacySlug && legacySlug !== slug ? { aliasIds: [`dlv_ch_${chId}_${legacySlug}`] } : {}),
             title: canonicalTitle,
             baseTitle: canonicalTitle,
             category: 'networks',
@@ -927,7 +1081,18 @@ class DaddyLiveProvider extends BaseProvider {
     return matches;
   }
 
-  async resolveStream(sourceId, matchCategory, matchTitle, src = {}) {
+  async resolveStream(sourceId, matchCategory, matchTitle, src = {}, opts = {}) {
+    const control = { signal: opts?.signal };
+    try {
+      throwIfStopped(control);
+      return await this._resolveStreamWithMediaCheck(sourceId, matchCategory, matchTitle, src, control);
+    } finally {
+      clearTimeout(control.mediaTimer);
+      control.mediaController?.abort();
+    }
+  }
+
+  async _resolveStreamWithMediaCheck(sourceId, matchCategory, matchTitle, src, control) {
     const sId = String(sourceId);
     if (src && (src.forceRefresh || src.skipCache)) {
       this._decoded.delete(sId);
@@ -941,44 +1106,41 @@ class DaddyLiveProvider extends BaseProvider {
     const streams = [];
     const channelName = decodeHtmlEntities(src.channelName || '');
     let foundDirect = false;
+    let retryReason = null;
     // The folder probes are NOT interchangeable: for one channel they reach six
     // different iframe hosts, and only some of those families are on the segment
-    // CDN's Referer allow-list. A manifest whose terminal host the registry knows
-    // is therefore accepted immediately, while the first manifest that merely
-    // decodes is held as a fallback.
+    // CDN's Referer allow-list. After a media check succeeds, a registered
+    // terminal host is accepted; an unknown one remains a bounded fallback.
     //
-    // The scan is deliberately BOUNDED to that first decodable manifest: the
-    // folders are alternatives for the same channel, not a matrix to exhaust.
-    // Walking all of them costs 2 domains x 6 folders x (player + embed) fetches
-    // at a 6s timeout each, which stalls resolution for a minute on any channel
-    // whose terminal host the registry does not know. Later folders stay
-    // reachable for when a path stops serving — a rotated or 404ing folder
-    // yields no manifest, so the scan simply continues past it.
+    // Stop at the first checked candidate. Definitive media misses can reach
+    // later folders within one shared 1200ms validation phase. An inconclusive
+    // result stops the scan and keeps the web fallback briefly retryable.
     let fallbackStream = null;
 
     // Probe folders across mirror domains
     for (const base of this.baseDomains) {
-      if (foundDirect || fallbackStream) break;
+      if (foundDirect || fallbackStream || retryReason) break;
 
       for (const folder of this.folders) {
         // Stop at the first manifest rather than hunting the rest of the matrix
         // for a registry-known terminal host (see the bound explained above).
-        if (foundDirect || fallbackStream) break;
+        if (foundDirect || fallbackStream || retryReason) break;
 
         const playerUrl = `${base}/${folder}/stream-${sourceId}.php`;
         try {
-          const res = await this.proxyFetch(playerUrl, {
+          throwIfStopped(control);
+          const res = await discoveryRequest(this, playerUrl, {
             headers: {
               'User-Agent': UA,
               'Referer': `${base}/`,
               'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
             },
-            signal: AbortSignal.timeout(6000)
-          });
+          }, control);
 
           if (!res.ok) continue;
 
-          const html = await res.text();
+          const html = await discoveryText(res, control);
+          throwIfStopped(control);
           const allIframeMatches = [...html.matchAll(/<iframe[^>]+src=["']?([^"'\s>]+)["']?/gi)].map((m) => m[1]);
           if (!allIframeMatches.length) continue;
 
@@ -986,7 +1148,11 @@ class DaddyLiveProvider extends BaseProvider {
             if (raw.startsWith('//')) return 'https:' + raw;
             if (raw.startsWith('/')) { try { return new URL(raw, playerUrl).toString(); } catch (_) { return raw; } }
             return raw;
-          }).filter((u) => !/daddyliveplayer\.st/i.test(u));
+          })
+            .filter((u) => !/daddyliveplayer\.st/i.test(u))
+            // Known-dead embed hosts are dropped before any request is made, so
+            // a retired player costs neither a download nor a DNS/TLS attempt.
+            .filter((u) => !isDeadEmbedHost(u));
 
           // If domainRegistry is available, rank candidate iframes so registered hosts (e.g. wideiptv.top) are probed first
           if (this.domainRegistry && candidateUrls.length > 1) {
@@ -1003,64 +1169,100 @@ class DaddyLiveProvider extends BaseProvider {
           }
 
           for (const iframeUrl of candidateUrls.slice(0, 3)) {
-            let embedOrigin = '';
             try {
-              embedOrigin = new URL(iframeUrl).origin;
-            } catch (_) {
-              embedOrigin = base;
-            }
-            let embedReferer = `${embedOrigin}/`;
-
-            // Fetch the embed page
-            const embedRes = await this.proxyFetch(iframeUrl, {
-              headers: {
-                'User-Agent': UA,
-                'Referer': playerUrl,
-                'Origin': base,
-                'Sec-Fetch-Dest': 'iframe',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'cross-site',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-              },
-              signal: AbortSignal.timeout(6000)
-            });
-
-            if (!embedRes || !embedRes.ok) continue;
-
-            const embedHtml = typeof embedRes.text === 'function' ? await embedRes.text() : embedRes.text;
-            let m3u8Url = null;
-
-            // Resolve via the shared helper: _econfig -> chain -> direct m3u8
-            // -> JSON player hop -> nested iframe (recursive, up to 2 levels).
-            const resolved = await this._resolveFromHtml(embedHtml, iframeUrl, 0);
-            if (resolved && resolved.url && !isTikTokCloakedStream(resolved.url)) {
-              m3u8Url = resolved.url;
+              let embedOrigin = '';
               try {
-                embedOrigin = new URL(resolved.referer || iframeUrl).origin;
+                embedOrigin = new URL(iframeUrl).origin;
               } catch (_) {
                 embedOrigin = base;
               }
-              embedReferer = `${embedOrigin}/`;
-            }
+              let embedReferer = `${embedOrigin}/`;
 
-            if (m3u8Url) {
-              const registryReferer = this._terminalRefererFor(m3u8Url);
-              const candidate = this._buildManifestStream(
-                m3u8Url,
-                registryReferer || embedReferer,
-                sourceId,
-                channelName
-              );
+              // Fetch the embed page
+              const embedRes = await discoveryRequest(this, iframeUrl, {
+                headers: {
+                  'User-Agent': UA,
+                  'Referer': playerUrl,
+                  'Sec-Fetch-Dest': 'iframe',
+                  'Sec-Fetch-Mode': 'navigate',
+                  'Sec-Fetch-Site': 'cross-site',
+                  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+                },
+              }, control);
 
-              if (registryReferer) {
-                streams.push(candidate);
-                foundDirect = true;
-                break;
+              if (!embedRes || !embedRes.ok) continue;
+
+              const embedHtml = await discoveryText(embedRes, control);
+              throwIfStopped(control);
+              let m3u8Url = null;
+
+              // Resolve via the shared helper: _econfig -> chain -> direct m3u8
+              // -> JSON player hop -> nested iframe (recursive, up to 2 levels).
+              const resolved = await this._resolveFromHtml(embedHtml, iframeUrl, 0, control);
+              if (resolved && resolved.url && !isTikTokCloakedStream(resolved.url)) {
+                m3u8Url = resolved.url;
+                try {
+                  embedOrigin = new URL(resolved.referer || iframeUrl).origin;
+                } catch (_) {
+                  embedOrigin = base;
+                }
+                embedReferer = `${embedOrigin}/`;
               }
-              if (!fallbackStream) fallbackStream = candidate;
+
+              if (m3u8Url) {
+                const registryReferer = this._terminalRefererFor(m3u8Url);
+                const referer = registryReferer || embedReferer;
+                if (!control.mediaController) {
+                  // One validation phase for all candidate checks. Later folder
+                  // and nested-page requests share its remaining budget too.
+                  control.mediaController = new AbortController();
+                  control.mediaDeadline = performance.now() + MEDIA_CHECK_BUDGET_MS;
+                  control.mediaTimer = setTimeout(() => control.mediaController.abort(
+                    new DOMException('DaddyLive media check deadline', 'TimeoutError')
+                  ), MEDIA_CHECK_BUDGET_MS);
+                }
+                throwIfStopped(control);
+                const checked = await checkDaddyLiveMedia(m3u8Url, {
+                  referer,
+                  origin: new URL(referer).origin,
+                  userAgent: UA,
+                  signal: discoverySignal(control),
+                  timeoutMs: Math.max(1, Math.ceil(control.mediaDeadline - performance.now()))
+                });
+                throwIfStopped(control);
+                if (checked.status === 'rejected') continue;
+                if (checked.status !== 'ok') {
+                  retryReason = checked.reason || 'unavailable';
+                  break;
+                }
+                const candidate = this._buildManifestStream(
+                  m3u8Url,
+                  referer,
+                  sourceId,
+                  channelName
+                );
+
+                if (registryReferer) {
+                  streams.push(candidate);
+                  foundDirect = true;
+                  break;
+                }
+                if (!fallbackStream) fallbackStream = candidate;
+              }
+            } catch (error) {
+              control.signal?.throwIfAborted();
+              if (hardResolutionFailure(error)) throw error;
+              const reason = inconclusiveErrorReason(error);
+              if (reason) { retryReason = reason; break; }
+              // A single iframe failure must not skip the other candidates.
+              continue;
             }
           }
-        } catch (_) {
+        } catch (error) {
+          control.signal?.throwIfAborted();
+          if (hardResolutionFailure(error)) throw error;
+          const reason = inconclusiveErrorReason(error);
+          if (reason) { retryReason = reason; break; }
           // Continue trying next folder/domain
         }
       }
@@ -1068,7 +1270,7 @@ class DaddyLiveProvider extends BaseProvider {
 
     if (!foundDirect && fallbackStream) streams.push(fallbackStream);
 
-    // Web player fallback if no direct stream was decrypted
+    // Web player fallback if no usable direct stream was found.
     if (streams.length === 0) {
       const fallbackUrl = `${this.baseDomains[0]}/stream/stream-${sourceId}.php`;
       const label = channelName ? `DaddyLive (${channelName}) (Web Player)` : `DaddyLive Stream ${sourceId} (Web Player)`;
@@ -1093,7 +1295,10 @@ class DaddyLiveProvider extends BaseProvider {
         tokenExp = extractTokenExpiry(target);
       } catch (_) {}
     }
-    const defaultTtl = 150 * 1000;
+    const retryableWeb = retryReason && !streams.some(row => row && row.url);
+    if (retryableWeb) markInconclusiveStreams(streams, retryReason);
+    control.signal?.throwIfAborted();
+    const defaultTtl = retryableWeb ? 2000 : 150 * 1000;
     const expiresAt = tokenExp && tokenExp > Date.now()
       ? Math.min(tokenExp - 45000, Date.now() + defaultTtl)
       : Date.now() + defaultTtl;

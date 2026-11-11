@@ -59,14 +59,20 @@ function isTikTokCloakedSegment(url) {
  */
 function resolveSegmentUrl(segmentUri, manifestUrl) {
   try {
-    const chunkUrl = new URL(segmentUri, manifestUrl);
+    const raw = String(segmentUri).trim();
+    const chunkUrl = new URL(raw, manifestUrl);
     const manifestObj = new URL(manifestUrl);
+    const isAbsoluteReference = /^[a-z][a-z\d+.-]*:/i.test(raw) || raw.startsWith('//');
 
-    manifestObj.searchParams.forEach((val, key) => {
-      if (!chunkUrl.searchParams.has(key)) {
-        chunkUrl.searchParams.set(key, val);
-      }
-    });
+    // Relative paths on the same host can inherit a parent manifest token.
+    // Never copy credentials from one CDN origin to another.
+    if (!isAbsoluteReference && chunkUrl.origin === manifestObj.origin) {
+      manifestObj.searchParams.forEach((val, key) => {
+        if (!chunkUrl.searchParams.has(key)) {
+          chunkUrl.searchParams.set(key, val);
+        }
+      });
+    }
 
     return chunkUrl.toString();
   } catch (_) {
@@ -101,9 +107,14 @@ function segmentAddressMode() {
 }
 
 /**
- * Build the signed 307 redirect URL for a cloaked TikTok segment.
+ * Build the signed 307 redirect URL for a cloaked TikTok segment, or keep the
+ * direct CDN URL when production signing is disabled.
  */
 function buildByteRangeRedirectUrl(absoluteUrl, opts = {}) {
+  // Missing production configuration disables only this legacy hop. Both URI
+  // and full-playlist rewriting use the existing direct-CDN mode instead.
+  // Never turn signing failure into a server-side video proxy fallback.
+  if (byteRangeSigner.enabled === false) return absoluteUrl;
   const { referer = '', origin = '', absoluteAddonBaseUrl = '' } = opts;
   const { token, psig } = byteRangeSigner.encodeSegmentToken({
     url: absoluteUrl,
@@ -119,16 +130,25 @@ function buildByteRangeRedirectUrl(absoluteUrl, opts = {}) {
 /**
  * Rewrite one playlist entry into the URL the player should fetch.
  */
+function buildManifestProxyUrl(upstreamUrl, opts = {}) {
+  const { referer = '', origin = '', userAgent = '', rckSuffix = '', absoluteAddonBaseUrl = '' } = opts;
+  let manifestPath = `/api/manifest?url=${encodeURIComponent(upstreamUrl)}`;
+  if (referer) manifestPath += `&referer=${encodeURIComponent(referer)}`;
+  if (origin) manifestPath += `&origin=${encodeURIComponent(origin)}`;
+  if (userAgent) manifestPath += `&hlsua=${encodeURIComponent(userAgent)}`;
+  manifestPath += rckSuffix || '';
+  return absoluteAddonBaseUrl ? new URL(manifestPath, absoluteAddonBaseUrl).toString() : manifestPath;
+}
+
 function rewriteHlsUri(segmentUri, manifestUrl, opts = {}) {
-  const { referer = '', origin = '', rckSuffix = '', absoluteAddonBaseUrl = '' } = opts;
+  const { referer = '', origin = '', absoluteAddonBaseUrl = '' } = opts;
   const absoluteUrl = resolveSegmentUrl(segmentUri, manifestUrl);
 
   if (absoluteUrl.includes('.m3u8')) {
-    let manifestPath = `/api/manifest?url=${encodeURIComponent(absoluteUrl)}`;
-    if (referer) manifestPath += `&referer=${encodeURIComponent(referer)}`;
-    if (origin) manifestPath += `&origin=${encodeURIComponent(origin)}`;
-    manifestPath += rckSuffix || '';
-    return absoluteAddonBaseUrl ? new URL(manifestPath, absoluteAddonBaseUrl).toString() : manifestPath;
+    if (typeof opts.toPlaylistUrl === 'function') {
+      return opts.toPlaylistUrl(absoluteUrl, opts);
+    }
+    return buildManifestProxyUrl(absoluteUrl, opts);
   }
 
   if (isTikTokCloakedSegment(absoluteUrl)) {
@@ -173,6 +193,75 @@ function rewriteHlsUri(segmentUri, manifestUrl, opts = {}) {
 }
 
 /**
+ * HLS tags can carry URI= resources even when the resource is not an ordinary
+ * segment line. Keep key/initialization resources direct; playlist resources
+ * (including extensionless audio/video renditions) go through /api/manifest.
+ * Leave non-HTTP DRM schemes alone.
+ */
+function rewriteHlsTagUris(line, manifestUrl, opts = {}) {
+  const colon = line.indexOf(':');
+  if (colon < 0) return line;
+  const tag = line.slice(0, colon);
+  if (!/^#EXT-X-(?:KEY|SESSION-KEY|MEDIA|I-FRAME-STREAM-INF|IMAGE-STREAM-INF|RENDITION-REPORT|PART|PRELOAD-HINT|MAP|SESSION-DATA)$/.test(tag)) return line;
+
+  const text = line.slice(colon + 1);
+  const replacements = [];
+  let i = 0;
+  while (i < text.length) {
+    while (i < text.length && (text[i] === ',' || /\s/.test(text[i]))) i++;
+    const keyStart = i;
+    while (i < text.length && /[A-Za-z0-9-]/.test(text[i])) i++;
+    const key = text.slice(keyStart, i);
+    if (!key || text[i] !== '=') {
+      while (i < text.length && text[i] !== ',') i++;
+      continue;
+    }
+    i++;
+    if (text[i] === '"') {
+      const valueStart = i + 1;
+      i++;
+      while (i < text.length && text[i] !== '"') i++;
+      const valueEnd = i;
+      const value = text.slice(valueStart, valueEnd);
+      if (i < text.length) i++;
+      if (key === 'URI' && value) {
+        try {
+          const resolved = new URL(value, manifestUrl);
+          if (resolved.protocol === 'http:' || resolved.protocol === 'https:') {
+            // Child playlists must go through our manifest proxy so they retain
+            // provider headers, recovery identity (rck), and nested redirect handling.
+            // URI meaning comes from the HLS tag, not just the filename.
+            // KEY, SESSION-KEY, MAP, and SESSION-DATA resources stay direct even
+            // if their endpoint happens to end in ".m3u8".
+            const isPlaylistReference = tag === '#EXT-X-MEDIA'
+              || tag === '#EXT-X-I-FRAME-STREAM-INF'
+              || tag === '#EXT-X-RENDITION-REPORT'
+              || tag === '#EXT-X-IMAGE-STREAM-INF';
+            const isSegmentReference = tag === '#EXT-X-PART' || tag === '#EXT-X-PRELOAD-HINT';
+            const rewrittenUri = isPlaylistReference
+              ? (typeof opts.toPlaylistUrl === 'function'
+                  ? opts.toPlaylistUrl(resolveSegmentUrl(value, manifestUrl), opts)
+                  : buildManifestProxyUrl(resolveSegmentUrl(value, manifestUrl), opts))
+              : isSegmentReference
+                ? rewriteHlsUri(value, manifestUrl, opts)
+                : resolved.toString();
+            replacements.push({ start: valueStart, end: valueEnd, value: rewrittenUri });
+          }
+        } catch (_) {}
+      }
+    } else {
+      while (i < text.length && text[i] !== ',') i++;
+    }
+  }
+  if (!replacements.length) return line;
+  let rewritten = text;
+  for (const item of replacements.reverse()) {
+    rewritten = rewritten.slice(0, item.start) + item.value + rewritten.slice(item.end);
+  }
+  return line.slice(0, colon + 1) + rewritten;
+}
+
+/**
  * Rewrite a full HLS playlist manifest text:
  * - Detects #EXTINF segment duration
  * - Injects `#EXT-X-BYTERANGE:<length>@42` above cloaked TikTok segments
@@ -207,6 +296,11 @@ function rewriteHlsPlaylist(manifestBody, manifestUrl, opts = {}) {
     }
 
     if (trimmed.startsWith('#')) {
+      const rewrittenTag = rewriteHlsTagUris(line, manifestUrl, opts);
+      if (rewrittenTag !== line) {
+        rewritten.push(rewrittenTag);
+        continue;
+      }
       if (trimmed.startsWith('#EXT-X-VERSION:')) {
         if (requiresByteRange) {
           const v = parseInt(trimmed.slice('#EXT-X-VERSION:'.length).trim(), 10);

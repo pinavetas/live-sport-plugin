@@ -5,6 +5,37 @@ const { getDataDir } = require('../dataDir');
 
 const CACHE_SCHEMA_VERSION = 4;
 
+// Keep ambiguous legacy identities visible as null instead of allowing the
+// last indexed match to silently take ownership of another fixture's link.
+function indexIdentity(index, key, match) {
+  if (!index.has(key)) index.set(key, match);
+  else if (index.get(key) !== match) index.set(key, null);
+}
+
+function uniqueMatch(matches, predicate) {
+  let found = null;
+  for (const match of matches) {
+    if (!match || !predicate(match)) continue;
+    if (found && found !== match) return { ambiguous: true, match: null };
+    found = match;
+  }
+  return { ambiguous: false, match: found };
+}
+
+function hasLegacySourceToken(sourceId, query) {
+  const id = String(sourceId);
+  if (query.length < 3 || /^https?:\/\//i.test(id)) return false;
+  let at = id.indexOf(query);
+  while (at !== -1) {
+    const before = at === 0 || !/[a-z0-9]/i.test(id[at - 1]);
+    const end = at + query.length;
+    const after = end === id.length || !/[a-z0-9]/i.test(id[end]);
+    if (before && after) return true;
+    at = id.indexOf(query, at + 1);
+  }
+  return false;
+}
+
 // behaviorHints subtrees are plain JSON (provider literals or disk-cache
 // parses) at most a few levels deep. V8's generic structuredClone serializer
 // costs 5-15x a tight recursive copy on these shapes, and _cloneMatch runs it
@@ -38,6 +69,11 @@ function resolveCacheFile(env = process.env, cwd = process.cwd()) {
   if (env.JEST_WORKER_ID) {
     return path.join(os.tmpdir(), `nuvio-matches-cache-test-${process.pid}.json`);
   }
+  // Operator override for the cache file (absolute path), checked after the
+  // jest branch so test isolation never depends on the caller's shell.
+  if (env.MATCHES_CACHE_PATH) {
+    return path.resolve(env.MATCHES_CACHE_PATH);
+  }
   // Resolved at runtime via getDataDir (DATA_DIR or <cwd>/data). A literal
   // path.join(process.cwd(), 'data') here was rewritten by the ncc build into
   // dist/data, so production read and wrote the cache inside the build output
@@ -65,6 +101,12 @@ class CacheService {
     this.cacheFilePath = (typeof customCachePath === 'string' && customCachePath)
       ? customCachePath
       : resolveCacheFile();
+    // Boot-visible: the resolved path is build-dependent (see resolveCacheFile),
+    // and a wrong one silently invalidates every backup, runbook and "clear the
+    // cache" instruction. Two lines per start is not log noise.
+    if (!process.env.JEST_WORKER_ID) {
+      console.log(`[CacheService] matches cache: ${this.cacheFilePath}`);
+    }
     this._byId = new Map();
     this._byAlias = new Map();
     this._bySourceId = new Map();
@@ -179,14 +221,14 @@ class CacheService {
         if (!m || typeof m !== 'object') continue;
 
         if (m.id && typeof m.id === 'string') {
-          this._byId.set(m.id, m);
+          indexIdentity(this._byId, m.id, m);
         }
 
         if (Array.isArray(m.aliasIds)) {
           for (let j = 0; j < m.aliasIds.length; j++) {
             const aid = m.aliasIds[j];
             if (aid && typeof aid === 'string') {
-              this._byAlias.set(aid, m);
+              indexIdentity(this._byAlias, aid, m);
             }
           }
         }
@@ -196,9 +238,9 @@ class CacheService {
             const s = m.sources[j];
             if (s && s.id != null) {
               const sid = String(s.id);
-              this._bySourceId.set(sid, m);
+              indexIdentity(this._bySourceId, sid, m);
               if (!sid.startsWith('stream_')) {
-                this._bySourceId.set(`stream_${sid}`, m);
+                indexIdentity(this._bySourceId, `stream_${sid}`, m);
               }
             }
           }
@@ -294,33 +336,42 @@ class CacheService {
       this._rebuildIndices();
     }
 
+    // Strong fixture keys are not legacy provider-source identifiers.
+    const strongFixtureId = /^dlv_event_[a-f0-9]{24}$/.test(matchId);
     // Fast O(1) Indexed Lookups
-    let found = this._byId.get(matchId);
-    if (!found) found = this._byAlias.get(matchId);
-    if (!found) found = this._bySourceId.get(matchId);
+    for (const index of strongFixtureId ? [this._byId, this._byAlias] : [this._byId, this._byAlias, this._bySourceId]) {
+      if (index.has(matchId)) {
+        const found = index.get(matchId);
+        return found ? this._cloneMatch(found) : null;
+      }
+    }
 
-    if (found) return this._cloneMatch(found);
+    // New DaddyLive fixture keys identify exact event metadata. A missing key
+    // must not be reinterpreted as a source fragment or another day's title.
+    if (strongFixtureId) return null;
 
-    // Fallback: substring source ID match (rare legacy IDs)
-    found = matches.find(m => m && Array.isArray(m.sources) && m.sources.some(s => s && s.id != null && String(s.id).includes(matchId)));
-    if (found) return this._cloneMatch(found);
+    // Legacy partial source IDs must be whole tokens and identify one event.
+    const sourceMatch = uniqueMatch(matches, m => Array.isArray(m.sources) &&
+      m.sources.some(s => s && s.id != null && hasLegacySourceToken(s.id, matchId)));
+    if (sourceMatch.ambiguous) return null;
+    if (sourceMatch.match) return this._cloneMatch(sourceMatch.match);
 
     // Fallback: Normalized slug match (e.g. "cleveland-guardians" or team names in matchId)
     const cleanId = matchId.toLowerCase().replace(/^[a-z0-9]+_[0-9]+_/, '').replace(/[^a-z0-9]/g, '');
     if (cleanId.length > 6) {
-      found = matches.find(m => {
-        if (!m) return false;
+      const slugMatch = uniqueMatch(matches, m => {
         const mCleanId = (m.id || '').toLowerCase().replace(/^[a-z0-9]+_[0-9]+_/, '').replace(/[^a-z0-9]/g, '');
-        if (mCleanId && (mCleanId.includes(cleanId) || cleanId.includes(mCleanId))) return true;
+        if (mCleanId.length > 6 && (mCleanId.includes(cleanId) || cleanId.includes(mCleanId))) return true;
         if (m.title) {
           const cleanTitle = m.title.toLowerCase().replace(/[^a-z0-9]/g, '');
-          if (cleanTitle.includes(cleanId) || cleanId.includes(cleanTitle)) return true;
+          if (cleanTitle.length > 6 && (cleanTitle.includes(cleanId) || cleanId.includes(cleanTitle))) return true;
         }
         return false;
       });
+      return slugMatch.match ? this._cloneMatch(slugMatch.match) : null;
     }
 
-    return found ? this._cloneMatch(found) : null;
+    return null;
   }
 
   isStale(ttlMs = this.CACHE_TTL) {

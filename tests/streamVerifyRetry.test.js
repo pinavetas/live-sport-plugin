@@ -1,3 +1,9 @@
+// The unit fixture never executes provider WASM/network bootstrap.
+jest.mock('../src/services/StreamedWasmPool', () => ({
+  resolveWasmStream: jest.fn(() => { throw new Error('Unexpected WASM execution in unit fixture'); }),
+  destroy: jest.fn(async () => {})
+}));
+
 'use strict';
 
 // The behaviour under test: a verification ping is a single sample of a flaky
@@ -14,12 +20,20 @@ jest.mock('../src/impitClient', () => ({
   isImpitAvailable: () => false,
   getImpit: () => null,
 }));
+jest.mock('../src/services/ProviderOutbound', () => ({
+  ...jest.requireActual('../src/services/ProviderOutbound'),
+  streamingFetch: (...args) => {
+    if (!jest.isMockFunction(global.fetch)) throw new Error('Unexpected probe I/O in unit fixture');
+    return global.fetch(...args);
+  }
+}));
 
 process.env.ENABLE_SPEED_PROBE = 'true';
 
 const { safeFetch } = require('../src/impitClient');
 const { verifyStreams } = require('../src/streams');
 const M3U8ParserService = require('../src/services/M3U8ParserService');
+const { ReadableStream } = require('node:stream/web');
 
 const PLAYLIST = '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:5\n#EXTINF:4.0,\nseg0.ts\n';
 
@@ -45,17 +59,21 @@ function makeCache() {
 }
 
 // A successful ranged segment response: 200 KB body + a Content-Range total.
-const segmentResponse = () => ({
+const segmentResponse = (contentRange = 'bytes 0-199999/4084906') => ({
   ok: true,
-  arrayBuffer: async () => Buffer.alloc(200000).buffer,
-  headers: { get: () => 'bytes 0-199999/4084906' },
+  body: new ReadableStream({ start(controller) {
+    controller.enqueue(new Uint8Array(200000));
+    controller.close();
+  } }),
+  arrayBuffer: jest.fn(() => { throw new Error('Probe must consume the bounded stream body'); }),
+  headers: { get: name => name.toLowerCase() === 'content-range' ? contentRange : null },
 });
 
 // VERIFY_ATTEMPTS and friends are read when streams.js loads, so these tests
 // run against the defaults (3 attempts, 9s total budget).
 beforeEach(() => {
   jest.clearAllMocks();
-  global.fetch = jest.fn().mockResolvedValue(segmentResponse());
+  global.fetch = jest.fn().mockImplementation(async () => segmentResponse());
 });
 
 describe('verifyStreams retry policy', () => {
@@ -97,6 +115,15 @@ describe('verifyStreams retry policy', () => {
     expect(cache.failures).toBe(1);
   });
 
+  it('does not negative-cache a stream on capacity or native pool errors', async () => {
+    safeFetch.mockRejectedValue(Object.assign(new Error('pool busy'), { code: 'ERR_OUTBOUND_CAPACITY' }));
+
+    const cache = makeCache();
+    const out = await verifyStreams([stream()], 'watchfooty:m1:s1', parser, cache);
+
+    expect(out).toHaveLength(0);
+    expect(cache.failures).toBe(0);
+  });
   it('does not retry a 404 — a working server said the stream is gone', async () => {
     safeFetch.mockResolvedValue(status(404));
 
@@ -114,6 +141,16 @@ describe('verifyStreams retry policy', () => {
 
     expect(out).toHaveLength(1);
     expect(safeFetch).not.toHaveBeenCalled();
+  });
+
+  it('drops a 200 response whose playlist points to .png cloaked segments', async () => {
+    safeFetch.mockResolvedValue(ok('#EXTM3U\n#EXTINF:4.000,\nchunk-001.png?token=xyz\n#EXTINF:4.000,\nchunk-002.png?token=xyz'));
+
+    const cache = makeCache();
+    const out = await verifyStreams([stream()], 'daddylive:m1:s1', parser, cache);
+
+    expect(out).toHaveLength(0);
+    expect(cache.failures).toBe(1);
   });
 
   it('drops a 200 response whose body is not a playlist', async () => {
@@ -192,11 +229,7 @@ describe('verifyStreams speed probe', () => {
 
   it('keeps the stream but skips speed scoring when Content-Range is missing', async () => {
     safeFetch.mockResolvedValue(ok());
-    global.fetch.mockResolvedValue({
-      ok: true,
-      arrayBuffer: async () => Buffer.alloc(200000).buffer,
-      headers: { get: () => null },
-    });
+    global.fetch.mockResolvedValue(segmentResponse(null));
 
     const out = await verifyStreams([stream()], 'watchfooty:m1:s1', parser, makeCache());
 
@@ -221,11 +254,7 @@ describe('verifyStreams speed probe', () => {
 
     it('keeps the stream and does NOT set bitrate when Content-Range is missing (no crash)', async () => {
       safeFetch.mockResolvedValue(ok());
-      global.fetch.mockResolvedValue({
-        ok: true,
-        arrayBuffer: async () => Buffer.alloc(200000).buffer,
-        headers: { get: () => null }, // No Content-Range
-      });
+      global.fetch.mockResolvedValue(segmentResponse(null));
       const out = await verifyStreams(
         [{ ...stream(), resolution: 'HD' }],
         null, parser, makeCache()
