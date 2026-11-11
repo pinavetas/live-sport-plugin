@@ -23,25 +23,34 @@ describe('TikTok CDN Deprioritization & Worker Quota Saver', () => {
   });
 
   describe('StreamScoringService', () => {
-    test('awards top Direct CDN bonus to DaddyLive and keeps Vavoo higher than SKTech', () => {
-      const daddyliveStream = { url: 'https://castr.example/index.m3u8', resolution: '1080p' };
-      const vavooStream = { url: 'https://sunshine.example/index.m3u8', resolution: '1080p' };
-      const sktechStream = { url: 'https://sktech.example/index.m3u8', resolution: '1080p' };
+    test('ranks AK47 > PPV.st > Vavoo > SKTech, with DaddyLive demoted', () => {
+      const stream = (host) => ({ url: `https://${host}.example/index.m3u8`, resolution: '1080p' });
 
-      const daddyliveScore = scorer.calculateScore(daddyliveStream, 'daddylive');
-      const vavooScore = scorer.calculateScore(vavooStream, 'vavoo');
-      const sktechScore = scorer.calculateScore(sktechStream, 'sktech');
+      const ak47Score = scorer.calculateScore(stream('ak47'), 'ak47live');
+      const ppvstScore = scorer.calculateScore(stream('ppvst'), 'ppvst');
+      const vavooScore = scorer.calculateScore(stream('sunshine'), 'vavoo');
+      const sktechScore = scorer.calculateScore(stream('sktech'), 'sktech');
+      const daddyliveScore = scorer.calculateScore(stream('castr'), 'daddylive');
 
-      // DaddyLive: 50 + 30 + 20 + 20 + 15 = 135
-      expect(daddyliveScore).toBe(135);
+      // AK47: 50 + 30 + 20 + 25 + 15 = 140
+      expect(ak47Score).toBe(140);
+      // PPV.st: 50 + 30 + 20 + 20 + 15 = 135
+      expect(ppvstScore).toBe(135);
       // Vavoo: 50 + 30 + 20 + 15 + 15 = 130
       expect(vavooScore).toBe(130);
       // SKTech: 50 + 30 + 20 + 10 = 110
       expect(sktechScore).toBe(110);
+      // DaddyLive (frequent ISP blocks): 50 + 30 + 20 + 5 + 5 = 110
+      expect(daddyliveScore).toBe(110);
 
-      // Hierarchy: DaddyLive >= Vavoo > SKTech
-      expect(daddyliveScore).toBeGreaterThanOrEqual(vavooScore);
+      expect(ak47Score).toBeGreaterThan(ppvstScore);
+      expect(ppvstScore).toBeGreaterThan(vavooScore);
       expect(vavooScore).toBeGreaterThan(sktechScore);
+    });
+
+    test('does not apply the TikTok penalty to PPV.st (direct byte-range playback)', () => {
+      const ppvstTikTok = { url: 'https://x.example/seg.image', resolution: '1080p', isTikTok: true };
+      expect(scorer.calculateScore(ppvstTikTok, 'ppvst')).toBe(135);
     });
 
     test('penalizes TikTok CDN streams (-30) and strips reliability bonus', () => {

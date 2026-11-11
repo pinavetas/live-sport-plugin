@@ -1,6 +1,7 @@
 const BaseProvider = require('./BaseProvider');
 const MatchEntity = require('../domain/MatchEntity');
 const StreamEntity = require('../domain/StreamEntity');
+const ChannelCountryService = require('../services/ChannelCountryService');
 const { BASE_URL } = require('../config');
 const path = require('path');
 const { execFile } = require('child_process');
@@ -153,7 +154,10 @@ class PpvStProvider extends BaseProvider {
                 }
               }
             },
-            resolution: 'HD'
+            resolution: 'HD',
+            language: src.language
+              || (ChannelCountryService.detectChannelCountry(src.channelName) || {}).language
+              || 'English'
           });
           if (isTikTokStream) {
             s.isTikTok = true;

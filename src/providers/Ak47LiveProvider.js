@@ -4,6 +4,14 @@ const crypto = require('crypto');
 const BaseProvider = require('./BaseProvider');
 const MatchEntity = require('../domain/MatchEntity');
 const StreamEntity = require('../domain/StreamEntity');
+const ChannelCountryService = require('../services/ChannelCountryService');
+
+// Commentary language from the channel label (e.g. "beIN Sports ES"); the
+// feed is English unless the label says otherwise.
+function detectLanguage(channelLabel) {
+  const info = ChannelCountryService.detectChannelCountry(channelLabel);
+  return (info && info.language) || 'English';
+}
 const { BASE_URL } = require('../config');
 const { extractTeamsFromTitle } = require('../services/TeamNameExtractor');
 
@@ -495,7 +503,8 @@ class Ak47LiveProvider extends BaseProvider {
                   title: `${matchTitle || 'Live Event'} (${channelLabel})`,
                   url: `${BASE_URL}/api/dash/index.m3u8?d=${payload}`,
                   behaviorHints: { notWebReady: false },
-                  resolution: 'FHD'
+                  resolution: 'FHD',
+                  language: detectLanguage(channelLabel)
                 })];
               }
 
@@ -604,7 +613,8 @@ class Ak47LiveProvider extends BaseProvider {
           }
         }
       },
-      resolution: 'HD'
+      resolution: 'HD',
+      language: detectLanguage(channelLabel)
     });
 
     return [stream];

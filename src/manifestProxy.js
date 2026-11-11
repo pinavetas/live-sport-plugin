@@ -86,7 +86,7 @@ function playlistHasContent(text) {
 // Fetch + validate the upstream manifest. Throws on failure so coalesced
 // waiters share the same outcome; successful bodies are cached by the caller.
 async function fetchUpstreamManifest(targetUrl, referer, origin) {
-  const deadlineAt = performance.now() + 10000;
+  const deadlineAt = performance.now() + 3500;
   const isVavoo = Boolean(
     (targetUrl && (targetUrl.includes('/sunshine/') || targetUrl.includes('vavoo.') || targetUrl.includes(':8008'))) ||
     (referer && referer.includes('vavoo.'))
@@ -101,10 +101,10 @@ async function fetchUpstreamManifest(targetUrl, referer, origin) {
     'User-Agent': userAgent
   };
   // _safeFetch: impit (browser TLS fingerprint) with automatic undici fallback.
-  // A hard 10 s timeout ensures a hung upstream can never hold the viewer's poll.
+  // A tight 3.5 s timeout ensures a hung upstream can never freeze the viewer's player.
   const attempt = async () => {
     const remainingMs = Math.ceil(deadlineAt - performance.now());
-    if (remainingMs <= 0) throw Object.assign(new Error('Manifest timeout 10000ms'), { name: 'TimeoutError', code: 'ETIMEDOUT' });
+    if (remainingMs <= 0) throw Object.assign(new Error('Manifest timeout 3500ms'), { name: 'TimeoutError', code: 'ETIMEDOUT' });
     // outboundGuard: the URL comes from the request, so every hop of the redirect
     // chain is vetted by the SSRF guard (a public URL 302-ing to the LAN or the
     // cloud metadata address must not be fetched and returned as a playlist).

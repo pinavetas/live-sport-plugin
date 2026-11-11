@@ -1659,9 +1659,9 @@ async function handleStream(type, id, config) {
 
   streams.sort((a, b) => compareStreams(a, b, languagePriorities));
 
-  // Pinned donation link: unshifted to index 0 so it appears at the top of every match
-  const donationUrl = process.env.DONATION_URL || '/donate';
-  if (streams.length > 0 && donationUrl && donationUrl !== 'disabled' && donationUrl !== 'false') {
+  // Pinned donation link: only if an explicit external DONATION_URL is provided
+  const donationUrl = process.env.DONATION_URL;
+  if (streams.length > 0 && donationUrl && donationUrl !== 'disabled' && donationUrl !== 'false' && /^https?:\/\//i.test(donationUrl)) {
     streams.unshift({
       name: '🧿 Support Us',
       title: '❤️ Help keep servers & streams alive\nTap to open Donation Center (Ko-fi / Crypto)',
