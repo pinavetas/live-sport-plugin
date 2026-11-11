@@ -145,7 +145,6 @@ Catalogs automatically adapt based on current time:
 ### ⚡ Seamless Playback & Multi-Part Coverage
 - **Direct Playable TV Items:** Every replay is mapped directly as a playable video item—no fake TV show seasons, episodes, or multiple nested menus.
 - **Multi-Part & Highlights Options:** Choose between full unbroken match streams, split 1st Half / 2nd Half coverage, and condensed highlight packages.
-- **Nuvio Native Collections:** Built-in `/collections.json` endpoint powers horizontal landscape row browsing out-of-the-box.
 
 ---
 

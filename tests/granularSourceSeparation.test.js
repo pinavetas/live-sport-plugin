@@ -219,7 +219,7 @@ describe('Granular Live & Replay Source Separation', () => {
     });
 
     test('replay sources container lives inside personalization panel and syncs with replayFilter', () => {
-      const prefsPanel = html.slice(html.indexOf('aria-labelledby="prefs-h"'), html.indexOf('aria-labelledby="collections-h"'));
+      const prefsPanel = html.slice(html.indexOf('aria-labelledby="prefs-h"'), html.indexOf('aria-labelledby="install-h"'));
       expect(prefsPanel).toContain('id="replayFilter"');
       expect(prefsPanel).toContain('id="replaySourcesContainer"');
       expect(html).toMatch(/syncReplayVisibility/);
