@@ -1206,8 +1206,6 @@ class MatchAggregator {
       aliasIds: Array.from(aliasIds),
       sources: [...(primary.sources || [])]
     });
-    if (secondary.isCustomAi) merged.isCustomAi = true;
-    if (secondary.customAiSource && !merged.customAiSource) merged.customAiSource = secondary.customAiSource;
 
     const getSourceKey = (s) => [
       s.source || '',
@@ -1596,8 +1594,6 @@ class MatchAggregator {
           }
         }
         if (match.popular === '1') existing.popular = '1';
-        if (match.isCustomAi) existing.isCustomAi = true;
-        if (match.customAiSource && !existing.customAiSource) existing.customAiSource = match.customAiSource;
         const isPitSportNonMotorsport = (url) => url && /pitsport/i.test(url) && existing.category !== 'motorsport';
         if (!existing.poster && match.poster && !match.poster.includes('ppvservices.st') && !match.poster.includes('unique-tournament') && !match.poster.includes('ondemand.st') && !isPitSportNonMotorsport(match.poster)) existing.poster = match.poster;
         if (!existing.logo && match.logo && !match.logo.includes('ppvservices.st') && !match.logo.includes('unique-tournament') && !match.logo.includes('ondemand.st')) existing.logo = match.logo;

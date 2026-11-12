@@ -23,7 +23,7 @@ const child_process = require('child_process');
 const path = require('path');
 
 const { builder } = require('./manifest');
-const { handleCatalog, handleMeta, isReplayMatch, hasCustomAiContent } = require('./catalog');
+const { handleCatalog, handleMeta, isReplayMatch } = require('./catalog');
 const { createReplaySubcatalogHandler } = require('./routes/replaySubcatalogs');
 const { handleStream } = require('./streams');
 const { PORT, BASE_URL, STREAM_BASE_URL, getRequestBaseUrl, getLocalIp } = require('./config');
@@ -769,7 +769,6 @@ app.use(require('./routes/leafManifest'));
 app.use(require('./routes/scoreZoneStream'));
 app.use(require('./routes/hlsResource'));
 app.use(require('./routes/embed'));
-app.use('/api/parser', require('./routes/parserStudio'));
 // Zero-bandwidth DASH→HLS converter (must stay above the /api resolver proxy)
 app.use(require('./routes/dash'));
 // Internal resolver cache APIs are used directly over loopback by cluster workers.
@@ -990,7 +989,7 @@ app.get('/:config?/manifest.json', (req, res, next) => {
     const enabledSports = parsedConfig.sports.split(',');
     
     // General catalogs to always keep (Your Teams leads first)
-    const keepCatalogs = ['nuvio_sports_teams', 'nuvio_sports_live', 'nuvio_sports_custom_ai', 'nuvio_sports_upcoming', 'nuvio_sports_networks', 'nuvio_sports_replays'];
+    const keepCatalogs = ['nuvio_sports_teams', 'nuvio_sports_live', 'nuvio_sports_upcoming', 'nuvio_sports_networks', 'nuvio_sports_replays'];
     
     // Add specific catalogs based on selection
     const sportCatalogs = ['football', 'cricket', 'basketball', 'motorsport', 'hockey', 'baseball', 'mma', 'golf', 'tennis', 'rugby', 'american_football', 'darts'];
@@ -1015,17 +1014,6 @@ app.get('/:config?/manifest.json', (req, res, next) => {
     newManifest.catalogs = newManifest.catalogs.filter(c => c.id !== 'nuvio_sports_teams');
   }
 
-  // Hide custom AI games catalog if no dynamic parsers are configured and no custom matches exist
-  // (in-memory only: mounted providers first, then a flag scan of the cache;
-  // reading the parser storage file per match blocked the event loop).
-  try {
-    const cs = container.resolve('cacheService');
-    const cachedMatches = (cs && cs.getMatchesReadOnly ? cs.getMatchesReadOnly() : (cs ? cs.getMatches() : [])) || [];
-    if (!hasCustomAiContent(cachedMatches)) {
-      newManifest.catalogs = newManifest.catalogs.filter(c => c.id !== 'nuvio_sports_custom_ai');
-    }
-  } catch (_) {}
-
   // Catalog management: hide sport catalogs that currently have no content.
   // Dead shelves (a catalog chip that always opens empty) are worse UX than an
   // absent one. Guarded so this only applies once a sync has actually produced
@@ -1043,7 +1031,7 @@ app.get('/:config?/manifest.json', (req, res, next) => {
 
       // Always-keep catalogs: not tied to a single sport.
       const ALWAYS_KEEP = new Set([
-        'nuvio_sports_teams', 'nuvio_sports_live', 'nuvio_sports_custom_ai',
+        'nuvio_sports_teams', 'nuvio_sports_live',
         'nuvio_sports_upcoming', 'nuvio_sports_other', 'nuvio_sports_networks'
       ]);
 
@@ -1146,10 +1134,6 @@ app.use(getRouter(builder.getInterface()));
 app.use(require('./routes/watch'));
 app.use(require('./routes/health'));
 // ─── Start Server ─────────────────────────────────────────────────────────────
-
-// Initialize dynamic AI-generated parsers
-const dynamicParserRegistry = require('./services/DynamicParserRegistry');
-dynamicParserRegistry.init(container);
 
 // In cluster mode, only the primary worker instance runs background cron syncs
 if (workerOffset === 0) {

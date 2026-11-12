@@ -202,75 +202,6 @@ function isMatchLive(match) {
  * never drift apart. 24/7 networks are never replays.
  * Replays must originate from a replay-capable provider (replayzone, livetv).
  */
-/**
- * Returns the in-memory map of mounted custom-AI providers (sourceName ->
- * provider), or null when the registry is unavailable.
- *
- * Only the runtime map is consulted: it is populated from the stored configs at
- * boot and kept in sync by save/delete, so it is the authoritative set of active
- * parsers. Reading the storage file instead (listParsers: existsSync +
- * readFileSync + JSON.parse) cost ~31µs per call, which blocked the event loop
- * for ~0.3s when applied to every match of a ~10k-match cache.
- */
-function getActiveCustomAiProviders() {
-  let registry = null;
-  try {
-    registry = container.resolve('dynamicParserRegistry');
-  } catch (_) {
-    try { registry = require('./services/DynamicParserRegistry'); } catch (_) {}
-  }
-  const active = registry && registry.activeProviders;
-  return active && typeof active.has === 'function' ? active : null;
-}
-
-/**
- * Core custom-AI check against an already-resolved active provider map, so hot
- * loops resolve the registry once instead of once per match.
- */
-function matchBelongsToCustomAi(match, active) {
-  if (!match) return false;
-  if (match.isCustomAi === true) return true;
-  if (match.customAiSource) return true;
-  if (!active || active.size === 0) return false;
-
-  if (Array.isArray(match.sources)) {
-    for (let i = 0; i < match.sources.length; i++) {
-      const s = match.sources[i];
-      if (s && s.source && active.has(s.source)) return true;
-    }
-  }
-  if (typeof match.id === 'string') {
-    for (const name of active.keys()) {
-      if (name && match.id.startsWith(name + '_')) return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Determines whether a match was parsed by an AI-generated custom parser.
- * Pure in-memory check (flags + active provider names); never touches disk.
- */
-function isCustomAiMatch(match) {
-  if (!match) return false;
-  if (match.isCustomAi === true || match.customAiSource) return true;
-  return matchBelongsToCustomAi(match, getActiveCustomAiProviders());
-}
-
-/**
- * Whether the Custom IA catalog has anything to show: a mounted custom parser,
- * or a cached match flagged as custom-AI. Used by the manifest handler.
- */
-function hasCustomAiContent(matches) {
-  const active = getActiveCustomAiProviders();
-  if (active && active.size > 0) return true;
-  if (!Array.isArray(matches)) return false;
-  for (let i = 0; i < matches.length; i++) {
-    if (matchBelongsToCustomAi(matches[i], active)) return true;
-  }
-  return false;
-}
-
 function isReplayMatch(match) {
   if (!match) return false;
   if (match.category === 'networks') return false;
@@ -823,11 +754,7 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
 
   // Providers only supply a score for a fixture that is under way or finished.
   const scoreSuffix = match.score ? ` (${match.score})` : '';
-  const isCustomAi = isCustomAiMatch(match);
-  let prefix = isReplay ? '⏪ ' : (isLive ? (is247 ? '📺 ' : '🔴 LIVE: ') : '⏱️ ');
-  if (isCustomAi) {
-    prefix = isLive ? '🤖🔴 LIVE: ' : (isReplay ? '🤖⏪ ' : '🤖 ');
-  }
+  const prefix = isReplay ? '⏪ ' : (isLive ? (is247 ? '📺 ' : '🔴 LIVE: ') : '⏱️ ');
   const cast = [];
   if (team1Name) cast.push(team1Name);
   if (team2Name) cast.push(team2Name);
@@ -841,9 +768,6 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
         ? `🔴 LIVE NOW${scoreSuffix}`
         : (isReplay ? `⏪ Replay (${replayReleaseInfo})` : `⏱️ Kickoff at ${timeString}${relativeTimeStr}`));
   let desc = `${leagueStr}📅 Category: ${match.category.toUpperCase()}\n⏰ Status: ${statusStr}`;
-  if (isCustomAi) {
-    desc += `\n🤖 Source: Custom IA Parser (${match.customAiSource || 'Studio'})`;
-  }
 
   const isSeriesReplay = reqType === 'series';
 
@@ -851,7 +775,7 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
     id: `nuvio_sport_${match.id}`,
     type: reqType,
     name: `${prefix}${match.title}`,
-    genres: [match.category.toUpperCase(), ...(isCustomAi ? ['CUSTOM IA'] : [])],
+    genres: [match.category.toUpperCase()],
     poster: poster,
     posterShape: isSeriesReplay ? 'regular' : 'landscape',
     background: background,
@@ -1544,9 +1468,6 @@ async function handleCatalogUncached(type, id, extra, config) {
   } else if (categoryMatch === 'upcoming') {
     const now = Date.now();
     filteredMatches = matches.filter(m => !isMatchLive(m) && (getKickoff(m.date) || 0) > now);
-  } else if (categoryMatch === 'custom_ai') {
-    const activeCustomAi = getActiveCustomAiProviders();
-    filteredMatches = matches.filter(m => matchBelongsToCustomAi(m, activeCustomAi));
   } else if (categoryMatch === 'replays') {
     filteredMatches = matches.filter(m => {
       if (!isReplayMatch(m)) return false;
@@ -1605,10 +1526,6 @@ async function handleCatalogUncached(type, id, extra, config) {
 
   filteredMatches = filteredMatches.filter(m => {
     const isReplay = isReplayMatch(m);
-
-    if (categoryMatch === 'custom_ai') {
-      return true; // Keep all custom AI games (live, replay, upcoming)
-    }
 
     if (isReplayMode) {
       if (m.sources && m.sources.some(s => s.source === 'timstreams')) return false;
@@ -1709,7 +1626,7 @@ async function handleCatalogUncached(type, id, extra, config) {
   }
 
   // ── Genre filter (Replays / Live Now / Upcoming) ──────────────────────────
-  const GENRE_FILTERABLE = { replays: 1, live: 1, upcoming: 1, custom_ai: 1 };
+  const GENRE_FILTERABLE = { replays: 1, live: 1, upcoming: 1 };
   if (GENRE_FILTERABLE[categoryMatch] && extra && typeof extra.genre === 'string' && extra.genre.trim()) {
     const wanted = GENRE_TO_CATEGORY[extra.genre.trim().toLowerCase()] || null;
     if (wanted) {
@@ -1824,9 +1741,6 @@ async function handleCatalogUncached(type, id, extra, config) {
   } else if (categoryMatch === 'live') {
     cacheTtl = 120; // 2 minutes for live matches
     staleTtl = 300; // 5 minutes SWR
-  } else if (categoryMatch === 'custom_ai') {
-    cacheTtl = 60; // 1 minute for custom AI matches
-    staleTtl = 120;
   } else if (categoryMatch === 'upcoming') {
     cacheTtl = 300; // 5 minutes for upcoming
     staleTtl = 600;
@@ -1935,8 +1849,6 @@ module.exports = {
   handleMeta,
   isMatchLive,
   isReplayMatch,
-  isCustomAiMatch,
-  hasCustomAiContent,
   mapMatchToMetaPreview,
   getKickoff,
   getEventDurationMs,

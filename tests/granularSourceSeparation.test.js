@@ -164,49 +164,6 @@ describe('Granular Live & Replay Source Separation', () => {
     });
   });
 
-  describe('Dynamic custom-AI sources', () => {
-    const { KNOWN_FALLBACKS } = require('../src/streams');
-    const dynamicParserRegistry = require('../src/services/DynamicParserRegistry');
-    const CUSTOM = 'myreplays';
-    const withCustom = [...sampleSources, { source: CUSTOM, id: 'https://example.com/replay/1' }];
-
-    beforeEach(() => {
-      // What DynamicParserRegistry.mountProvider does for an active parser.
-      dynamicParserRegistry.activeProviders.set(CUSTOM, { sourceName: CUSTOM });
-      KNOWN_REPLAY_SOURCES.push(CUSTOM);
-      KNOWN_FALLBACKS.push(CUSTOM);
-    });
-
-    afterEach(() => {
-      dynamicParserRegistry.activeProviders.delete(CUSTOM);
-      KNOWN_REPLAY_SOURCES.splice(KNOWN_REPLAY_SOURCES.indexOf(CUSTOM), 1);
-      KNOWN_FALLBACKS.splice(KNOWN_FALLBACKS.indexOf(CUSTOM), 1);
-    });
-
-    test('survive a narrowed replaySources list (the UI has no checkbox for them)', () => {
-      const names = selectSources(withCustom, { replaySources: 'soccerfull' }).map(s => s.source);
-      expect(names).toContain(CUSTOM);
-      expect(names).toContain('soccerfull');
-      expect(names).not.toContain('fullraces');
-    });
-
-    test('survive a narrowed legacy sources list', () => {
-      const names = selectSources(withCustom, { sources: 'daddylive' }).map(s => s.source);
-      expect(names).toContain(CUSTOM);
-      expect(names).not.toContain('watchfooty');
-    });
-
-    test("are removed by replaySources 'none'", () => {
-      const names = selectSources(withCustom, { replaySources: 'none' }).map(s => s.source);
-      expect(names).not.toContain(CUSTOM);
-    });
-
-    test('an unmounted custom source is not whitelisted', () => {
-      dynamicParserRegistry.activeProviders.delete(CUSTOM);
-      const names = selectSources(withCustom, { replaySources: 'soccerfull' }).map(s => s.source);
-      expect(names).not.toContain(CUSTOM);
-    });
-  });
 
   describe('Configure page markup & wiring validation', () => {
     const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'configure.html'), 'utf8');

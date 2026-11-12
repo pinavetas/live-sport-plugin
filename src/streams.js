@@ -180,12 +180,6 @@ function isReplaySource(sourceName) {
   return KNOWN_REPLAY_SOURCES.includes(sourceName);
 }
 
-function isDynamicCustomSource(srcName) {
-  let dynamicParserRegistry = null;
-  try { dynamicParserRegistry = container.resolve('dynamicParserRegistry'); } catch (_) {}
-  return Boolean(dynamicParserRegistry && dynamicParserRegistry.activeProviders && dynamicParserRegistry.activeProviders.has(srcName));
-}
-
 function selectSources(matchSources, config, match = null) {
   const cleanSources = (matchSources || []).filter(src => !isEventStreamSource(src));
   const sortedSources = [...cleanSources].sort((a, b) => {
@@ -234,9 +228,6 @@ function selectSources(matchSources, config, match = null) {
       if (isReplay) {
         if (!hasReplayConfig) return KNOWN_FALLBACKS.includes(src.source);
         if (replaySetting === 'none') return false;
-        // Custom-AI sources are not in the configure UI's checkbox list, so a
-        // narrowed list can never name them; only 'none' turns them off.
-        if (isDynamicCustomSource(src.source)) return true;
         return checkAllowed(src.source, replayAllowed);
       } else {
         if (!hasLiveConfig) return KNOWN_FALLBACKS.includes(src.source);
@@ -256,7 +247,6 @@ function selectSources(matchSources, config, match = null) {
       if (src.source.startsWith('yaml_')) return true;
       const isFallback = KNOWN_FALLBACKS.includes(src.source);
       if (!isFallback) return false;
-      if (isDynamicCustomSource(src.source)) return true;
       return checkAllowed(src.source, enabled);
     });
   }
@@ -388,20 +378,6 @@ async function dispatchToProvider(sourceName, src, match, opts = {}, config = {}
     const provider = yamlProviders.find(p => p.name === pName);
     if (provider) {
       resStreams = await provider.resolveStream(src.id, match.category, match.title);
-    }
-  } else {
-    // Check if source belongs to a dynamic custom AI provider
-    let dynamicParserRegistry = null;
-    try {
-      dynamicParserRegistry = container.resolve('dynamicParserRegistry');
-    } catch (_) {}
-    const dynamicProvider = dynamicParserRegistry && dynamicParserRegistry.activeProviders
-      ? dynamicParserRegistry.activeProviders.get(sourceName)
-      : null;
-    if (dynamicProvider && typeof dynamicProvider.resolveStream === 'function') {
-      resStreams = await dynamicProvider.resolveStream(src.id, match.category, match.title, src);
-    } else {
-      resStreams = [];
     }
   }
 
@@ -1481,13 +1457,7 @@ async function handleStream(type, id, config) {
     const { isReplayMatch } = require('./catalog');
     if (isReplayMatch(match)) {
       const { REPLAY_SOURCES } = require('./catalog');
-      let dynamicParserRegistry = null;
-      try { dynamicParserRegistry = container.resolve('dynamicParserRegistry'); } catch (_) {}
-      const activeDynamic = dynamicParserRegistry ? dynamicParserRegistry.activeProviders : null;
-      const replaySources = candidateSources.filter(s => s && (
-        (REPLAY_SOURCES && REPLAY_SOURCES.has(s.source)) || 
-        (activeDynamic && activeDynamic.has(s.source))
-      ));
+      const replaySources = candidateSources.filter(s => s && REPLAY_SOURCES && REPLAY_SOURCES.has(s.source));
       if (replaySources.length > 0) {
         candidateSources = replaySources;
       }
