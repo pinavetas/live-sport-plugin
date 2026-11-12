@@ -1,6 +1,5 @@
 'use strict';
 
-const dns = require('node:dns');
 const net = require('node:net');
 const { Agent, Socks5ProxyAgent, buildConnector, request } = require('undici');
 const { checkOutboundUrl } = require('./OutboundUrlGuard');
@@ -17,7 +16,12 @@ class OutboundBlockedError extends Error {
   }
 }
 
-const resolveAll = async hostname => (await dns.promises.lookup(hostname, { all: true, verbatim: true })).map(record => record.address);
+// Same resolver as the URL gate: system DNS first, then the adaptive DoH
+// resolver only when the ISP answers with a sinkhole or NXDOMAIN (ISP blocks).
+// Every answer is still vetted, so a name that really points at private space
+// stays blocked. Resolving with system DNS alone here sent blocked sites to
+// 127.0.0.1 and failed them as blocked_address.
+const resolveAll = hostname => require('./OutboundUrlGuard').resolveHostname(hostname);
 
 async function assertOutboundUrl(url, options) {
   let parsed;

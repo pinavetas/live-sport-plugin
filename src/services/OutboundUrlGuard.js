@@ -416,4 +416,7 @@ module.exports = {
   getAllowedHosts,
   matchesAllowedHost,
   isReservedHostname,
+  // System DNS with the adaptive (DoH) fallback for ISP-sinkholed names; the
+  // socket-level guard in GuardedOutbound must resolve exactly like the gate.
+  resolveHostname: defaultResolve,
 };
