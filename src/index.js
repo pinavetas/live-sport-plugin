@@ -55,6 +55,20 @@ app.set('container', container);
 app.set('trust proxy', true);
 app.use(cors());
 
+// Opt-in access log (LOG_REQUESTS=1): one line per request with client IP,
+// path, status and duration. Off by default: config segments and stream URLs
+// in the path can carry personal settings and upstream tokens.
+if (/^(1|true|yes)$/i.test(String(process.env.LOG_REQUESTS || ''))) {
+  app.use((req, res, next) => {
+    const startedAt = Date.now();
+    res.on('finish', () => {
+      const url = req.originalUrl.length > 200 ? `${req.originalUrl.slice(0, 200)}…` : req.originalUrl;
+      console.log(`[HTTP] ${req.ip} ${req.method} ${url} -> ${res.statusCode} ${Date.now() - startedAt}ms`);
+    });
+    next();
+  });
+}
+
 // Artwork under /posters is large (the replay hero JPEGs are ~100-200 KB) and
 // rarely changes, but it used to be sent with no-store. That made Cloudflare
 // report BYPASS, so every view pulled the bytes from origin - the largest

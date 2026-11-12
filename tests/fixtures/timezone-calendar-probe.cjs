@@ -31,6 +31,7 @@ async function probe(day) {
     './services/ChannelLogoService': { getChannelLogo: () => null },
     './streams': { prewarmMatch: async () => {} },
     './config': { BASE_URL: 'https://addon.example.org' },
+    './contentTypes': require(path.join(root, 'src/contentTypes')),
     './services/ImageService': { datePosterUrl(base, date) {
       posterDates.push(date);
       return `${base}/img/date?date=${encodeURIComponent(date)}`;

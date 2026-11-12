@@ -7,6 +7,7 @@ const { createDeferredResolution, inconclusiveErrorReason, markInconclusiveStrea
 const { resolveSegmentUrl } = require('./services/HlsRewriteService');
 const { parseLanguagePriority, compareStreams, canonicalLanguage } = require('./services/LanguagePriorityService');
 const { BASE_URL } = require('./config');
+const { SPORTS_TYPE, isSupportedType } = require('./contentTypes');
 const { performance } = require('perf_hooks');
 const SkTechCrypto = require('./resolver/sktech/SkTechCrypto');
 const { manifestPlaybackUrl } = require('./services/ManifestPlaybackUrl');
@@ -1360,7 +1361,7 @@ function deduplicateResolutions(streams) {
 }
 
 async function handleStream(type, id, config) {
-  if ((type !== 'tv' && type !== 'series' && type !== 'channel') || !id.startsWith('nuvio_sport_')) {
+  if (!isSupportedType(type) || !id.startsWith('nuvio_sport_')) {
     return { streams: [] };
   }
 
@@ -1583,7 +1584,7 @@ async function handleStream(type, id, config) {
   // cannot stall a normal event once a playable Priority-1 quorum is ready.
   const TV_CHANNEL_QUORUM = Number(process.env.TV_CHANNEL_QUORUM || 5);
   const isTvChannel = Boolean(
-    (type === 'tv' || type === 'channel') &&
+    (type === 'tv' || type === 'channel' || type === SPORTS_TYPE) &&
     (match ? (
       match.category === 'networks' ||
       match.isChannel ||

@@ -180,10 +180,11 @@ class CronService {
     setImmediate(async () => {
       try {
         const { handleCatalog } = require('../catalog');
+        const { SPORTS_TYPE } = require('../contentTypes');
         // Yield between pages so this never blocks request handling.
-        await handleCatalog('tv', 'nuvio_sports_live', {}, {}).catch(() => {});
+        await handleCatalog(SPORTS_TYPE, 'nuvio_sports_live', {}, {}).catch(() => {});
         await new Promise((r) => setImmediate(r));
-        await handleCatalog('tv', 'nuvio_sports_catalog', {}, {}).catch(() => {});
+        await handleCatalog(SPORTS_TYPE, 'nuvio_sports_catalog', {}, {}).catch(() => {});
       } catch (_) {
         // Never let memo hygiene disturb the sync cycle.
       } finally {

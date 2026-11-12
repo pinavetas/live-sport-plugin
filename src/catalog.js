@@ -2,6 +2,7 @@ const container = require('./container');
 const { getChannelLogo } = require('./services/ChannelLogoService');
 const { prewarmMatch } = require('./streams');
 const { BASE_URL } = require('./config');
+const { SPORTS_TYPE, isSupportedType } = require('./contentTypes');
 const imageService = require('./services/ImageService');
 const { parseTimezone } = require('./timezone');
 const { getMatchTier } = require('./services/MainstreamRankingService');
@@ -1014,7 +1015,7 @@ function _stableSig(obj) {
 }
 
 async function handleCatalog(type, id, extra, config) {
-  if (type !== 'tv' && type !== 'series' && type !== 'channel') return { metas: [] };
+  if (!isSupportedType(type)) return { metas: [] };
   if (!id.startsWith('nuvio_sports_')) return { metas: [] };
 
   // Keep the SWR trigger on EVERY catalog request (a cheap staleness check) —
@@ -1756,7 +1757,7 @@ async function handleCatalogUncached(type, id, extra, config) {
 }
 
 async function handleMeta(type, id, config) {
-  if (type !== 'tv' && type !== 'series' && type !== 'channel') {
+  if (!isSupportedType(type)) {
     return { meta: null };
   }
 
@@ -1768,7 +1769,7 @@ async function handleMeta(type, id, config) {
   // Cloudflare bypasses its edge cache for /:config/meta/... URLs (unique per
   // user), so every personalized click hits the VPS. This in-process LRU means
   // repeat requests for the same match return in < 5ms instead of ~800ms.
-  const effectiveType = type === 'series' ? 'series' : 'tv';
+  const effectiveType = type === 'series' ? 'series' : (type === SPORTS_TYPE ? SPORTS_TYPE : 'tv');
   const _hmCacheKey = _metaCacheKey(id, config, id.startsWith('nuvio_sport_replay_') ? 'series' : effectiveType);
   const _hmRevision = _metaCacheRevision();
   // Fire-and-forget stale-while-revalidate, same as handleCatalog.
@@ -1797,7 +1798,7 @@ async function handleMeta(type, id, config) {
     return {
       meta: {
         id: `nuvio_sport_${matchId}`,
-        type: 'tv',
+        type: effectiveType,
         name: `⏱️ ${title}`,
         genres: ['SPORTS'],
         posterShape: 'landscape',
