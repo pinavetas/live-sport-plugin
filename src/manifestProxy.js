@@ -85,8 +85,17 @@ function playlistHasContent(text) {
 
 // Fetch + validate the upstream manifest. Throws on failure so coalesced
 // waiters share the same outcome; successful bodies are cached by the caller.
+// Total budget for one upstream playlist fetch (attempt + retry). 3.5 s cut off
+// slow-but-working CDNs (cdn.hdm1.net playlists answered 502 to the player);
+// players poll live playlists every few seconds, so 8 s is still bounded.
+function manifestFetchTimeoutMs(env = process.env) {
+  const value = Number(env.MANIFEST_FETCH_TIMEOUT_MS);
+  return Number.isFinite(value) && value >= 1000 && value <= 30000 ? value : 8000;
+}
+
 async function fetchUpstreamManifest(targetUrl, referer, origin, { withResponseUrl = false, userAgent: requestedUserAgent = '' } = {}) {
-  const deadlineAt = performance.now() + 3500;
+  const timeoutMs = manifestFetchTimeoutMs();
+  const deadlineAt = performance.now() + timeoutMs;
   const isVavoo = Boolean(
     (targetUrl && (targetUrl.includes('/sunshine/') || targetUrl.includes('vavoo.') || targetUrl.includes(':8008'))) ||
     (referer && referer.includes('vavoo.'))
@@ -102,10 +111,10 @@ async function fetchUpstreamManifest(targetUrl, referer, origin, { withResponseU
   };
   // Public targets use the guarded socket transport. Never fall back to a
   // separately resolved native connection after a guard rejection.
-  // A tight 3.5 s timeout ensures a hung upstream can never freeze the viewer's player.
+  // The bounded budget (manifestFetchTimeoutMs) keeps a hung upstream from holding the player.
   const attempt = async () => {
     const remainingMs = Math.ceil(deadlineAt - performance.now());
-    if (remainingMs <= 0) throw Object.assign(new Error('Manifest timeout 3500ms'), { name: 'TimeoutError', code: 'ETIMEDOUT' });
+    if (remainingMs <= 0) throw Object.assign(new Error(`Manifest timeout ${timeoutMs}ms`), { name: 'TimeoutError', code: 'ETIMEDOUT' });
     const result = await _safeFetch(targetUrl, { headers, timeoutMs: remainingMs, guardExternal: true, diagnosticOwner: 'manifest' });
     if (!result.ok) {
       // Carry the upstream status so the caller can tell "the token/CDN said no"

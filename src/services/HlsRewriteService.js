@@ -140,6 +140,25 @@ function buildManifestProxyUrl(upstreamUrl, opts = {}) {
   return absoluteAddonBaseUrl ? new URL(manifestPath, absoluteAddonBaseUrl).toString() : manifestPath;
 }
 
+// fMP4 media, keys and init sections must reach the player byte-exact: the TS
+// uncloak filter in /api/hlschunk is skipped for them (raw=1).
+const RAW_RELAY_PATH = /\.(?:m4s|mp4|m4a|m4v|cmfv|cmfa|aac|key|bin|vtt|webvtt)$/i;
+
+/** /api/hlschunk URL that fetches `absoluteUrl` with the playlist's upstream headers. */
+function buildSegmentRelayUrl(absoluteUrl, opts = {}, { raw = false } = {}) {
+  const { referer = '', origin = '', userAgent = '', absoluteAddonBaseUrl = '' } = opts;
+  let chunkPath = `/api/hlschunk?url=${encodeURIComponent(absoluteUrl)}`;
+  if (referer) chunkPath += `&referer=${encodeURIComponent(referer)}`;
+  if (origin) chunkPath += `&origin=${encodeURIComponent(origin)}`;
+  if (userAgent) chunkPath += `&ua=${encodeURIComponent(userAgent)}`;
+  let isRaw = raw;
+  if (!isRaw) {
+    try { isRaw = RAW_RELAY_PATH.test(new URL(absoluteUrl).pathname); } catch (_) {}
+  }
+  if (isRaw) chunkPath += '&raw=1';
+  return absoluteAddonBaseUrl ? new URL(chunkPath, absoluteAddonBaseUrl).toString() : chunkPath;
+}
+
 function rewriteHlsUri(segmentUri, manifestUrl, opts = {}) {
   const { referer = '', origin = '', absoluteAddonBaseUrl = '' } = opts;
   const absoluteUrl = resolveSegmentUrl(segmentUri, manifestUrl);
@@ -182,6 +201,11 @@ function rewriteHlsUri(segmentUri, manifestUrl, opts = {}) {
     // Default: hand the CDN URI to the player; #EXT-X-BYTERANGE does the skipping.
     return absoluteUrl;
   }
+
+  // The client will not send the CDN's required headers (see
+  // SegmentRelayPolicy): stream the segment through /api/hlschunk, which adds
+  // them. Costs server bandwidth, only for such clients.
+  if (opts.relaySegments) return buildSegmentRelayUrl(absoluteUrl, opts);
 
   // Plain MPEG-TS segments stream directly from the upstream CDN (0 VPS bandwidth bleeding).
   const isPureDisguisedTs = absoluteUrl.includes('.png') || absoluteUrl.includes('.webp') || absoluteUrl.includes('.js');
@@ -244,7 +268,9 @@ function rewriteHlsTagUris(line, manifestUrl, opts = {}) {
                   : buildManifestProxyUrl(resolveSegmentUrl(value, manifestUrl), opts))
               : isSegmentReference
                 ? rewriteHlsUri(value, manifestUrl, opts)
-                : resolved.toString();
+                // Keys / init sections: relayed byte-exact for clients that
+                // will not send the CDN's headers, direct otherwise.
+                : (opts.relaySegments ? buildSegmentRelayUrl(resolved.toString(), opts, { raw: true }) : resolved.toString());
             replacements.push({ start: valueStart, end: valueEnd, value: rewrittenUri });
           }
         } catch (_) {}
@@ -279,6 +305,10 @@ function rewriteHlsPlaylist(manifestBody, manifestUrl, opts = {}) {
   const rewritten = [];
   let currentDuration = null;
   let hasPrecedingByteRange = false;
+  // The URI after #EXT-X-STREAM-INF is a variant playlist even when its path
+  // has no .m3u8 (e.g. live.php?...&extension=m3u8); it must go through
+  // /api/manifest, never be treated (or relayed) as a media segment.
+  let nextIsVariantPlaylist = false;
 
   const requiresByteRange = segmentAddressMode() !== 'proxy' && lines.some(l => {
     const t = l.trim();
@@ -296,6 +326,7 @@ function rewriteHlsPlaylist(manifestBody, manifestUrl, opts = {}) {
     }
 
     if (trimmed.startsWith('#')) {
+      if (trimmed.startsWith('#EXT-X-STREAM-INF')) nextIsVariantPlaylist = true;
       const rewrittenTag = rewriteHlsTagUris(line, manifestUrl, opts);
       if (rewrittenTag !== line) {
         rewritten.push(rewrittenTag);
@@ -339,6 +370,16 @@ function rewriteHlsPlaylist(manifestBody, manifestUrl, opts = {}) {
 
     // URI line
     const absoluteUrl = resolveSegmentUrl(trimmed, manifestUrl);
+
+    if (nextIsVariantPlaylist) {
+      nextIsVariantPlaylist = false;
+      rewritten.push(typeof opts.toPlaylistUrl === 'function'
+        ? opts.toPlaylistUrl(absoluteUrl, opts)
+        : buildManifestProxyUrl(absoluteUrl, opts));
+      currentDuration = null;
+      hasPrecedingByteRange = false;
+      continue;
+    }
 
     if (absoluteUrl.includes('.m3u8')) {
       rewritten.push(rewriteHlsUri(trimmed, manifestUrl, opts));

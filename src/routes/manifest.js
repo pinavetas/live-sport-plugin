@@ -19,6 +19,7 @@ const { rewriteHlsUri, rewriteHlsPlaylist, preprobeManifestSegments } = require(
 const { safeFetch: _safeFetch } = require('../impitClient');
 const { getRequestBaseUrl } = require('../config');
 const { manifestUserAgent } = require('../services/ManifestUserAgent');
+const { shouldRelaySegments, playlistHasIspBlockedHost } = require('../services/SegmentRelayPolicy');
 
 // Variant BANDWIDTH declarations seen in master playlists, keyed by the
 // absolute upstream URL of the child media playlist. When that child is served
@@ -53,7 +54,10 @@ router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
   // Explicit tuple boundaries prevent collisions when URL/header values contain '|'.
   // This identity also fences remint outcomes, rewritten per-host URLs, negative
   // entries, and in-flight manifest requests from unrelated viewers.
-  const cacheKey = JSON.stringify([targetUrl, referer, origin, userAgent, rck || '', requestBaseUrl]);
+  // Clients that do not apply proxyHeaders (Stremio) get segments relayed
+  // through /api/hlschunk; the rewritten body differs, so it is part of the key.
+  const relaySegments = shouldRelaySegments(req);
+  const cacheKey = JSON.stringify([targetUrl, referer, origin, userAgent, rck || '', requestBaseUrl, relaySegments ? 'relay' : 'direct']);
   const entry = manifestCacheGet(cacheKey);
   if (entry && entry.negative) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -176,8 +180,12 @@ router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
         }
         let injectedStart = out.includes('#EXT-X-START');
 
+        // Media on an ISP-DNS-blocked host is unreachable for a player on this
+        // network too: relay it regardless of the client's headers.
+        let relayThisPlaylist = relaySegments;
         if (!isMaster) {
           await preprobeManifestSegments(out, effectiveUrl, { referer, origin });
+          if (!relayThisPlaylist) relayThisPlaylist = await playlistHasIspBlockedHost(out, effectiveUrl);
         }
 
         const rewrittenResult = rewriteHlsPlaylist(out, effectiveUrl, {
@@ -186,6 +194,7 @@ router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
           userAgent,
           rckSuffix,
           absoluteAddonBaseUrl: requestBaseUrl,
+          relaySegments: relayThisPlaylist,
           bitrate: out.includes('#EXT-X-STREAM-INF') ? undefined : variantBitrateCache.get(effectiveUrl)
         });
         if (cacheable) manifestCacheSet(cacheKey, rewrittenResult, dynamicTtl);

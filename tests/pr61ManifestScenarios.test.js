@@ -1,5 +1,9 @@
 'use strict';
 // Actual manifest route, cache and HLS rewriter with simulated upstream I/O.
+// These scenarios assert direct segment URLs; the requests carry no client
+// Referer, which would otherwise opt them into segment relay (see
+// tests/segmentRelayPolicy.test.js).
+process.env.SEGMENT_RELAY = 'off';
 jest.mock('express', () => ({ Router: () => ({get:jest.fn(),use:jest.fn(),options:jest.fn(),all:jest.fn()}),json:()=>()=>{},urlencoded:()=>()=>{} }));
 jest.mock('../src/container', () => ({resolve:()=>({noteFailure:jest.fn()})}));
 jest.mock('../src/impitClient', () => ({safeFetch:jest.fn()}));

@@ -8,6 +8,7 @@ const { resolveSegmentUrl } = require('./services/HlsRewriteService');
 const { parseLanguagePriority, compareStreams, canonicalLanguage } = require('./services/LanguagePriorityService');
 const { BASE_URL } = require('./config');
 const { SPORTS_TYPE, isSupportedType } = require('./contentTypes');
+const adaptiveDnsResolver = require('./services/AdaptiveDnsResolver');
 const { performance } = require('perf_hooks');
 const SkTechCrypto = require('./resolver/sktech/SkTechCrypto');
 const { manifestPlaybackUrl } = require('./services/ManifestPlaybackUrl');
@@ -756,6 +757,31 @@ function repairRefererFor(targetUrl) {
 // Preserve provider-supplied playback headers while normalizing well-known
 // names case-insensitively. A Map avoids inherited property names and duplicate
 // casing without changing the shared provider metadata.
+/**
+ * Direct (non-proxied) HLS stream whose host the ISP's DNS blocks (sinkhole /
+ * NXDOMAIN, learned by the adaptive resolver while the server verified it):
+ * return the addon's /api/manifest URL for it, carrying the stream's own
+ * Referer/Origin/UA. The manifest route then relays its segments too
+ * (SegmentRelayPolicy). Any other stream URL is returned unchanged.
+ */
+function wrapIspBlockedDirectHls(stream, addonBaseUrl) {
+  const url = stream && stream.url;
+  if (typeof url !== 'string' || !url) return url;
+  let parsed;
+  try { parsed = new URL(url); } catch (_) { return url; }
+  if (!['http:', 'https:'].includes(parsed.protocol) || !/\.m3u8$/i.test(parsed.pathname)) return url;
+  if (/\/api\/manifest(?:\.m3u8)?$/.test(parsed.pathname)) return url;
+  if (!adaptiveDnsResolver.isPoisonedHost(parsed.hostname)) return url;
+
+  const headers = verificationHeaders(stream);
+  let proxied = `${String(addonBaseUrl).replace(/\/+$/, '')}/api/manifest?url=${encodeURIComponent(url)}`;
+  if (headers.Referer) proxied += `&referer=${encodeURIComponent(headers.Referer)}`;
+  if (headers.Origin) proxied += `&origin=${encodeURIComponent(headers.Origin)}`;
+  const ua = manifestUserAgent(headers['User-Agent']);
+  if (ua) proxied += `&hlsua=${encodeURIComponent(ua)}`;
+  return proxied;
+}
+
 function verificationHeaders(stream) {
   const canonical = new Map([
     ['referer', 'Referer'], ['origin', 'Origin'], ['user-agent', 'User-Agent'],
@@ -1895,6 +1921,10 @@ async function handleStream(type, id, config) {
     s.behaviorHints = s.behaviorHints || {};
     s.behaviorHints.bingeGroup = `nuvio_sport_${matchId}`;
     
+    // A direct HLS URL on an ISP-DNS-blocked host is unreachable for a player
+    // on this network: hand it the addon's manifest proxy instead.
+    s.url = wrapIspBlockedDirectHls(s, BASE_URL);
+
     // Change only the published path, after withResolveKey has tagged provider
     // results. Cached provider URLs and recovery-key generation retain their form.
     s.url = manifestPlaybackUrl(s.url, BASE_URL);
@@ -2101,6 +2131,7 @@ function suppressPreMatchTeamChannels(streams, match) {
 module.exports = {
   KNOWN_FALLBACKS,
   handleStream,
+  wrapIspBlockedDirectHls,
   prewarmMatch,
   resolveKey,
   prewarmSkipProvidersSet,
