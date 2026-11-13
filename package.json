@@ -6,11 +6,13 @@
   "scripts": {
     "start": "node dist/index.js",
     "dev": "node --watch-path=src src/index.js",
-    "build": "npx @vercel/ncc build src/index.js -o dist --minify -e sharp && npx -y copyfiles -f \"src/providers/*.wasm\" \"src/providers/*.js\" dist && npx -y copyfiles -u 2 \"resolver/src/**/*\" dist/src && node -e \"require('fs').writeFileSync('dist/src/package.json', JSON.stringify({type:'module'},null,2))\" && npx -y copyfiles -u 1 \"public/**/*\" dist/public && npx -y copyfiles -f \"src/data/*.json\" dist/data && npx -y copyfiles -f \"src/data/*.json\" dist/src/data && npx -y copyfiles -f \"src/data/*.json\" data",
+    "build": "npx @vercel/ncc build src/index.js -o dist.next --minify -e sharp && npx -y copyfiles -f \"src/providers/*.wasm\" \"src/providers/*.js\" dist.next && node scripts/copy-guarded-worker-deps.js dist.next && npx -y copyfiles -u 2 \"resolver/src/**/*\" dist.next/src && node -e \"require('fs').writeFileSync('dist.next/src/package.json', JSON.stringify({type:'module'},null,2))\" && npx -y copyfiles -u 1 \"public/**/*\" dist.next/public && npx -y copyfiles -f \"src/data/*.json\" dist.next/data && npx -y copyfiles -f \"src/data/*.json\" dist.next/src/data",
+    "build:local": "npx @vercel/ncc build src/index.js -o dist --minify -e sharp && npx -y copyfiles -f \"src/providers/*.wasm\" \"src/providers/*.js\" dist && node scripts/copy-guarded-worker-deps.js dist && npx -y copyfiles -u 2 \"resolver/src/**/*\" dist/src && node -e \"require('fs').writeFileSync('dist/src/package.json', JSON.stringify({type:'module'},null,2))\" && npx -y copyfiles -u 1 \"public/**/*\" dist/public && npx -y copyfiles -f \"src/data/*.json\" dist/data && npx -y copyfiles -f \"src/data/*.json\" dist/src/data && npx -y copyfiles -f \"src/data/*.json\" data",
     "test": "jest",
     "test:e2e-client": "node scripts/test-e2e-simulated-client.js",
     "test:sanity": "node scripts/test-e2e-simulated-client.js",
     "test:247": "node scripts/test-247-channels.js",
+    "test:regress:ak47": "node scripts/regress-ak47-live.js",
     "test:compare-live": "node scripts/compare-live-vs-local.js",
     "compare:live-streams": "node scripts/compare-live-matches.js",
     "generate:provider": "node scripts/generate-provider.js",
@@ -24,10 +26,14 @@
     "bench:heap": "node --expose-gc tests/load/heap-benchmark.js",
     "bench:compare": "node scripts/run-branch-benchmark.js --multiplier 1.0",
     "bench:compare:full": "node scripts/run-branch-benchmark.js --multiplier 1.0 --scale 50000",
-    "bench:report": "node scripts/generate-bench-report.js"
+    "bench:report": "node scripts/generate-bench-report.js",
+    "timezone:prepare": "node scripts/prepare-timezone-data.cjs",
+    "check:timezone": "node scripts/check-timezone-runtime.cjs",
+    "check:timezone-release": "node scripts/check-timezone-data-release.cjs",
+    "prebuild": "npm run check:timezone",
+    "prebuild:local": "npm run check:timezone"
   },
   "dependencies": {
-    "acorn": "^8.18.0",
     "awilix": "^13.0.5",
     "big-integer": "^1.6.52",
     "cheerio": "^1.2.0",
@@ -72,7 +78,11 @@
       "/test-scripts/",
       "/scratch/",
       "/nuvio-proxy-2/",
+      "/review-checkouts/",
       "/tests/load/"
+    ],
+    "testMatch": [
+      "**/?(*.)+(spec|test).[tj]s?(x)"
     ]
   },
   "overrides": {
@@ -80,6 +90,7 @@
     "inflight": "^1.0.6"
   },
   "devDependencies": {
+    "acorn": "^8.19.0",
     "jest": "^29.7.0",
     "jsdom": "^29.1.1",
     "nock": "^14.0.16",

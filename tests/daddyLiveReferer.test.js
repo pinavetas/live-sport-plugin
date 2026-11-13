@@ -1,5 +1,9 @@
 'use strict';
 
+jest.mock('../src/services/DaddyLiveMediaCheck', () => ({
+  checkDaddyLiveMedia: jest.fn(async () => ({ status: 'ok' }))
+}));
+
 // The regression being pinned: when a decoded manifest lives on a host the
 // iframe-domain registry knows as a TERMINAL host, the Referer emitted for it
 // must be the registry's — not one derived from whichever iframe happened to
@@ -81,7 +85,8 @@ describe('DaddyLiveProvider — Referer comes from the iframe-domain registry', 
 
     // Manifest proxy stream is web-ready (notWebReady: false) with no redundant proxyHeaders
     expect(stream.behaviorHints.notWebReady).toBe(false);
-    expect(stream.behaviorHints.proxyHeaders).toBeUndefined();
+    expect(stream.behaviorHints.proxyHeaders.request['Referer']).toBe(REGISTRY_REFERER);
+    expect(stream.behaviorHints.proxyHeaders.request['Origin']).toBe('https://assetrage.net');
 
     // A registry-known terminal host is taken as final, so the folder scan stops
     // there instead of walking the rest of the matrix (one player + one embed).
@@ -102,7 +107,7 @@ describe('DaddyLiveProvider — Referer comes from the iframe-domain registry', 
     expect(q.referer).toBe(REGISTRY_REFERER);
     expect(q.referer).not.toBe(KNOWN_WRAPPER_REFERER);
     expect(streams[0].behaviorHints.notWebReady).toBe(false);
-    expect(streams[0].behaviorHints.proxyHeaders).toBeUndefined();
+    expect(streams[0].behaviorHints.proxyHeaders.request['Referer']).toBe(REGISTRY_REFERER);
   });
 
   test('falls back to the iframe-origin Referer when the registry does not know the terminal host', async () => {
@@ -118,7 +123,8 @@ describe('DaddyLiveProvider — Referer comes from the iframe-domain registry', 
     expect(q.referer).toBe(IFRAME_REFERER);
     expect(q.origin).toBe('https://tiestep.top');
     expect(stream.behaviorHints.notWebReady).toBe(false);
-    expect(stream.behaviorHints.proxyHeaders).toBeUndefined();
+    expect(stream.behaviorHints.proxyHeaders.request['Referer']).toBe(IFRAME_REFERER);
+    expect(stream.behaviorHints.proxyHeaders.request['Origin']).toBe('https://tiestep.top');
 
     // The unknown case is held as a fallback rather than scanning every
     // remaining folder/mirror, so resolution stays bounded.

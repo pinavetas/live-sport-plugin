@@ -1,13 +1,43 @@
 const container = require('./container');
 const ChannelCountryService = require('./services/ChannelCountryService');
 const ChannelIdentityService = require('./services/ChannelIdentityService');
-const { withRetry, isTransientStatus, isTransientError } = require('./services/retry');
-const { rewriteHlsUri } = require('./services/HlsRewriteService');
-const { parseLanguagePriority, compareStreams } = require('./services/LanguagePriorityService');
+const { withRetry, isTransientStatus, isTransientError, createAttemptTimeoutError } = require('./services/retry');
+const { createDeferredResolution, inconclusiveErrorReason, markInconclusiveStreams,
+  inconclusiveStreamsReason } = require('./services/StreamResolutionOutcome');
+const { resolveSegmentUrl } = require('./services/HlsRewriteService');
+const { parseLanguagePriority, compareStreams, canonicalLanguage } = require('./services/LanguagePriorityService');
 const { BASE_URL } = require('./config');
+const { SPORTS_TYPE, isSupportedType } = require('./contentTypes');
+const adaptiveDnsResolver = require('./services/AdaptiveDnsResolver');
 const { performance } = require('perf_hooks');
 const SkTechCrypto = require('./resolver/sktech/SkTechCrypto');
 const { manifestPlaybackUrl } = require('./services/ManifestPlaybackUrl');
+const { manifestUserAgent } = require('./services/ManifestUserAgent');
+const { relations: timingRelations } = require('./services/TimingRuntime');
+const { isBlockedDashStream, isBlockedStream } = require('./services/StreamPolicy');
+const { isLowPpvSourceMetadata } = require('./services/PpvQualityPolicy');
+
+let _liveOverlayRef;
+/**
+ * Resolve the live overlay once per process.
+ *
+ * Guarded rather than required: streams.js is loaded by unit tests with a
+ * partial container, and a missing registration must degrade to "no overlay"
+ * instead of throwing while resolving somebody's stream.
+ */
+function _liveOverlay() {
+  if (_liveOverlayRef !== undefined) return _liveOverlayRef;
+  try {
+    if (typeof container.hasRegistration === 'function' && !container.hasRegistration('liveOverlayService')) {
+      _liveOverlayRef = null;
+      return null;
+    }
+    _liveOverlayRef = container.resolve('liveOverlayService') || null;
+  } catch (_) {
+    _liveOverlayRef = null;
+  }
+  return _liveOverlayRef;
+}
 
 // Source selection (shared by handleStream and prewarmMatch)
 function detectChannelCountry(channelName) {
@@ -26,8 +56,10 @@ function isEventStreamSource(src) {
 }
 
 const SOURCE_PRIORITY = {
+  scorezone: 1,
   leaf: 1,
   daddylive: 1,
+  pitsport: 2,
   vavoo: 2,
   sktech: 2,
   ppvst: 2,
@@ -46,6 +78,7 @@ const SOURCE_PRIORITY = {
   fullraces: 2,
   hockeyreplays: 2,
   mlblive: 2,
+  leaf_recap: 2,
   watchfooty: 2,
   vipleague: 2.5,
   admin: 3,
@@ -64,9 +97,9 @@ const SOURCE_PRIORITY = {
 
 const VERIFY_BODY_MAX_BYTES = 64 * 1024;
 
-const KNOWN_REPLAY_SOURCES = ['replayzone', 'livetv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive'];
-const KNOWN_LIVE_SOURCES = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'damitv', 'sktech', 'vavoo', 'ak47live', 'leaf', 'madplay', 'bintv', 'angulismo', 'tdtchannels', 'nbamonster', 'vipleague', 'strumyk'];
-const KNOWN_FALLBACKS = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'replayzone', 'livetv', 'damitv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive', 'sktech', 'vavoo', 'ak47live', 'leaf', 'madplay', 'bintv', 'angulismo', 'tdtchannels', 'nbamonster', 'vipleague', 'strumyk'];
+const KNOWN_REPLAY_SOURCES = ['replayzone', 'livetv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive', 'leaf_recap'];
+const KNOWN_LIVE_SOURCES = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'damitv', 'sktech', 'vavoo', 'ak47live', 'leaf', 'madplay', 'bintv', 'angulismo', 'tdtchannels', 'nbamonster', 'vipleague', 'strumyk', 'scorezone', 'pitsport'];
+const KNOWN_FALLBACKS = ['ppvst', 'daddylive', 'watchfooty', 'cdnlive', 'streamsports99', 'timstreams', 'streamsports', 'embedindia', 'embedst', 'streamedpk', 'replayzone', 'livetv', 'damitv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive', 'sktech', 'vavoo', 'ak47live', 'leaf', 'madplay', 'bintv', 'angulismo', 'tdtchannels', 'nbamonster', 'vipleague', 'strumyk', 'leaf_recap', 'scorezone', 'pitsport'];
 
 // Labeling tables hoisted to module scope: they were allocated per request
 // (handleStream) and per formatChannelStreamTitle call.
@@ -100,10 +133,13 @@ const NICE_NAMES = {
   angulismo: 'AngulismoTV',
   tdtchannels: 'TDTChannels',
   nbamonster: 'NBAMonster',
+  'leaf_recap': 'Highfly Recap',
   admin: 'Streamed.pk',
   echo: 'Streamed.pk',
   golf: 'Streamed.pk',
-  delta: 'Streamed.pk'
+  delta: 'Streamed.pk',
+  scorezone: 'ScoreZone',
+  pitsport: 'PitSport'
 };
 
 const CHANNEL_TITLE_NICE_NAMES = {
@@ -125,6 +161,7 @@ const CHANNEL_TITLE_NICE_NAMES = {
   fullraces: 'FullRaces',
   hockeyreplays: 'HockeyReplays',
   mlblive: 'MLBLive',
+  leaf_recap: 'Highfly Recap',
   sktech: 'SKTech',
   vavoo: 'Vavoo',
   ppvst: 'PPV.st',
@@ -136,17 +173,13 @@ const CHANNEL_TITLE_NICE_NAMES = {
   tdtchannels: 'TDTChannels',
   nbamonster: 'NBAMonster',
   vipleague: 'VIPLeague',
-  strumyk: 'Strumyk'
+  strumyk: 'Strumyk',
+  scorezone: 'ScoreZone',
+  pitsport: 'PitSport'
 };
 
 function isReplaySource(sourceName) {
   return KNOWN_REPLAY_SOURCES.includes(sourceName);
-}
-
-function isDynamicCustomSource(srcName) {
-  let dynamicParserRegistry = null;
-  try { dynamicParserRegistry = container.resolve('dynamicParserRegistry'); } catch (_) {}
-  return Boolean(dynamicParserRegistry && dynamicParserRegistry.activeProviders && dynamicParserRegistry.activeProviders.has(srcName));
 }
 
 function selectSources(matchSources, config, match = null) {
@@ -197,9 +230,6 @@ function selectSources(matchSources, config, match = null) {
       if (isReplay) {
         if (!hasReplayConfig) return KNOWN_FALLBACKS.includes(src.source);
         if (replaySetting === 'none') return false;
-        // Custom-AI sources are not in the configure UI's checkbox list, so a
-        // narrowed list can never name them; only 'none' turns them off.
-        if (isDynamicCustomSource(src.source)) return true;
         return checkAllowed(src.source, replayAllowed);
       } else {
         if (!hasLiveConfig) return KNOWN_FALLBACKS.includes(src.source);
@@ -219,7 +249,6 @@ function selectSources(matchSources, config, match = null) {
       if (src.source.startsWith('yaml_')) return true;
       const isFallback = KNOWN_FALLBACKS.includes(src.source);
       if (!isFallback) return false;
-      if (isDynamicCustomSource(src.source)) return true;
       return checkAllowed(src.source, enabled);
     });
   }
@@ -233,15 +262,28 @@ function selectSources(matchSources, config, match = null) {
 
 // Ask one provider for its streams. Extracted from resolveSource so the whole
 // dispatch can be retried as a unit without duplicating the chain.
-async function dispatchToProvider(sourceName, src, match, config = {}) {
+// `config` is the user's addon config (MadPlay reads its base URL from it).
+async function dispatchToProvider(sourceName, src, match, opts = {}, config = {}) {
   let resStreams = [];
 
   if (sourceName === 'timstreams') {
     const provider = container.resolve('timStreamsProvider');
-    resStreams = await provider.resolveStream(src.id, match.category, match.title);
-  } else if (sourceName === 'damitv') {
-    const provider = container.resolve('damiTvProvider');
+    // `src` carries the upstream broadcaster label and the embed URL. Without it
+    // the row had no channel, and the provider re-fetched the whole schedule to
+    // recover the URL it was already given.
     resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
+  } else if (sourceName === 'damitv') {
+    const startedAt = Date.now();
+    console.info('[DamiTV] Dispatch started');
+    try {
+      const provider = container.resolve('damiTvProvider');
+      resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
+      console.info('[DamiTV] Dispatch finished', JSON.stringify({ ms: Date.now() - startedAt, streams: Array.isArray(resStreams) ? resStreams.length : 0 }));
+    } catch (failure) {
+      const kind = ['TimeoutError', 'AbortError', 'TypeError', 'SyntaxError'].includes(failure?.name) ? failure.name : 'Error';
+      console.warn('[DamiTV] Dispatch failed', JSON.stringify({ ms: Date.now() - startedAt, kind }));
+      throw failure;
+    }
   } else if (sourceName === 'watchfooty') {
     const provider = container.resolve('watchFootyProvider');
     resStreams = await provider.resolveStream(src.id, match.category, match.title);
@@ -268,7 +310,7 @@ async function dispatchToProvider(sourceName, src, match, config = {}) {
     resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
   } else if (sourceName === 'daddylive') {
     const provider = container.resolve('daddyLiveProvider');
-    resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
+    resStreams = await provider.resolveStream(src.id, match.category, match.title, src, opts);
   } else if (sourceName === 'ppvst') {
     const provider = container.resolve('ppvStProvider');
     resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
@@ -301,6 +343,15 @@ async function dispatchToProvider(sourceName, src, match, config = {}) {
     resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
   } else if (sourceName === 'leaf') {
     const provider = container.resolve('leafProvider');
+    resStreams = await provider.resolveStream(src.id, match.category, match.title, src, { ...opts, matchId: match.id });
+  } else if (sourceName === 'leaf_recap') {
+    const provider = container.resolve('leafRecapProvider');
+    resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
+  } else if (sourceName === 'scorezone') {
+    const provider = container.resolve('scorezoneProvider');
+    resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
+  } else if (sourceName === 'pitsport') {
+    const provider = container.resolve('pitSportProvider');
     resStreams = await provider.resolveStream(src.id, match.category, match.title, src);
   } else if (sourceName === 'madplay') {
     const provider = container.resolve('madplayProvider');
@@ -330,20 +381,6 @@ async function dispatchToProvider(sourceName, src, match, config = {}) {
     if (provider) {
       resStreams = await provider.resolveStream(src.id, match.category, match.title);
     }
-  } else {
-    // Check if source belongs to a dynamic custom AI provider
-    let dynamicParserRegistry = null;
-    try {
-      dynamicParserRegistry = container.resolve('dynamicParserRegistry');
-    } catch (_) {}
-    const dynamicProvider = dynamicParserRegistry && dynamicParserRegistry.activeProviders
-      ? dynamicParserRegistry.activeProviders.get(sourceName)
-      : null;
-    if (dynamicProvider && typeof dynamicProvider.resolveStream === 'function') {
-      resStreams = await dynamicProvider.resolveStream(src.id, match.category, match.title, src);
-    } else {
-      resStreams = [];
-    }
   }
 
   return resStreams;
@@ -357,8 +394,8 @@ async function dispatchToProvider(sourceName, src, match, config = {}) {
 const RESOLVE_ATTEMPTS = Number(process.env.RESOLVE_ATTEMPTS || 2);
 const RESOLVE_TOTAL_BUDGET_MS = Number(process.env.RESOLVE_TOTAL_BUDGET_MS || 12000);
 
-// Resolve a single source (extracted from handleStream, logic unchanged)
-async function resolveSource(src, match, config) {
+// Resolve one source, retaining inconclusive local failures for the mint/cache layer.
+async function resolveSource(src, match, config, opts = {}) {
   if (isEventStreamSource(src)) {
     return [];
   }
@@ -368,11 +405,15 @@ async function resolveSource(src, match, config) {
 
   try {
     const deadlineAt = Date.now() + RESOLVE_TOTAL_BUDGET_MS;
-    resStreams = await withRetry(() => dispatchToProvider(sourceName, src, match, config), {
+    resStreams = await withRetry(() => {
+      opts?.signal?.throwIfAborted();
+      return dispatchToProvider(sourceName, src, match, opts, config);
+    }, {
       attempts: RESOLVE_ATTEMPTS,
       baseDelayMs: 300,
       maxDelayMs: 1200,
       deadlineAt,
+      shouldRetryError: error => !opts?.signal?.aborted && isTransientError(error),
       label: `resolve:${sourceName}`,
       // An empty result is a real answer ("nothing on offer"), not a failure —
       // retrying it would spend the budget to be told the same thing twice.
@@ -385,6 +426,7 @@ async function resolveSource(src, match, config) {
       s._source = sourceName;
     }
   } catch (e) {
+    reportInconclusiveResolution(e, opts);
     // Distinguish "the network flaked and kept flaking" from "this provider is
     // broken": the first is expected noise, the second wants a stack trace.
     if (isTransientError(e)) {
@@ -399,7 +441,7 @@ async function resolveSource(src, match, config) {
 
 // Safe impit+undici helper — works on all platforms (Windows, Linux x64/ARM64, musl).
 // impit is tried first for browser TLS fingerprinting; undici is the automatic fallback.
-const { safeFetch: _safeFetch } = require('./impitClient');
+const { safeFetch: _safeFetch, streamingFetch: _streamingFetch } = require('./services/ProviderOutbound');
 
 // How long one verification ping may take, and how long all its retries may
 // take together. The total stays under handleStream's soft deadline so a
@@ -411,9 +453,10 @@ const VERIFY_ATTEMPTS = Number(process.env.VERIFY_ATTEMPTS || 3);
 // Speed probe: one ranged segment fetch per stream, used to derive speedScore.
 // The range must be large enough that transfer time dominates TTFB, otherwise
 // the measured rate just reflects latency instead of throughput.
-const SPEED_PROBE_TIMEOUT_MS = Number(process.env.SPEED_PROBE_TIMEOUT_MS || 5000);
-const SPEED_PROBE_RANGE_BYTES = Number(process.env.SPEED_PROBE_RANGE_BYTES || 524288);
-const ENABLE_SPEED_PROBE = process.env.ENABLE_SPEED_PROBE !== 'false';
+const SPEED_PROBE_TIMEOUT_MS = Math.max(250, Math.min(10000, Number(process.env.SPEED_PROBE_TIMEOUT_MS) || 5000));
+const SPEED_PROBE_RANGE_BYTES = Math.floor(Math.max(16 * 1024, Math.min(1024 * 1024, Number(process.env.SPEED_PROBE_RANGE_BYTES) || 524288)));
+const SPEED_PROBE_MIN_BYTES = Math.floor(Math.max(1, Math.min(SPEED_PROBE_RANGE_BYTES, Number(process.env.SPEED_PROBE_MIN_BYTES) || 32768)));
+const ENABLE_SPEED_PROBE = process.env.ENABLE_SPEED_PROBE === 'true';
 
 // Proxied /api/manifest URLs wrap an upstream token that expires on its own
 // schedule. Tag the URL with the resolve-cache key that produced it so the
@@ -438,18 +481,44 @@ function parseManifestProxyUrl(rawUrl) {
       referer: urlObj.searchParams.get('referer') || '',
       origin: urlObj.searchParams.get('origin') || '',
       cookie: urlObj.searchParams.get('cookie') || '',
-      ua: urlObj.searchParams.get('ua') || '',
+      ua: manifestUserAgent(urlObj.searchParams.get('hlsua')) || urlObj.searchParams.get('ua') || '',
     };
   } catch (_) {
     return null;
   }
 }
 
-// Build the exact URL the player would fetch for this segment, so the probe
-// measures the real playback path (CF worker / hlschunk / direct) and not a
-// shortcut that bypasses it.
-function buildPlayerSegmentUrl(segmentUri, manifestUrl, referer, origin) {
-  return rewriteHlsUri(segmentUri, manifestUrl, { referer, origin, absoluteAddonBaseUrl: BASE_URL });
+// Probe the upstream segment directly; never request the addon's signed redirect.
+function buildProbeSegmentUrl(segmentUri, manifestUrl) {
+  return resolveSegmentUrl(segmentUri, manifestUrl);
+}
+
+// Stream only the bounded speed sample through the shared guarded transport.
+async function guardedProbeFetch(url, options = {}) {
+  return _streamingFetch(url, options);
+}
+
+// Count at most the requested bytes, then cancel. Without a streaming response,
+// do not call arrayBuffer(): it would buffer an unlimited full-size 200 response.
+async function readProbeBytes(body, maxBytes) {
+  if (!body || typeof body.getReader !== 'function') return 0;
+  const reader = body.getReader();
+  let total = 0;
+  try {
+    while (total < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || !value.byteLength) continue;
+      total += Math.min(value.byteLength, maxBytes - total);
+      if (total >= maxBytes) {
+        try { await reader.cancel(); } catch (_) {}
+        break;
+      }
+    }
+    return total;
+  } finally {
+    try { reader.releaseLock(); } catch (_) {}
+  }
 }
 
 /**
@@ -506,7 +575,7 @@ async function measureStreamSpeed(stream, manifestUrl, manifestText, referer, or
       stream._isTikTok = true;
     }
 
-    const segmentUrl = buildPlayerSegmentUrl(info.firstSegmentUri, manifestUrl, referer, origin);
+    const segmentUrl = buildProbeSegmentUrl(info.firstSegmentUri, manifestUrl);
     const controller = new AbortController();
     const probeTimeoutMs = Math.max(1, Math.min(SPEED_PROBE_TIMEOUT_MS, timeLeft - 150));
     const timer = setTimeout(() => controller.abort(), probeTimeoutMs);
@@ -519,7 +588,7 @@ async function measureStreamSpeed(stream, manifestUrl, manifestText, referer, or
     try {
       const start = performance.now();
       const response = await withRetry(
-        () => fetch(segmentUrl, { signal: controller.signal, headers: probeHeaders }),
+        () => guardedProbeFetch(segmentUrl, { signal: controller.signal, headers: probeHeaders, timeoutMs: probeTimeoutMs, redirect: 'manual' }),
         {
           attempts: 1,
           deadlineAt,
@@ -528,23 +597,14 @@ async function measureStreamSpeed(stream, manifestUrl, manifestText, referer, or
       );
       const headersAt = performance.now();
       if (!response || !response.ok) return;
-      let bytes = 0;
-      if (response.body && typeof response.body.getReader === 'function') {
-        const reader = response.body.getReader();
-        try {
-          const { value } = await reader.read();
-          if (value) bytes = value.byteLength;
-        } finally {
-          reader.cancel().catch(() => {});
-          controller.abort();
-        }
-      } else {
-        const buf = await response.arrayBuffer();
-        bytes = buf.byteLength;
-      }
+      const bytes = await readProbeBytes(response.body, SPEED_PROBE_RANGE_BYTES);
       const end = performance.now();
-      const segmentBytes = getContentRangeTotal(response.headers);
-      if (!segmentBytes || bytes === 0) return;
+      const rangeTotal = getContentRangeTotal(response.headers);
+      const contentLength = response.status === 200 && response.headers && typeof response.headers.get === 'function'
+        ? Number(response.headers.get('content-length'))
+        : 0;
+      const segmentBytes = rangeTotal || (Number.isSafeInteger(contentLength) && contentLength > 0 ? contentLength : null);
+      if (!segmentBytes || bytes < SPEED_PROBE_MIN_BYTES) return;
       // Exclude TTFB from the rate denominator: with a small ranged read the
       // body lands almost instantly, so including connect+first-byte latency
       // would make the "rate" a latency measurement and understate fast links.
@@ -582,6 +642,7 @@ async function measureStreamSpeed(stream, manifestUrl, manifestText, referer, or
       }
     } finally {
       clearTimeout(timer);
+      controller.abort();
     }
   } catch (err) {
     console.log(`[SpeedProbe] Skipped stream timing: ${err.message}`);
@@ -607,6 +668,27 @@ function getBitrateLabel(bitrate) {
     : `${Math.round(n / 1000)} kbps`;
 }
 
+
+/**
+ * Fold a parsed playlist's declared quality onto a stream row.
+ *
+ * Master playlists declare RESOLUTION/BANDWIDTH, so they still win. Media
+ * playlists (single rendition) always parse to the generic 'HD' tag, which is
+ * not new information and must not erase a tier the provider declared or
+ * measured — TimStreams reads the real 2160p from the segment SPS.
+ *
+ * Exported for direct unit testing.
+ */
+function applyParsedPlaylistQuality(stream, parsedQuality) {
+  if (!stream || !parsedQuality) return;
+  if (parsedQuality.resolution) {
+    stream.resolution = parsedQuality.resolution;
+    if (parsedQuality.qualityTag) stream.quality = parsedQuality.qualityTag;
+  } else if (!stream.quality && !stream.resolution) {
+    stream.quality = parsedQuality.qualityTag || 'HD';
+  }
+  if (parsedQuality.bitrateTag) stream.bitrate = parsedQuality.bitrateTag;
+}
 
 // --- Stream Health Verification ---
 // Pings each direct stream once and drops dead ones (404/403/5xx, or 200 bodies
@@ -672,10 +754,120 @@ function repairRefererFor(targetUrl) {
   return `https://${host}/`;
 }
 
+// Preserve provider-supplied playback headers while normalizing well-known
+// names case-insensitively. A Map avoids inherited property names and duplicate
+// casing without changing the shared provider metadata.
+/**
+ * Direct (non-proxied) HLS stream whose host the ISP's DNS blocks (sinkhole /
+ * NXDOMAIN, learned by the adaptive resolver while the server verified it):
+ * return the addon's /api/manifest URL for it, carrying the stream's own
+ * Referer/Origin/UA. The manifest route then relays its segments too
+ * (SegmentRelayPolicy). Any other stream URL is returned unchanged.
+ */
+function wrapIspBlockedDirectHls(stream, addonBaseUrl) {
+  const url = stream && stream.url;
+  if (typeof url !== 'string' || !url) return url;
+  let parsed;
+  try { parsed = new URL(url); } catch (_) { return url; }
+  if (!['http:', 'https:'].includes(parsed.protocol) || !/\.m3u8$/i.test(parsed.pathname)) return url;
+  if (/\/api\/manifest(?:\.m3u8)?$/.test(parsed.pathname)) return url;
+  if (!adaptiveDnsResolver.isPoisonedHost(parsed.hostname)) return url;
+
+  const headers = verificationHeaders(stream);
+  let proxied = `${String(addonBaseUrl).replace(/\/+$/, '')}/api/manifest?url=${encodeURIComponent(url)}`;
+  if (headers.Referer) proxied += `&referer=${encodeURIComponent(headers.Referer)}`;
+  if (headers.Origin) proxied += `&origin=${encodeURIComponent(headers.Origin)}`;
+  const ua = manifestUserAgent(headers['User-Agent']);
+  if (ua) proxied += `&hlsua=${encodeURIComponent(ua)}`;
+  return proxied;
+}
+
+function verificationHeaders(stream) {
+  const canonical = new Map([
+    ['referer', 'Referer'], ['origin', 'Origin'], ['user-agent', 'User-Agent'],
+    ['authorization', 'Authorization'], ['cookie', 'Cookie'],
+  ]);
+  const request = stream.behaviorHints?.proxyHeaders?.request || {};
+  // Verification is a new GET request: the transport must generate its own
+  // authority/framing. Preserve provider credentials and custom playback
+  // headers, but never forward hop-by-hop fields or Connection nominations.
+  const excluded = new Set([
+    'host', 'connection', 'keep-alive', 'proxy-connection',
+    'proxy-authenticate', 'proxy-authorization', 'te', 'trailer',
+    'transfer-encoding', 'upgrade', 'content-length', 'expect',
+  ]);
+  for (const [name, value] of Object.entries(request)) {
+    if (name.toLowerCase() !== 'connection') continue;
+    for (const token of String(value).split(',')) {
+      const nominated = token.trim().toLowerCase();
+      if (nominated) excluded.add(nominated);
+    }
+  }
+  return Object.fromEntries(Object.entries(request)
+    .filter(([name]) => !excluded.has(name.toLowerCase()))
+    .map(([name, value]) => [canonical.get(name.toLowerCase()) || name, value]));
+}
+
+function reportInconclusiveResolution(error, options) {
+  const reason = options?.signal?.aborted ? 'cancelled' : inconclusiveErrorReason(error);
+  if (!reason) return false;
+  try {
+    const reported = options?.onInconclusive?.(reason);
+    if (reported && typeof reported.catch === 'function') reported.catch(() => {});
+  } catch (_) { /* diagnostics must not change verification outcomes */ }
+  return true;
+}
+
+async function runVerificationAttempt(targetUrl, headers, deadlineAt, options) {
+  options?.signal?.throwIfAborted();
+  const remainingMs = deadlineAt - Date.now();
+  const timeoutMs = Math.min(VERIFY_TIMEOUT_MS, remainingMs);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw createAttemptTimeoutError();
+  const timeout = new AbortController();
+  const signal = AbortSignal.any([timeout.signal, ...(options?.signal ? [options.signal] : [])]);
+  const timer = setTimeout(() => timeout.abort(createAttemptTimeoutError()), timeoutMs);
+  let abort;
+  const cancelled = new Promise((_, reject) => {
+    abort = () => reject(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+  });
+  try {
+    // Bound both fetch and body consumption, even if a transport/mock neglects
+    // cancellation. The guarded transport independently owns its native lease.
+    const work = Promise.resolve().then(async () => {
+      signal.throwIfAborted();
+      const response = await _safeFetch(targetUrl, {
+        method: 'GET', headers, signal, timeoutMs, attempts: 1,
+        maxBodyBytes: VERIFY_BODY_MAX_BYTES
+      });
+      signal.throwIfAborted();
+      const body = await response.text();
+      signal.throwIfAborted();
+      return { status: response.status, body, bodyTruncated: response.bodyTruncated === true };
+    });
+    return await Promise.race([work, cancelled]);
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', abort);
+  }
+}
+
 async function verifyStreams(streams, cacheKey, m3u8Parser, resolveCache, opts = {}) {
 
   const checkedStreams = await Promise.all(streams.map(async (s) => {
-    if (!s || !s.url) return null;
+    if (!s) return null;
+    // Web-player results are represented by externalUrl, not a media URL.
+    // They do not need an HLS probe and must survive the verification step.
+    if (!s.url) {
+      if (typeof s.externalUrl !== 'string' || /[\u0000-\u0020\u007f]/.test(s.externalUrl)) return null;
+      try {
+        const external = new URL(s.externalUrl, 'https://external.invalid');
+        const isLocal = s.externalUrl.startsWith('/') && !/^\/[\\/]/.test(s.externalUrl);
+        if (!isLocal && !/^https?:\/\//i.test(s.externalUrl)) return null;
+        return ['http:', 'https:'].includes(external.protocol) && !external.username && !external.password ? s : null;
+      } catch (_) { return null; }
+    }
 
     // Filter out broken/dead SprintCDN links (edge*-*-sprintcdn.*) which fail on user devices
     if (s.url.includes('sprintcdn')) {
@@ -704,29 +896,27 @@ async function verifyStreams(streams, cacheKey, m3u8Parser, resolveCache, opts =
     }
 
     try {
-      const proxyReq = (s.behaviorHints && s.behaviorHints.proxyHeaders && s.behaviorHints.proxyHeaders.request) || {};
-      if (!referer) {
-        referer = proxyReq['Referer'] || proxyReq['referer'] || '';
-      }
+      const providerHeaders = verificationHeaders(s);
+      if (!referer) referer = providerHeaders.Referer || '';
+      // An explicit provider Origin must take precedence over the inferred
+      // Referer origin, unless the manifest proxy URL supplied its own Origin.
+      if (!origin) origin = providerHeaders.Origin || '';
       if (!origin && referer) {
         try { origin = new URL(referer).origin; } catch (_) {}
       }
-      if (!origin) {
-        origin = proxyReq['Origin'] || proxyReq['origin'] || '';
-      }
-      if (!cookie) {
-        cookie = proxyReq['Cookie'] || proxyReq['cookie'] || '';
-      }
+      if (!cookie) cookie = providerHeaders.Cookie || '';
 
       let res;
       let bodySample = '';
       let bodyTruncated = false;
+      let repairedHeaders = null;
 
       const isMp4 = targetUrl.includes('.mp4') || targetUrl.includes('type=4') || (targetUrl.includes('okcdn.ru') && !targetUrl.includes('.m3u8'));
 
       const reqHeaders = {
-        'User-Agent': customUa || proxyReq['User-Agent'] || proxyReq['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
-        'Referer': referer
+        ...providerHeaders,
+        'User-Agent': customUa || providerHeaders['User-Agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+        'Referer': referer,
       };
       if (origin) reqHeaders['Origin'] = origin;
       if (cookie) reqHeaders['Cookie'] = cookie;
@@ -740,33 +930,12 @@ async function verifyStreams(streams, cacheKey, m3u8Parser, resolveCache, opts =
       const verifyDeadlineAt = Date.now() + VERIFY_TOTAL_BUDGET_MS;
       try {
         const result = await withRetry(
-          async () => {
-            // A fresh controller per attempt: a controller that already fired
-            // aborts the retry the moment it starts.
-            const attemptController = new AbortController();
-            const attemptTimer = setTimeout(() => attemptController.abort(), VERIFY_TIMEOUT_MS);
-            try {
-              // _safeFetch handles impit -> undici fallback automatically on all platforms.
-              // attempts:1 — retrying is this layer's job, so the two do not compound
-              // into a multi-minute stall.
-              const r = await _safeFetch(targetUrl, {
-                method: 'GET',
-                headers: reqHeaders,
-                signal: attemptController.signal,
-                timeoutMs: VERIFY_TIMEOUT_MS,
-                attempts: 1,
-                // Verification only needs a manifest prefix, not an arbitrarily large body.
-                maxBodyBytes: VERIFY_BODY_MAX_BYTES,
-              });
-              return { status: r.status, body: await r.text(), bodyTruncated: r.bodyTruncated === true };
-            } finally {
-              clearTimeout(attemptTimer);
-            }
-          },
+          () => runVerificationAttempt(targetUrl, reqHeaders, verifyDeadlineAt, opts),
           {
             attempts: VERIFY_ATTEMPTS,
             deadlineAt: verifyDeadlineAt,
             label: 'verify',
+            shouldRetryError: error => !opts?.signal?.aborted && isTransientError(error),
             shouldRetryResult: (r) => isTransientStatus(r.status),
             onRetry: ({ attempt, delay, result, error }) => {
               const why = error ? error.message : `HTTP ${result.status}`;
@@ -778,9 +947,10 @@ async function verifyStreams(streams, cacheKey, m3u8Parser, resolveCache, opts =
         bodySample = result.body;
         bodyTruncated = result.bodyTruncated === true;
       } catch (fetchErr) {
-        const kind = isTransientError(fetchErr) ? 'unreachable after retries' : 'hard error';
+        const inconclusive = reportInconclusiveResolution(fetchErr, opts);
+        const kind = inconclusive ? 'temporarily unavailable' : isTransientError(fetchErr) ? 'unreachable after retries' : 'hard error';
         console.log(`[Filter] Dropped stream (${kind}): ${targetUrl} - ${fetchErr.message}`);
-        if (cacheKey) resolveCache.noteFailure(cacheKey);
+        if (cacheKey && !inconclusive) resolveCache.noteFailure(cacheKey);
         return null;
       }
 
@@ -805,24 +975,24 @@ async function verifyStreams(streams, cacheKey, m3u8Parser, resolveCache, opts =
           if (guess && guess !== referer) {
             console.log(`[Filter] ${res.status} with ${referer ? `refused referer ${referer}` : 'no referer'}; retrying once with ${guess}`);
             const retryHeaders = {
-              'User-Agent': reqHeaders['User-Agent'],
+              ...reqHeaders,
               'Referer': guess,
-              'Origin': guess.replace(/\/$/, ''),
+              'Origin': new URL(guess).origin,
             };
-            if (reqHeaders['Cookie']) retryHeaders['Cookie'] = reqHeaders['Cookie'];
-            const r2 = await _safeFetch(targetUrl, {
-              method: 'GET',
-              headers: retryHeaders,
-              timeoutMs: VERIFY_TIMEOUT_MS,
-              attempts: 1,
-              maxBodyBytes: VERIFY_BODY_MAX_BYTES,
-            });
+            const r2 = await runVerificationAttempt(targetUrl, retryHeaders, verifyDeadlineAt, opts);
             res = { status: r2.status };
-            bodySample = await r2.text();
+            bodySample = r2.body;
             bodyTruncated = r2.bodyTruncated === true;
-            if (res.status === 200) referer = guess; // so a later noteFailure/keep decision is accurate
+            if (res.status === 200) {
+              referer = guess;
+              origin = new URL(guess).origin;
+              repairedHeaders = retryHeaders;
+            }
           }
-        } catch (_) { /* fall through to the dead-stream handling below */ }
+        } catch (repairError) {
+          if (reportInconclusiveResolution(repairError, opts)) return null;
+          /* otherwise retain the upstream refusal below */
+        }
       }
 
       // Edge servers return 404 for dead streams, 403 for IP-locked/expired tokens, 502 for upstream failures
@@ -857,13 +1027,44 @@ async function verifyStreams(streams, cacheKey, m3u8Parser, resolveCache, opts =
         return null;
       }
 
+      // Publish only an accepted repair after HLS validation and slate
+      // filtering. Keep nested upstream tokens, recovery keys and fragments.
+      // Reject PNG-cloaked streams (HLS playlists pointing to fake .png segments)
+      if (/(?:^|\n)[^#\n\r]+\.png(?:\?[^\n\r]*)?(?:\r?\n|$)/i.test(bodySample)) {
+        console.log(`[Filter] Dropped PNG-cloaked stream: ${targetUrl}`);
+        if (cacheKey) resolveCache.noteFailure(cacheKey);
+        return null;
+      }
+
+      if (repairedHeaders) {
+        if (parseManifestProxyUrl(s.url)) {
+          const parsed = new URL(s.url, 'http://localhost');
+          parsed.searchParams.set('referer', referer);
+          parsed.searchParams.set('origin', origin);
+          s.url = /^[a-z][a-z0-9+.-]*:/i.test(s.url)
+            ? parsed.toString() : parsed.pathname + parsed.search + parsed.hash;
+        }
+        const hints = s.behaviorHints || {};
+        s.behaviorHints = {
+          ...hints,
+          proxyHeaders: {
+            ...hints.proxyHeaders,
+            request: repairedHeaders,
+          },
+        };
+      }
+
       // Parse Master Playlist quality, framerate (FPS), and bitrate in real-time (for HLS)
       if (!isMpd && !isMp4 && m3u8Parser && typeof m3u8Parser.parseManifestText === 'function') {
         const parsedQuality = m3u8Parser.parseManifestText(bodySample);
         if (parsedQuality) {
-          if (parsedQuality.qualityTag) s.quality = parsedQuality.qualityTag;
-          if (parsedQuality.resolution) s.resolution = parsedQuality.resolution;
-          if (parsedQuality.bitrateTag) s.bitrate = parsedQuality.bitrateTag;
+          // A media playlist (single rendition, no #EXT-X-STREAM-INF) always
+          // parses to the generic 'HD' tag. That is not new information: letting
+          // it win erased every provider-declared or measured tier — TimStreams
+          // reads the real 2160p/1080p from the segment SPS — so a 4K feed could
+          // never be labelled. A master playlist's declared RESOLUTION/BANDWIDTH
+          // still overrides everything, exactly as before.
+          applyParsedPlaylistQuality(s, parsedQuality);
         }
 
         if (ENABLE_SPEED_PROBE && !opts.skipSpeedProbe && !bodyTruncated) {
@@ -889,9 +1090,18 @@ async function verifyStreams(streams, cacheKey, m3u8Parser, resolveCache, opts =
         } catch (_) {}
       }
 
+      // Verify and filter only a *known* low-tier PPV.st rendition. The
+      // provider catalog already removes its explicitly labelled SD/540p
+      // sources; a parsed HLS master may reveal a lower tier later.
+      // Unknown quality and every other provider remain untouched.
+      if (s._source === 'ppvst' && isLowPpvSourceMetadata({
+        resolution: s.resolution, quality: s.quality
+      })) return null;
+
       if (cacheKey) resolveCache.noteSuccess(cacheKey);
       return s;
     } catch (err) {
+      reportInconclusiveResolution(err, opts);
       console.log(`[Filter] Dropped timeout/error stream: ${targetUrl} - ${err.message}`);
       return null;
     }
@@ -903,11 +1113,25 @@ async function verifyStreams(streams, cacheKey, m3u8Parser, resolveCache, opts =
 // Mint streams for a single source and health-verify them before they enter the
 // cache, so verification runs once per mint instead of on every request.
 async function mintVerifiedSources(src, match, config, cacheKey, opts = {}) {
-  const options = opts || {};
+  let inconclusiveReason = null;
+  const options = { ...(opts || {}), onInconclusive(reason) {
+    if (!inconclusiveReason) inconclusiveReason = reason;
+    try {
+      const reported = opts?.onInconclusive?.(reason);
+      if (reported && typeof reported.catch === 'function') reported.catch(() => {});
+    } catch (_) { /* caller diagnostics must not poison the mint */ }
+  } };
   const resolveCache = container.resolve('streamResolveCache');
   const m3u8Parser = container.resolve('m3u8Parser');
-  const minted = await resolveSource(src, match, config);
-  return verifyStreams(minted, cacheKey, m3u8Parser, resolveCache, options);
+  const minted = await resolveSource(src, match, config, options);
+  const providerReason = inconclusiveStreamsReason(minted);
+  if (providerReason) options.onInconclusive(providerReason);
+  const verified = await verifyStreams(minted, cacheKey, m3u8Parser, resolveCache, options);
+  if (!inconclusiveReason || verified.some(row => row && row.url)) return verified;
+  // A surviving web button does not establish that the direct feed is gone.
+  // Keep that usable fallback, but retry the inconclusive direct work soon.
+  return verified.length ? markInconclusiveStreams(verified, inconclusiveReason)
+    : createDeferredResolution(inconclusiveReason);
 }
 
 // Prewarm: mint tokens for a match's top sources before the user clicks
@@ -925,7 +1149,7 @@ async function mintVerifiedSources(src, match, config, cacheKey, opts = {}) {
 //   - watchfooty: resolves many variants per source via native extraction.
 // Prewarming them all night is what saturated the origin at peak (measured:
 // Cloudflare 524s). They still resolve normally when a user clicks them.
-const DEFAULT_PREWARM_SKIP_PROVIDERS = 'admin,echo,golf,delta,streamedpk,embedindia,embedst,ppvst,watchfooty';
+const DEFAULT_PREWARM_SKIP_PROVIDERS = 'admin,echo,golf,delta,streamedpk,embedindia,embedst,ppvst,watchfooty,leaf,scorezone,pitsport';
 
 function prewarmSkipProvidersSet() {
   const raw = process.env.PREWARM_SKIP_PROVIDERS === undefined
@@ -987,9 +1211,18 @@ function schedulePrewarm(task) {
 
 async function prewarmMatchNow(match, config, topN = Number.MAX_SAFE_INTEGER, opts = { skipSpeedProbe: true }) {
   try {
-    if (!match || !match.sources || !match.sources.length) return;
+    if (!match) return;
+    // Prewarm reads the same effective source list the resolver will use, so a
+    // source that only exists in the live overlay is not silently skipped here
+    // if the prewarm skip list ever drops leaf.
+    const overlay = _liveOverlay();
+    const baseSources = Array.isArray(match.sources) ? match.sources : [];
+    const effectiveSources = (overlay && match.id)
+      ? overlay.mergeSources(match.id, baseSources, match.aliasIds)
+      : baseSources;
+    if (effectiveSources.length === 0) return;
     const resolveCache = container.resolve('streamResolveCache');
-    const activeSources = selectSources(match.sources, config || null, match);
+    const activeSources = selectSources(effectiveSources, config || null, match);
     const skip = prewarmSkipProvidersSet();
     const eligible = skip.size ? activeSources.filter((s) => !skip.has(String(s.source || '').toLowerCase())) : activeSources;
     const targets = eligible.slice(0, topN);
@@ -1012,7 +1245,9 @@ async function prewarmMatchNow(match, config, topN = Number.MAX_SAFE_INTEGER, op
 
 
 async function prewarmMatch(match, config, topN = Number.MAX_SAFE_INTEGER, opts = { skipSpeedProbe: true }) {
-  if (!match || !match.sources || !match.sources.length) return;
+  // A card with no catalog sources may still be live through the overlay, and
+  // prewarmMatchNow merges that in. Only an absent match is a real no-op.
+  if (!match) return;
   return schedulePrewarm(() => prewarmMatchNow(match, config, topN, opts));
 }
 
@@ -1152,7 +1387,7 @@ function deduplicateResolutions(streams) {
 }
 
 async function handleStream(type, id, config) {
-  if ((type !== 'tv' && type !== 'series' && type !== 'channel') || !id.startsWith('nuvio_sport_')) {
+  if (!isSupportedType(type) || !id.startsWith('nuvio_sport_')) {
     return { streams: [] };
   }
 
@@ -1173,20 +1408,30 @@ async function handleStream(type, id, config) {
   if (!matchId) return { streams: [] };
   const match = cacheService.findMatch(matchId);
 
-  if (!match || !match.sources || match.sources.length === 0) {
+  // Live overlay (see LiveOverlayService): an ephemeral provider publishes
+  // sources outside the catalog snapshot. Merge BEFORE the empty-sources guard,
+  // or the exact case this exists for - a card whose catalog sources do not
+  // contain the live source yet - would return no streams at all.
+  const overlay = _liveOverlay();
+  const baseSources = (match && Array.isArray(match.sources)) ? match.sources : [];
+  const effectiveSources = (overlay && match && match.id)
+    ? overlay.mergeSources(match.id, baseSources, match.aliasIds)
+    : baseSources;
+
+  if (!match || effectiveSources.length === 0) {
     return { streams: [] };
   }
 
   const streams = [];
 
-  let candidateSources = match.sources;
+  let candidateSources = effectiveSources;
   if (!isHubEpisode && episodeIndex && !isNaN(episodeIndex) && episodeIndex > 0) {
-    const cleanSources = match.sources.filter(s => s && s.url && !s.source?.includes('timstreams'));
+    const cleanSources = effectiveSources.filter(s => s && s.url && !s.source?.includes('timstreams'));
     // Prioritize dedicated full replay providers and ordered parts over goal clips
     const getReplaySourceRank = (s) => {
       const name = (s.name || '').toLowerCase();
       const prov = s.source || '';
-      if (prov === 'soccerfull' || prov === 'replayzone' || prov === 'fullraces' || prov === 'basketballvideo' || prov === 'nflvideo' || prov === 'hockeyreplays') {
+      if (prov === 'soccerfull' || prov === 'replayzone' || prov === 'fullraces' || prov === 'basketballvideo' || prov === 'nflvideo' || prov === 'hockeyreplays' || prov === 'mlblive' || prov === 'leaf_recap') {
         if (/part\s*1|1st\s*half|full/i.test(name)) return 1;
         if (/part\s*2|2nd\s*half/i.test(name)) return 2;
         return 3;
@@ -1239,13 +1484,7 @@ async function handleStream(type, id, config) {
     const { isReplayMatch } = require('./catalog');
     if (isReplayMatch(match)) {
       const { REPLAY_SOURCES } = require('./catalog');
-      let dynamicParserRegistry = null;
-      try { dynamicParserRegistry = container.resolve('dynamicParserRegistry'); } catch (_) {}
-      const activeDynamic = dynamicParserRegistry ? dynamicParserRegistry.activeProviders : null;
-      const replaySources = candidateSources.filter(s => s && (
-        (REPLAY_SOURCES && REPLAY_SOURCES.has(s.source)) || 
-        (activeDynamic && activeDynamic.has(s.source))
-      ));
+      const replaySources = candidateSources.filter(s => s && REPLAY_SOURCES && REPLAY_SOURCES.has(s.source));
       if (replaySources.length > 0) {
         candidateSources = replaySources;
       }
@@ -1267,15 +1506,31 @@ async function handleStream(type, id, config) {
   const HARD_DEADLINE_MS = Number(process.env.STREAM_HARD_DEADLINE_MS || 15000);
   const SOFT_DEADLINE_MS = Math.min(Number(process.env.STREAM_SOFT_DEADLINE_MS || 6000), HARD_DEADLINE_MS);
   const resolutionStartedAt = Date.now();
+  let timingStream = null;
+  if (timingRelations) {
+    try { timingStream = timingRelations.stream(); } catch (_) { /* diagnostic only */ }
+  }
 
-  const inFlight = [];        // per-source promise + settled result for the fallback wait
-  const races = activeSources.map((src) => {
-    const key = resolveKey(src, matchId);
+  // A single match can carry many Priority-1 channel variants. A few stalled
+  // mirrors must not hold a playable response to the hard deadline. Quorum is
+  // counted per resolved source key, not per quality/stream variant.
+  const PRIORITY1_QUORUM = 3;
+  const inFlight = [];
+  for (const src of activeSources) {
+    const key = resolveKey(src, match.id);
     const isPriority1 = src.source === 'daddylive' || SOURCE_PRIORITY[src.source] === 1;
-    const state = { key, source: src.source, isPriority1, promise: null, settled: false, value: [] };
+    // Local positive cache entries are already verified. On a warm re-click,
+    // wait for these cheap reads, not for new scrapes on the missing mirrors.
+    const wasWarm = isPriority1 && Boolean(resolveCache.has?.(key));
+    const state = { key, source: src.source, isPriority1, wasWarm, promise: null, settled: false, value: [],
+      inconclusive: Boolean(resolveCache.isDeferred?.(key)) };
     const promise = resolveCache
-      .getOrCreate(key, () => mintVerifiedSources(src, match, config, key))
+      .getOrCreate(key, () => mintVerifiedSources(src, match, config, key, {
+        onInconclusive() { state.inconclusive = true; }
+      }), timingStream)
       .then((minted) => {
+        const hasResults = Array.isArray(minted) && minted.length > 0;
+        state.inconclusive = Boolean(resolveCache.isDeferred?.(key)) || (!hasResults && state.inconclusive);
         state.value = Array.isArray(minted) ? minted.map((st) => ({ ...st, _cacheKey: key })) : [];
         state.settled = true;
         return state.value;
@@ -1283,44 +1538,113 @@ async function handleStream(type, id, config) {
       .catch(() => { state.settled = true; return []; });
     state.promise = promise;
     inFlight.push(state);
-    // Wrap so we can tell "settled in time" from "still running".
-    return settleBefore(
-      promise.then((value) => ({ late: false, value })),
-      SOFT_DEADLINE_MS,
-      { late: true, value: [] }
-    );
-  });
-
-  const raced = await Promise.allSettled(races);
-  let lateCount = 0;
-  for (const r of raced) {
-    if (r.status !== 'fulfilled') continue;
-    if (r.value.late) { lateCount++; continue; }
-    if (Array.isArray(r.value.value)) streams.push(...r.value.value);
   }
 
-  // If nothing usable arrived by the soft deadline, OR if priority-1 sources (DaddyLive)
-  // are still in flight, wait for them up to the remaining hard budget.
-  // This guarantees fast streams (e.g. Vavoo) do not cut off DaddyLive with an early return,
-  // while still returning instantly as soon as DaddyLive completes (or when already cached).
-  const priority1InFlight = inFlight.filter(f => f.isPriority1 && !f.settled);
-  const shouldWait = (streams.length === 0 || priority1InFlight.length > 0) && inFlight.length > 0;
+  // Inspect the current publication snapshot without changing cached/provider
+  // rows. A web fallback or a result removed by the final policy is not a
+  // working feed for either quorum.
+  const isYoutubeRow = (row) => {
+    if (row.ytId) return true;
+    let external = row.externalUrl;
+    if (typeof external !== 'string') return false;
+    if (external.includes('/watch?')) {
+      const wrapped = external.match(/[?&](?:url|embed)=([^&]+)/);
+      if (wrapped) {
+        try { external = decodeURIComponent(wrapped[1]); } catch (_) {}
+      }
+    }
+    return /youtube\.com|youtu\.be/i.test(external);
+  };
+  const isDirectRow = (row) => isYoutubeRow(row) ||
+    (typeof row.url === 'string' && row.url.length > 0 && !row.externalUrl && row.name !== 'Nuvio Web Player');
+  const publicationRows = () => {
+    const current = inFlight.flatMap(f => f.settled && Array.isArray(f.value) ? f.value : []);
+    const prematch = suppressPreMatchTeamChannels(current, match);
+    const seen = new Set();
+    return prematch.filter(row => {
+      if (!row) return false;
+      const identity = row.ytId ? 'yt:' + row.ytId :
+        (row.url ? 'url:' + row.url : (row.externalUrl ? 'ext:' + row.externalUrl : null));
+      if (!identity || seen.has(identity)) return false;
+      seen.add(identity);
+      if (isBlockedStream(row)) return false;
+      return !config || config.webStreams !== 'disabled' || isDirectRow(row);
+    });
+  };
+  const priority1Keys = new Set(inFlight.filter(f => f.isPriority1).map(f => f.key));
+  const priority1ReadyCount = (rows = publicationRows()) => new Set(rows
+    .filter(row => isDirectRow(row) && priority1Keys.has(row._cacheKey))
+    .map(row => row._cacheKey)).size;
+  const remainingBudget = () => Math.max(0, HARD_DEADLINE_MS - (Date.now() - resolutionStartedAt));
+  const observeUntil = (predicate) => {
+    let observing = true;
+    const promise = new Promise(resolve => {
+      const check = () => { if (observing && predicate()) resolve(); };
+      for (const f of inFlight) if (!f.settled) f.promise.then(check, check);
+      check();
+    });
+    return { promise, stop() { observing = false; } };
+  };
+
+  const warmPriority1 = inFlight.filter(f => f.wasWarm);
+  if (new Set(warmPriority1.map(f => f.key)).size >= PRIORITY1_QUORUM) {
+    // has() is only a hint: expiry can turn that cheap read into a new mint.
+    // Return when enough actual direct results arrive, bounded even if another
+    // formerly warm key is still being refreshed.
+    const warm = observeUntil(() => priority1ReadyCount() >= PRIORITY1_QUORUM ||
+      inFlight.every(f => f.settled));
+    await settleBefore(warm.promise, Math.min(SOFT_DEADLINE_MS, remainingBudget()), null);
+    warm.stop();
+  } else {
+    // One shared timer rather than a timer per source. Providers remain in
+    // flight after the response cutoff so their successful results warm cache.
+    await settleBefore(Promise.allSettled(inFlight.map(f => f.promise)), Math.min(SOFT_DEADLINE_MS, remainingBudget()), null);
+  }
+  for (const f of inFlight) {
+    if (f.settled && Array.isArray(f.value)) streams.push(...f.value);
+  }
+  let lateCount = inFlight.filter(f => !f.settled).length;
+
+  // If no stream is available, or fewer than three distinct Priority-1
+  // sources succeeded, retain the bounded hard-window wait. Unsettled mirrors
+  // cannot stall a normal event once a playable Priority-1 quorum is ready.
+  const TV_CHANNEL_QUORUM = Number(process.env.TV_CHANNEL_QUORUM || 5);
+  const isTvChannel = Boolean(
+    (type === 'tv' || type === 'channel' || type === SPORTS_TYPE) &&
+    (match ? (
+      match.category === 'networks' ||
+      match.isChannel ||
+      String(match.date) === '0' ||
+      match.kickoff === 0 ||
+      String(match.id || '').includes('_ch_') ||
+      String(id || '').includes('_ch_')
+    ) : (
+      String(id || '').includes('_ch_') ||
+      String(id || '').includes('channel')
+    ))
+  );
+  const readyToRespond = () => {
+    if (inFlight.every(f => f.settled)) return true;
+    const eligible = publicationRows();
+    if (eligible.length === 0) return false;
+    const priority1Pending = inFlight.some(f => f.isPriority1 && !f.settled);
+    if (priority1Pending && priority1ReadyCount(eligible) < PRIORITY1_QUORUM) return false;
+    return !isTvChannel || eligible.filter(isDirectRow).length >= TV_CHANNEL_QUORUM;
+  };
+  const shouldWait = !readyToRespond() && inFlight.length > 0;
+  let timingWaitOutcome = 'no_wait';
 
   if (shouldWait) {
-    const remaining = Math.max(0, HARD_DEADLINE_MS - (Date.now() - resolutionStartedAt));
+    const remaining = remainingBudget();
     if (remaining > 0) {
-      // If we already have streams and are waiting for Priority-1 (DaddyLive), wait specifically
-      // for the Priority-1 promises to complete so we return immediately without stalling.
-      const waitTargets = priority1InFlight.length > 0
-        ? priority1InFlight.map((f) => f.promise)
-        : inFlight.map((f) => f.promise);
-
-      await settleBefore(
-        Promise.allSettled(waitTargets),
-        remaining,
-        null
-      );
-    }
+      // Re-evaluate publication eligibility whenever a source settles. In
+      // particular, finished-but-hidden Priority-1 web rows must not cut off
+      // another provider's pending playable result.
+      const wait = observeUntil(readyToRespond);
+      const waited = await settleBefore(wait.promise, remaining, null);
+      wait.stop();
+      timingWaitOutcome = waited === null ? 'hard_wait_expired' : 'wait_completed';
+    } else timingWaitOutcome = 'budget_exhausted';
     for (const f of inFlight) {
       // Snapshot newly settled resolutions without duplicating
       if (f.settled && Array.isArray(f.value)) {
@@ -1334,6 +1658,12 @@ async function handleStream(type, id, config) {
     lateCount = inFlight.filter(f => !f.settled).length;
   } else if (lateCount > 0) {
     console.log(`[streams.js] Early return for ${matchId}: ${lateCount} source(s) still resolving (will be cached)`);
+  }
+  if (timingStream) {
+    const unsettled = inFlight.filter(f => !f.settled).length;
+    const reason = timingWaitOutcome === 'hard_wait_expired' || timingWaitOutcome === 'budget_exhausted' ? timingWaitOutcome :
+      unsettled === 0 ? 'all_settled' : timingWaitOutcome === 'wait_completed' ? 'priority_completed' : 'early_return';
+    try { timingRelations.endWindow(timingStream, inFlight.length, unsettled, reason); } catch (_) { /* diagnostic only */ }
   }
   // Withhold per-team 24/7 channels until the fixture is actually in its
   // playable window (see suppressPreMatchTeamChannels). Applied to the assembled
@@ -1375,36 +1705,18 @@ async function handleStream(type, id, config) {
   // Standardize Stream Labels
   const icon = STREAM_SPORT_ICONS[match.category] || '📡';
 
-  // ─── Eliminate DASH (.mpd) & ClearKey DRM streams completely ──────────
-  // ExoPlayer on stock Android apps lacks MediaDrm callbacks, causing black
-  // screen + timer. The addon's own /api/manifest proxy wraps BOTH HLS (.m3u8)
-  // and DASH (.mpd) upstreams, so the proxy URL string is NOT evidence of DASH
-  // — only the wrapped target is. Keying on "/api/manifest" eliminated every
-  // proxied live HLS stream (DaddyLive et al. always proxy), which surfaced as
-  // "no sources except sktech". sktech's DASH feeds are never wanted, so they
-  // are additionally matched on a DASH path/DRM signal.
-  const nonDash = streams.filter(s => {
-    const rawUrl = String(s.url || s.streamUrl || s._rawMpdUrl || '');
-    const lower = rawUrl.toLowerCase();
-    let target = lower;
-    if (lower.includes('/api/manifest')) {
-      try {
-        const info = parseManifestProxyUrl(rawUrl);
-        if (info && info.targetUrl) target = String(info.targetUrl).toLowerCase();
-      } catch (_) {}
-    }
-    const typeIsDash = !!(s.type && String(s.type).toLowerCase().includes('dash'));
-    const genericDash = target.includes('.mpd') || !!s.clearkey || s.format === 'dash' || typeIsDash;
-    // sktech: never serve DASH, even if it is not tagged ClearKey.
-    const isSktechDash = String(s._source || '') === 'sktech' &&
-      (/\.mpd(\?|#|$)/.test(target) || /\/dash\//.test(target) || !!s.clearkey || s.format === 'dash' || typeIsDash);
-    return !(genericDash || isSktechDash);
-  });
-  if (nonDash.length < streams.length) {
-    const droppedCount = streams.length - nonDash.length;
+  // ─── Bandwidth policy: no relayed DASH, no DASH at all ────────────────
+  // ClearKey DASH can only play through /api/dash, which pulls every segment
+  // through this addon (≈3.74 GB per viewer-hour at 1080p, measured). Policy:
+  // those streams are never offered. A /api/manifest wrapper is not evidence
+  // of DASH — only its target is — so StreamPolicy resolves the wrapped URL
+  // before deciding, and leaves proxied live HLS alone.
+  const beforeDashPolicy = streams.length;
+  const policyAllowed = streams.filter((s) => !isBlockedStream(s));
+  if (policyAllowed.length !== beforeDashPolicy) {
     streams.length = 0;
-    streams.push(...nonDash);
-    console.log(`[streams.js] Eliminated ${droppedCount} DASH stream(s) for ${matchId}`);
+    streams.push(...policyAllowed);
+    console.log(`[streams.js] Dropped ${beforeDashPolicy - policyAllowed.length} DASH stream(s) by bandwidth policy for ${matchId}`);
   }
 
   streams.forEach(s => {
@@ -1459,23 +1771,41 @@ async function handleStream(type, id, config) {
     else if (s._source === 'ppvst' || sTitleLower.includes('ppvst')) providerName = 'PPV.st';
     else if (s._source === 'livetv' || sTitleLower.includes('livetv')) providerName = 'LiveTV';
     else if (s._source === 'replayzone' || sTitleLower.includes('replayzone')) providerName = 'ReplayZone';
+    else if (s._source === 'pitsport' || sTitleLower.includes('pitsport')) providerName = 'PitSport';
 
     let originalTitle = s.title || '';
-    let channelName = '';
+    // The provider's explicit broadcaster is stronger evidence than the first
+    // parenthesized title fragment, which is often the event name (PitSport
+    // and PPV.st both put the fixture inside parentheses).
+    const explicitChannel = [s.canonicalChannel, s.channelName]
+      .find(value => typeof value === 'string' && value.trim() &&
+        ![match?.title, match?.baseTitle].some(event => typeof event === 'string' &&
+          event.trim().toLowerCase() === value.trim().toLowerCase())) || '';
+    let channelName = explicitChannel.trim();
     let viewersText = '';
     if (originalTitle) {
       const vMatch = originalTitle.match(/👥\s*\d+\s*Viewers/);
       if (vMatch) viewersText = `\n${vMatch[0]}`;
 
-      const match = originalTitle.match(/\(([^)]+)\)/);
-      if (match && match[1]) {
-        const inner = match[1];
+      const titleChannelMatch = !channelName && originalTitle.match(/\(([^)]+)\)/);
+      if (titleChannelMatch && titleChannelMatch[1]) {
+        const inner = titleChannelMatch[1];
         // Skip resolution/bitrate placeholders and Auto/stream markers — they
         // are quality tags, not channel names (e.g. Leaf's "(FHD)").
         if (!/^(?:\d{3,4}p\d{0,2}|sd|hd|fhd|uhd|4k(?:\s+uhd)?|8k)$/i.test(inner) && inner !== 'Auto' && !inner.toLowerCase().startsWith('stream')) {
           channelName = inner;
+        } else {
+          // Some providers (ak47/fawanews) emit "[CHANNEL NAME] <match title> (HD)":
+          // the only parenthesised group is the quality tag, so the channel name
+          // lives in a leading bracket instead. Without this fallback the row kept
+          // no label at all and looked like a duplicate of the match title.
+          const bracketName = originalTitle.match(/^\s*\[([^\]]{2,40})\]/);
+          if (bracketName && bracketName[1] &&
+              !/^(?:\d{3,4}p\d{0,2}|sd|hd|fhd|uhd|4k(?:\s+uhd)?|8k)$/i.test(bracketName[1].trim())) {
+            channelName = bracketName[1].trim();
+          }
         }
-      } else if (!originalTitle.includes('Stream') && !originalTitle.includes('Auto')) {
+      } else if (!channelName && !originalTitle.includes('Stream') && !originalTitle.includes('Auto')) {
         channelName = originalTitle;
       }
     }
@@ -1524,6 +1854,11 @@ async function handleStream(type, id, config) {
       if (!s.countryFlag) s.countryFlag = countryInfo.flag;
     }
 
+    // Do not mislabel an event as its broadcaster. Retain the real fixture
+    // text in the event card, not on every alternative playback row.
+    if (!isChannelCard && match?.title && channelName.toLowerCase() === match.title.trim().toLowerCase()) {
+      channelName = '';
+    }
     if (channelName) {
       channelName = channelName
         .replace(/\s*[-–—]{1,3}\s*(?:Poland|Germany|UK|USA?|France|Spain|Italy|Portugal|Turkey|Netherlands|Canada|Australia|Austria|Switzerland|India|Argentina|Chile|Brazil|[A-Za-z]{2,})\s*$/i, '')
@@ -1534,7 +1869,9 @@ async function handleStream(type, id, config) {
 
     const flag = s.countryFlag || (countryInfo && countryInfo.flag) || '';
     const code = s.countryCode || (s.country && s.country.length === 2 ? s.country.toUpperCase() : '') || (countryInfo && countryInfo.name) || (countryInfo && countryInfo.country) || '';
-    const lang = s.language || (countryInfo && countryInfo.language) || '';
+    const rawLang = s.language || (countryInfo && countryInfo.language) || '';
+    const canonicalLang = canonicalLanguage(rawLang);
+    const lang = canonicalLang ? canonicalLang[0].toUpperCase() + canonicalLang.slice(1) : rawLang;
     let countryTag = '';
     if (code && lang) {
       countryTag = ` ${flag ? flag + ' ' : ''}[${code} • ${lang}]`;
@@ -1542,6 +1879,10 @@ async function handleStream(type, id, config) {
       countryTag = ` ${flag} [${lang}]`;
     } else if (flag) {
       countryTag = ` ${flag}`;
+    } else if (lang) {
+      // Explicit provider language is useful even when no country can be
+      // inferred. An unknown locale never implies a country or flag.
+      countryTag = ` [${lang}]`;
     }
 
     let partLabel = '';
@@ -1580,6 +1921,10 @@ async function handleStream(type, id, config) {
     s.behaviorHints = s.behaviorHints || {};
     s.behaviorHints.bingeGroup = `nuvio_sport_${matchId}`;
     
+    // A direct HLS URL on an ISP-DNS-blocked host is unreachable for a player
+    // on this network: hand it the addon's manifest proxy instead.
+    s.url = wrapIspBlockedDirectHls(s, BASE_URL);
+
     // Change only the published path, after withResolveKey has tagged provider
     // results. Cached provider URLs and recovery-key generation retain their form.
     s.url = manifestPlaybackUrl(s.url, BASE_URL);
@@ -1588,19 +1933,39 @@ async function handleStream(type, id, config) {
     if (s.url && s.url.includes('.m3u8')) {
       s.behaviorHints.notWebReady = false;
       if (s.url.includes('/api/manifest')) {
-        if (s.behaviorHints.proxyHeaders) {
-          delete s.behaviorHints.proxyHeaders;
+        // AK47 playlists leave media/key URLs direct. Keep only the provider's
+        // bounded playback context for those player requests; arbitrary cookies,
+        // authorization and custom token headers must not reach the addon URL.
+        const request = {};
+        if (s._source === 'ak47live' || s._source === 'daddylive' || providerName === 'DaddyLive') {
+          const headers = verificationHeaders(s);
+          const userAgent = manifestUserAgent(headers['User-Agent']);
+          if (userAgent) request['User-Agent'] = userAgent;
+          for (const name of ['Referer', 'Origin']) {
+            const value = headers[name];
+            if (typeof value !== 'string' || value.length > 2048 || /[\u0000-\u0020\u007f]/.test(value)) continue;
+            try {
+              const parsed = new URL(value);
+              if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) continue;
+              if (name === 'Origin' && parsed.origin !== value) continue;
+              request[name] = value;
+            } catch (_) {}
+          }
         }
+        if (Object.keys(request).length) s.behaviorHints.proxyHeaders = { request };
+        else delete s.behaviorHints.proxyHeaders;
       } else {
         // Direct unproxied m3u8 stream needing player-level header injection
         let referer = '';
-        if (providerName === 'DaddyLive') referer = 'https://thedaddy.pk/';
+        if (providerName === 'DaddyLive') referer = 'https://thedaddy.li/';
         else if (providerName === 'Streamed.pk') referer = 'https://embed.st/';
         else if (providerName === 'WatchFooty') referer = (s.url && s.url.includes('.wfty.st')) ? 'https://sportsembed.su/' : 'https://watchfooty.st/';
         else if (providerName === 'CDNLiveTV') referer = 'https://cdnlivetv.tv/';
         else if (providerName === 'StreamSports99' || providerName === 'StreamSports') referer = 'https://streamsports99.fun/';
         else if (providerName === 'DamiTV') referer = 'https://damitv.st/';
         else if (providerName === 'Vavoo') referer = 'https://vavoo.to/';
+        else if (providerName === 'ScoreZone') referer = 'https://scorezonetv.live/';
+        else if (providerName === 'PitSport') referer = 'https://embdlol.st/';
         
         if (referer) {
           if (!s.behaviorHints.proxyHeaders) {
@@ -1659,9 +2024,9 @@ async function handleStream(type, id, config) {
 
   streams.sort((a, b) => compareStreams(a, b, languagePriorities));
 
-  // Pinned donation link: unshifted to index 0 so it appears at the top of every match
-  const donationUrl = process.env.DONATION_URL || '/donate';
-  if (streams.length > 0 && donationUrl && donationUrl !== 'disabled' && donationUrl !== 'false') {
+  // Pinned donation link: only if an explicit external DONATION_URL is provided
+  const donationUrl = process.env.DONATION_URL;
+  if (streams.length > 0 && donationUrl && donationUrl !== 'disabled' && donationUrl !== 'false' && /^https?:\/\//i.test(donationUrl)) {
     streams.unshift({
       name: '🧿 Support Us',
       title: '❤️ Help keep servers & streams alive\nTap to open Donation Center (Ko-fi / Crypto)',
@@ -1670,14 +2035,16 @@ async function handleStream(type, id, config) {
   }
 
   // Verification now happens once per mint (mintVerifiedSources), not per request.
-  // Adaptive per-source TTLs keep tokens fresh, so clients may hold the list 30s.
+  // Complete and definite results retain the existing client cache windows.
+  // A partial list must not pin missing high-quality sources for 30 seconds
+  // while their background work is still pending or temporarily deferred.
 
-
+  const partialResolution = inFlight.some(state => state.inconclusive || !state.settled);
   return {
     streams,
-    cacheMaxAge: 30,
-    staleRevalidate: 30,
-    staleError: 60
+    cacheMaxAge: partialResolution ? 2 : 30,
+    staleRevalidate: partialResolution ? 0 : 30,
+    staleError: partialResolution ? 0 : 60
   };
 }
 
@@ -1764,6 +2131,7 @@ function suppressPreMatchTeamChannels(streams, match) {
 module.exports = {
   KNOWN_FALLBACKS,
   handleStream,
+  wrapIspBlockedDirectHls,
   prewarmMatch,
   resolveKey,
   prewarmSkipProvidersSet,
@@ -1774,10 +2142,19 @@ module.exports = {
   // Exported for tests: the retry/keep/drop policy is the part worth pinning
   // down, and driving it through handleStream would need the whole match cache.
   verifyStreams,
+  mintVerifiedSources,
+  guardedProbeFetch,
+  buildProbeSegmentUrl,
+  readProbeBytes,
   // Exported for direct unit testing of the resolution deduplication algorithm
   // without requiring a live container / IoC / match-cache setup.
   deduplicateResolutions,
+  applyParsedPlaylistQuality,
   formatChannelStreamTitle,
   KNOWN_LIVE_SOURCES,
-  KNOWN_REPLAY_SOURCES
+  KNOWN_REPLAY_SOURCES,
+  KNOWN_FALLBACKS,
+  NICE_NAMES,
+  CHANNEL_TITLE_NICE_NAMES,
+  SOURCE_PRIORITY
 };

@@ -2,6 +2,7 @@ const container = require('./container');
 const { getChannelLogo } = require('./services/ChannelLogoService');
 const { prewarmMatch } = require('./streams');
 const { BASE_URL } = require('./config');
+const { SPORTS_TYPE, isSupportedType } = require('./contentTypes');
 const imageService = require('./services/ImageService');
 const { parseTimezone } = require('./timezone');
 const { getMatchTier } = require('./services/MainstreamRankingService');
@@ -77,7 +78,7 @@ const REPLAY_SPORTS = [
 ];
 
 // Sources whose matches qualify for the replay retention window and replay hubs.
-const REPLAY_SOURCES = new Set(['replayzone', 'livetv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive']);
+const REPLAY_SOURCES = new Set(['replayzone', 'livetv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive', 'leaf_recap']);
 
 // Static tables hoisted to module scope: mapMatchToMetaPreview runs per meta
 // per page, and allocating these per call churned ~7 RegExp objects + a 15-key
@@ -202,75 +203,6 @@ function isMatchLive(match) {
  * never drift apart. 24/7 networks are never replays.
  * Replays must originate from a replay-capable provider (replayzone, livetv).
  */
-/**
- * Returns the in-memory map of mounted custom-AI providers (sourceName ->
- * provider), or null when the registry is unavailable.
- *
- * Only the runtime map is consulted: it is populated from the stored configs at
- * boot and kept in sync by save/delete, so it is the authoritative set of active
- * parsers. Reading the storage file instead (listParsers: existsSync +
- * readFileSync + JSON.parse) cost ~31µs per call, which blocked the event loop
- * for ~0.3s when applied to every match of a ~10k-match cache.
- */
-function getActiveCustomAiProviders() {
-  let registry = null;
-  try {
-    registry = container.resolve('dynamicParserRegistry');
-  } catch (_) {
-    try { registry = require('./services/DynamicParserRegistry'); } catch (_) {}
-  }
-  const active = registry && registry.activeProviders;
-  return active && typeof active.has === 'function' ? active : null;
-}
-
-/**
- * Core custom-AI check against an already-resolved active provider map, so hot
- * loops resolve the registry once instead of once per match.
- */
-function matchBelongsToCustomAi(match, active) {
-  if (!match) return false;
-  if (match.isCustomAi === true) return true;
-  if (match.customAiSource) return true;
-  if (!active || active.size === 0) return false;
-
-  if (Array.isArray(match.sources)) {
-    for (let i = 0; i < match.sources.length; i++) {
-      const s = match.sources[i];
-      if (s && s.source && active.has(s.source)) return true;
-    }
-  }
-  if (typeof match.id === 'string') {
-    for (const name of active.keys()) {
-      if (name && match.id.startsWith(name + '_')) return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Determines whether a match was parsed by an AI-generated custom parser.
- * Pure in-memory check (flags + active provider names); never touches disk.
- */
-function isCustomAiMatch(match) {
-  if (!match) return false;
-  if (match.isCustomAi === true || match.customAiSource) return true;
-  return matchBelongsToCustomAi(match, getActiveCustomAiProviders());
-}
-
-/**
- * Whether the Custom IA catalog has anything to show: a mounted custom parser,
- * or a cached match flagged as custom-AI. Used by the manifest handler.
- */
-function hasCustomAiContent(matches) {
-  const active = getActiveCustomAiProviders();
-  if (active && active.size > 0) return true;
-  if (!Array.isArray(matches)) return false;
-  for (let i = 0; i < matches.length; i++) {
-    if (matchBelongsToCustomAi(matches[i], active)) return true;
-  }
-  return false;
-}
-
 function isReplayMatch(match) {
   if (!match) return false;
   if (match.category === 'networks') return false;
@@ -580,6 +512,13 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
   if (providerThumb && (/ppvservices\.st/i.test(providerThumb) || /unique-tournament/i.test(providerThumb) || /ondemand\.st/i.test(providerThumb))) providerThumb = null;
   if (providerLogo && (/ppvservices\.st/i.test(providerLogo) || /unique-tournament/i.test(providerLogo) || /ondemand\.st/i.test(providerLogo))) providerLogo = null;
 
+  // Filter out PitSport posters/thumbnails for non-motorsport events
+  const isMotorsportOrF1 = match.category === 'motorsport' || /formula|rally|supercar|motocross|karting|motor/i.test(match.category || '');
+  if (!isMotorsportOrF1) {
+    if (providerPoster && /pitsport/i.test(providerPoster)) providerPoster = null;
+    if (providerThumb && /pitsport/i.test(providerThumb)) providerThumb = null;
+  }
+
   // 24/7 TV channels are continuous network stations (Fox Cricket, Willow, NHL Network, etc.),
   // not sporting fixtures with posters. Always generate clean official TV network cards.
   if (match.category === 'networks') {
@@ -605,7 +544,7 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
   // Check if we have a locally defined, verified hi-res logo for this specific channel name.
   // ONLY for continuous 24/7 TV channels (e.g. networks catalog) — NEVER discard provider thumbnails
   // for sporting events, motorsport, or replays!
-  const is247Channel = (match.category === 'networks' || match.isChannel || (match.id && (match.id.startsWith('dlv_ch_') || match.id.startsWith('cdn_ch_') || match.id.startsWith('sktech_ch_') || match.id.startsWith('vavoo_') || match.id.includes('_ch_')))) && !isMatchup;
+  const is247Channel = (match.category === 'networks' || match.isChannel || (match.id && (match.id.startsWith('dlv_ch_') || match.id.startsWith('cdn_ch_') || match.id.startsWith('sktech_ch_') || match.id.startsWith('vavoo_') || match.id.startsWith('scorezone_ch_') || match.id.includes('_ch_')))) && !isMatchup;
   const customLogo = (is247Channel || (!isReplay && !isMotorsport)) ? getChannelLogo(match.title) : null;
   if (customLogo && !isMatchup && !isReplay && !isMotorsport) {
     isChannelThumbnail = false; // We want to use it as the main artwork, not a tiny badge
@@ -816,11 +755,7 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
 
   // Providers only supply a score for a fixture that is under way or finished.
   const scoreSuffix = match.score ? ` (${match.score})` : '';
-  const isCustomAi = isCustomAiMatch(match);
-  let prefix = isReplay ? '⏪ ' : (isLive ? (is247 ? '📺 ' : '🔴 LIVE: ') : '⏱️ ');
-  if (isCustomAi) {
-    prefix = isLive ? '🤖🔴 LIVE: ' : (isReplay ? '🤖⏪ ' : '🤖 ');
-  }
+  const prefix = isReplay ? '⏪ ' : (isLive ? (is247 ? '📺 ' : '🔴 LIVE: ') : '⏱️ ');
   const cast = [];
   if (team1Name) cast.push(team1Name);
   if (team2Name) cast.push(team2Name);
@@ -834,9 +769,6 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
         ? `🔴 LIVE NOW${scoreSuffix}`
         : (isReplay ? `⏪ Replay (${replayReleaseInfo})` : `⏱️ Kickoff at ${timeString}${relativeTimeStr}`));
   let desc = `${leagueStr}📅 Category: ${match.category.toUpperCase()}\n⏰ Status: ${statusStr}`;
-  if (isCustomAi) {
-    desc += `\n🤖 Source: Custom IA Parser (${match.customAiSource || 'Studio'})`;
-  }
 
   const isSeriesReplay = reqType === 'series';
 
@@ -844,7 +776,7 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
     id: `nuvio_sport_${match.id}`,
     type: reqType,
     name: `${prefix}${match.title}`,
-    genres: [match.category.toUpperCase(), ...(isCustomAi ? ['CUSTOM IA'] : [])],
+    genres: [match.category.toUpperCase()],
     poster: poster,
     posterShape: isSeriesReplay ? 'regular' : 'landscape',
     background: background,
@@ -871,7 +803,7 @@ function mapMatchToMetaPreview(match, config = {}, reqType = 'tv') {
     const getReplaySourceRank = (s) => {
       const name = (s.name || '').toLowerCase();
       const prov = s.source || '';
-      if (prov === 'soccerfull' || prov === 'replayzone' || prov === 'fullraces' || prov === 'basketballvideo' || prov === 'nflvideo' || prov === 'hockeyreplays') {
+      if (prov === 'soccerfull' || prov === 'replayzone' || prov === 'fullraces' || prov === 'basketballvideo' || prov === 'nflvideo' || prov === 'hockeyreplays' || prov === 'mlblive' || prov === 'leaf_recap') {
         if (/part\s*1|1st\s*half|full/i.test(name)) return 1;
         if (/part\s*2|2nd\s*half/i.test(name)) return 2;
         return 3;
@@ -960,12 +892,41 @@ const _metaCache = new Map(); // key → { data, expiresAt, revision }
 const HUB_META_CACHE_MAX = 24;
 const _hubMetaCache = new Map(); // key → { data, expiresAt, revision }
 
+let _liveOverlayRef;
+/**
+ * Resolve the live overlay service once per process.
+ *
+ * Guarded rather than required: catalog.js is also loaded by tests that build a
+ * partial container, and a missing registration must degrade to "no overlay"
+ * (the exact pre-feature behaviour) instead of throwing on a request path.
+ */
+function _liveOverlay() {
+  if (_liveOverlayRef !== undefined) return _liveOverlayRef;
+  try {
+    if (typeof container.hasRegistration === 'function' && !container.hasRegistration('liveOverlayService')) {
+      _liveOverlayRef = null;
+      return null;
+    }
+    _liveOverlayRef = container.resolve('liveOverlayService') || null;
+  } catch (_) {
+    _liveOverlayRef = null;
+  }
+  return _liveOverlayRef;
+}
+
 function _metaCacheRevision() {
   const cacheService = container.resolve('cacheService');
   // Poll for cross-worker snapshots before trusting a memo hit. This returns
   // the internal read-only array without cloning or projecting any matches.
   if (typeof cacheService.getMatchesReadOnly === 'function') cacheService.getMatchesReadOnly();
-  return cacheService.rev || 0;
+  // The overlay is a second source of truth for stream availability. Meta
+  // projections do not list sources today, so this is an invariant guard rather
+  // than a bug fix: it stops a memoised projection from ever disagreeing with
+  // what /streams is about to return if availability reaches the preview later.
+  // Cheap - getRevision() polls the shared file, throttled to 1s.
+  const overlay = _liveOverlay();
+  const overlayRev = overlay ? overlay.getRevision() : 0;
+  return `${cacheService.rev || 0}:${overlayRev}`;
 }
 
 function _metaCacheKey(id, config, responseType) {
@@ -1054,7 +1015,7 @@ function _stableSig(obj) {
 }
 
 async function handleCatalog(type, id, extra, config) {
-  if (type !== 'tv' && type !== 'series' && type !== 'channel') return { metas: [] };
+  if (!isSupportedType(type)) return { metas: [] };
   if (!id.startsWith('nuvio_sports_')) return { metas: [] };
 
   // Keep the SWR trigger on EVERY catalog request (a cheap staleness check) —
@@ -1134,7 +1095,7 @@ async function buildReplayHubMeta(id, config = {}) {
 
     const dateObj = new Date(targetDate + 'T00:00:00Z');
     const displayDate = !isNaN(dateObj.getTime())
-      ? dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+      ? dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
       : targetDate;
 
     const titleName = sportDef ? `${sportDef.name} — 📅 ${displayDate}` : `📅 ${displayDate} Replays`;
@@ -1242,7 +1203,7 @@ async function buildReplayHubMeta(id, config = {}) {
     const seasonNum = sIdx + 1;
     const dateObj = new Date(dStr + 'T00:00:00Z');
     const displayDate = !isNaN(dateObj.getTime())
-      ? dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+      ? dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
       : dStr;
 
     seasons.push({
@@ -1298,7 +1259,7 @@ async function buildReplayHubMeta(id, config = {}) {
   const dateGuide = sortedDates.slice(0, 5).map((d, i) => {
     const dobj = new Date(d + 'T00:00:00Z');
     const dname = !isNaN(dobj.getTime())
-      ? dobj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+      ? dobj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
       : d;
     return `• Season ${i + 1}: ${dname} (${dateGroups.get(d).length} matches)`;
   }).join('\n');
@@ -1508,9 +1469,6 @@ async function handleCatalogUncached(type, id, extra, config) {
   } else if (categoryMatch === 'upcoming') {
     const now = Date.now();
     filteredMatches = matches.filter(m => !isMatchLive(m) && (getKickoff(m.date) || 0) > now);
-  } else if (categoryMatch === 'custom_ai') {
-    const activeCustomAi = getActiveCustomAiProviders();
-    filteredMatches = matches.filter(m => matchBelongsToCustomAi(m, activeCustomAi));
   } else if (categoryMatch === 'replays') {
     filteredMatches = matches.filter(m => {
       if (!isReplayMatch(m)) return false;
@@ -1569,10 +1527,6 @@ async function handleCatalogUncached(type, id, extra, config) {
 
   filteredMatches = filteredMatches.filter(m => {
     const isReplay = isReplayMatch(m);
-
-    if (categoryMatch === 'custom_ai') {
-      return true; // Keep all custom AI games (live, replay, upcoming)
-    }
 
     if (isReplayMode) {
       if (m.sources && m.sources.some(s => s.source === 'timstreams')) return false;
@@ -1637,7 +1591,7 @@ async function handleCatalogUncached(type, id, extra, config) {
       const count = dateMap.get(dStr);
       const dateObj = new Date(dStr + 'T00:00:00Z');
       const displayDate = !isNaN(dateObj.getTime())
-        ? dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+        ? dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
         : dStr;
       
       const isSportSpecific = selectedSport && selectedSport !== 'all';
@@ -1673,7 +1627,7 @@ async function handleCatalogUncached(type, id, extra, config) {
   }
 
   // ── Genre filter (Replays / Live Now / Upcoming) ──────────────────────────
-  const GENRE_FILTERABLE = { replays: 1, live: 1, upcoming: 1, custom_ai: 1 };
+  const GENRE_FILTERABLE = { replays: 1, live: 1, upcoming: 1 };
   if (GENRE_FILTERABLE[categoryMatch] && extra && typeof extra.genre === 'string' && extra.genre.trim()) {
     const wanted = GENRE_TO_CATEGORY[extra.genre.trim().toLowerCase()] || null;
     if (wanted) {
@@ -1788,9 +1742,6 @@ async function handleCatalogUncached(type, id, extra, config) {
   } else if (categoryMatch === 'live') {
     cacheTtl = 120; // 2 minutes for live matches
     staleTtl = 300; // 5 minutes SWR
-  } else if (categoryMatch === 'custom_ai') {
-    cacheTtl = 60; // 1 minute for custom AI matches
-    staleTtl = 120;
   } else if (categoryMatch === 'upcoming') {
     cacheTtl = 300; // 5 minutes for upcoming
     staleTtl = 600;
@@ -1806,7 +1757,7 @@ async function handleCatalogUncached(type, id, extra, config) {
 }
 
 async function handleMeta(type, id, config) {
-  if (type !== 'tv' && type !== 'series' && type !== 'channel') {
+  if (!isSupportedType(type)) {
     return { meta: null };
   }
 
@@ -1818,7 +1769,7 @@ async function handleMeta(type, id, config) {
   // Cloudflare bypasses its edge cache for /:config/meta/... URLs (unique per
   // user), so every personalized click hits the VPS. This in-process LRU means
   // repeat requests for the same match return in < 5ms instead of ~800ms.
-  const effectiveType = type === 'series' ? 'series' : 'tv';
+  const effectiveType = type === 'series' ? 'series' : (type === SPORTS_TYPE ? SPORTS_TYPE : 'tv');
   const _hmCacheKey = _metaCacheKey(id, config, id.startsWith('nuvio_sport_replay_') ? 'series' : effectiveType);
   const _hmRevision = _metaCacheRevision();
   // Fire-and-forget stale-while-revalidate, same as handleCatalog.
@@ -1847,7 +1798,7 @@ async function handleMeta(type, id, config) {
     return {
       meta: {
         id: `nuvio_sport_${matchId}`,
-        type: 'tv',
+        type: effectiveType,
         name: `⏱️ ${title}`,
         genres: ['SPORTS'],
         posterShape: 'landscape',
@@ -1899,8 +1850,6 @@ module.exports = {
   handleMeta,
   isMatchLive,
   isReplayMatch,
-  isCustomAiMatch,
-  hasCustomAiContent,
   mapMatchToMetaPreview,
   getKickoff,
   getEventDurationMs,

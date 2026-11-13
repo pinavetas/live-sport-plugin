@@ -91,6 +91,22 @@ class StreamedWasmPool {
       });
 
       worker.on('exit', (code) => {
+        // A worker may exit without first emitting 'error' (OOM, abrupt
+        // termination, or a native crash). The job can never complete then:
+        // settle it immediately instead of leaving the caller waiting for its
+        // original timeout. The timeout handler may already have settled it.
+        const jobId = workerObj.currentJobId;
+        if (jobId) {
+          const resolver = this.pendingResolvers.get(jobId);
+          if (resolver) {
+            this.pendingResolvers.delete(jobId);
+            clearTimeout(resolver.timer);
+            resolver.resolve(null);
+          }
+          workerObj.currentJobId = null;
+          workerObj.busy = false;
+        }
+
         const idx = this.workers.indexOf(workerObj);
         if (idx !== -1) {
           this.workers.splice(idx, 1);

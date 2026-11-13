@@ -22,6 +22,9 @@ const DamiTvProvider = require('./providers/DamiTvProvider');
 const TeamLogoService = require('./services/TeamLogoService');
 const YamlProviderBuilder = require('./services/YamlProviderBuilder');
 const StreamResolveCache = require('./services/StreamResolveCache');
+const LiveOverlayService = require('./services/LiveOverlayService');
+const { resolverTransport } = require('./services/ResolverTransportRuntime');
+const { relations: timingRelations } = require('./services/TimingRuntime');
 const StreamedWasmPool = require('./services/StreamedWasmPool');
 const IframeDomainRegistry = require('./services/IframeDomainRegistry');
 const PpvStProvider = require('./providers/PpvStProvider');
@@ -42,11 +45,14 @@ const BintvProvider = require('./providers/BintvProvider');
 const AngulismoProvider = require('./providers/AngulismoProvider');
 const TdtChannelsProvider = require('./providers/TdtChannelsProvider');
 const NbaMonsterProvider = require('./providers/NbaMonsterProvider');
+const LeafRecapProvider = require('./providers/LeafRecapProvider');
+const ScoreZoneProvider = require('./providers/ScoreZoneProvider');
+const PitSportProvider = require('./providers/PitSportProvider');
 const ProviderHealthService = require('./services/ProviderHealthService');
 const BroadcasterMatchService = require('./services/BroadcasterMatchService');
 const DashToHlsService = require('./services/DashToHlsService');
+const HlsQualityProbe = require('./services/HlsQualityProbe');
 const adaptiveDnsResolver = require('./services/AdaptiveDnsResolver');
-const dynamicParserRegistry = require('./services/DynamicParserRegistry');
 const PuppeteerSnifferService = require('./services/PuppeteerSnifferService');
 
 const container = createContainer({
@@ -59,17 +65,25 @@ container.register({
   cacheService: asClass(CacheService).singleton(),
   circuitBreaker: asClass(CircuitBreakerService).singleton(),
   m3u8Parser: asClass(M3U8ParserService).singleton(),
+  // Measured quality for single-rendition HLS (TimStreams). Shared so its
+  // slug-keyed cache and 4-probe concurrency cap are process-wide.
+  // asValue, not asClass: the probe takes constructor options, not injected
+  // dependencies (same pattern as streamResolveCache above).
+  hlsQualityProbe: asValue(new HlsQualityProbe()),
   cronService: asClass(CronService).singleton(),
   matchAggregator: asClass(MatchAggregator).singleton(),
   streamScorer: asClass(StreamScoringService).singleton(),
-  streamResolveCache: asValue(new StreamResolveCache()),
+  streamResolveCache: asValue(new StreamResolveCache({ timingRelations, sharedResolver: resolverTransport })),
+  // Live ephemeral-source overlay (Leaf). asValue, not asClass: the instance
+  // takes constructor options and needs no injected dependencies, exactly like
+  // streamResolveCache above.
+  liveOverlayService: asValue(new LiveOverlayService()),
   streamedWasmPool: asValue(StreamedWasmPool),
   dashToHlsService: asClass(DashToHlsService).singleton(),
   providerHealthService: asClass(ProviderHealthService).singleton(),
   teamLogoService: asClass(TeamLogoService).singleton(),
   broadcasterMatchService: asValue(new BroadcasterMatchService()),
   adaptiveDnsResolver: asValue(adaptiveDnsResolver),
-  dynamicParserRegistry: asValue(dynamicParserRegistry),
   puppeteerSnifferService: asClass(PuppeteerSnifferService).singleton(),
   // Self-healing iframe-domain knowledge base (DaddyLive family). Singleton so
   // runtime discoveries accumulate for the process lifetime.
@@ -111,6 +125,9 @@ container.register({
   angulismoProvider: asClass(AngulismoProvider).singleton(),
   tdtChannelsProvider: asClass(TdtChannelsProvider).singleton(),
   nbaMonsterProvider: asClass(NbaMonsterProvider).singleton(),
+  leafRecapProvider: asClass(LeafRecapProvider).singleton(),
+  scorezoneProvider: asClass(ScoreZoneProvider).singleton(),
+  pitSportProvider: asClass(PitSportProvider).singleton(),
   yamlProviders: asValue(yamlProviders)
 });
 

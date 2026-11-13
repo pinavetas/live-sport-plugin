@@ -4,6 +4,14 @@ const crypto = require('crypto');
 const BaseProvider = require('./BaseProvider');
 const MatchEntity = require('../domain/MatchEntity');
 const StreamEntity = require('../domain/StreamEntity');
+const ChannelCountryService = require('../services/ChannelCountryService');
+
+// Commentary language from the channel label (e.g. "beIN Sports ES"); the
+// feed is English unless the label says otherwise.
+function detectLanguage(channelLabel) {
+  const info = ChannelCountryService.detectChannelCountry(channelLabel);
+  return (info && info.language) || 'English';
+}
 const { BASE_URL } = require('../config');
 const { extractTeamsFromTitle } = require('../services/TeamNameExtractor');
 
@@ -25,6 +33,7 @@ class Ak47LiveProvider extends BaseProvider {
   constructor(opts = {}) {
     super(opts);
     this.name = 'Ak47Live';
+    this.lastScheduleOk = null;
     this._cache = null;
     this._lastFetchTime = 0;
     let ttl = 180000;
@@ -80,21 +89,23 @@ class Ak47LiveProvider extends BaseProvider {
     const lines = content.split(/\r?\n/);
     const entries = [];
     let currentVlcOpts = {};
+    const readVlcOpt = line => {
+      const optLine = line.substring(11).trim();
+      const eqIdx = optLine.indexOf('=');
+      if (eqIdx === -1) return;
+      const key = optLine.substring(0, eqIdx).trim().toLowerCase();
+      const val = optLine.substring(eqIdx + 1).trim();
+      if (key === 'http-referrer' || key === 'http-referer') currentVlcOpts.referer = val;
+      else if (key === 'http-origin') currentVlcOpts.origin = val;
+      else if (key === 'http-user-agent') currentVlcOpts.userAgent = val;
+    };
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line) continue;
 
       if (line.startsWith('#EXTVLCOPT:')) {
-        const optLine = line.substring(11).trim();
-        const eqIdx = optLine.indexOf('=');
-        if (eqIdx !== -1) {
-          const key = optLine.substring(0, eqIdx).trim().toLowerCase();
-          const val = optLine.substring(eqIdx + 1).trim();
-          if (key === 'http-referrer') currentVlcOpts.referer = val;
-          else if (key === 'http-origin') currentVlcOpts.origin = val;
-          else if (key === 'http-user-agent') currentVlcOpts.userAgent = val;
-        }
+        readVlcOpt(line);
         continue;
       }
 
@@ -120,6 +131,8 @@ class Ak47LiveProvider extends BaseProvider {
         let streamUrl = '';
         while (i + 1 < lines.length) {
           const nextLine = lines[i + 1].trim();
+          if (nextLine.startsWith('#EXTINF:')) break;
+          if (nextLine.startsWith('#EXTVLCOPT:')) readVlcOpt(nextLine);
           if (nextLine && !nextLine.startsWith('#')) {
             streamUrl = nextLine;
             i++;
@@ -128,7 +141,7 @@ class Ak47LiveProvider extends BaseProvider {
           i++;
         }
 
-        if (!streamUrl) continue;
+        if (!streamUrl) { currentVlcOpts = {}; continue; }
 
         // Strict Zero-DASH filter: discard MPEG-DASH manifests and CENC DRM URLs
         if (/\.mpd(\?|$)/i.test(streamUrl) || /\/dash\//i.test(streamUrl) || /cenc/i.test(streamUrl)) {
@@ -218,6 +231,9 @@ class Ak47LiveProvider extends BaseProvider {
       return this._cache;
     }
 
+    // Playlist rows can survive a failed events feed; retain that distinction
+    // for provider health, including when this result is later cached.
+    this.lastScheduleOk = false;
     const matchesMap = new Map();
     const finishedSlugs = new Set();
     const finishedTeamPairs = new Set();
@@ -345,6 +361,7 @@ class Ak47LiveProvider extends BaseProvider {
               matchesMap.set(matchId, match);
             }
           }
+          this.lastScheduleOk = true;
         }
       }
     } catch (err) {
@@ -472,31 +489,12 @@ class Ak47LiveProvider extends BaseProvider {
                 clearKey = String(selected.key || '').trim();
                 clearKid = String(selected.kid || '').trim();
               }
+              // ClearKey DASH is deliberately not relayed: playing it would push
+              // every segment through /api/dash (≈3.7 GB per viewer-hour at 1080p).
+              // Policy: drop the source instead of spending the bandwidth.
               if (/^[0-9a-fA-F]{32}$/.test(clearKey) && /\.mpd(\?|$)/i.test(dashLink)) {
-                const dashHeaders = { 'User-Agent': DEFAULT_UA };
-                for (const pair of linkParts.slice(1).join('|').split('&')) {
-                  const eqIdx = pair.indexOf('=');
-                  if (eqIdx !== -1 && pair.substring(0, eqIdx).trim().toLowerCase() === 'user-agent') {
-                    dashHeaders['User-Agent'] = pair.substring(eqIdx + 1).trim();
-                  }
-                }
-
-                const payload = Buffer.from(JSON.stringify({
-                  mpdUrl: dashLink,
-                  key: clearKey.toLowerCase(),
-                  kid: clearKid.toLowerCase(),
-                  headers: dashHeaders
-                })).toString('base64url');
-
-                return [new StreamEntity({
-                  name: 'Ak47Live',
-                  // Channel name inside () — the stream pipeline extracts the
-                  // first parenthesised group as the displayed channel label.
-                  title: `${matchTitle || 'Live Event'} (${channelLabel})`,
-                  url: `${BASE_URL}/api/dash/index.m3u8?d=${payload}`,
-                  behaviorHints: { notWebReady: false },
-                  resolution: 'FHD'
-                })];
+                console.warn(`[${this.name}] Dropped ClearKey DASH (bandwidth policy): ${channelLabel}`);
+                return [];
               }
 
               // Zero-DASH / DRM Enforcement: Drop any remaining DRM or DASH stream
@@ -535,6 +533,11 @@ class Ak47LiveProvider extends BaseProvider {
                     }
                   }
                 }
+                if (referer && referer !== DEFAULT_REFERER && (!src.origin || origin === DEFAULT_ORIGIN)) {
+                  try {
+                    origin = new URL(referer).origin;
+                  } catch (_) {}
+                }
               } else if (selected.tokenApi) {
                 try {
                   const tokenObj = typeof selected.tokenApi === 'string' ? JSON.parse(selected.tokenApi) : selected.tokenApi;
@@ -557,7 +560,19 @@ class Ak47LiveProvider extends BaseProvider {
                         directLink = parsedJson.playback_url || parsedJson.url || '';
                       } catch (_) {
                         const matchHls = tokenBody.match(/hlsManifestUrl":"([^"]+)"/);
-                        if (matchHls) directLink = matchHls[1];
+                        if (matchHls) {
+                          directLink = matchHls[1];
+                        } else {
+                          const matchSrc = tokenBody.match(/"src"\s*:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i) ||
+                                           tokenBody.match(/(?:source:\s*["']|playback_url["']:\s*["'])(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
+                          if (matchSrc) {
+                            directLink = matchSrc[1];
+                            referer = tokenObj.api;
+                            try {
+                              origin = new URL(referer).origin;
+                            } catch (_) {}
+                          }
+                        }
                       }
                       if (directLink) streamUrl = directLink;
                     }
@@ -588,7 +603,22 @@ class Ak47LiveProvider extends BaseProvider {
       return [];
     }
 
-    const proxyUrl = `${BASE_URL}/api/manifest?url=${encodeURIComponent(streamUrl)}&referer=${encodeURIComponent(referer)}&origin=${encodeURIComponent(origin)}`;
+    const { manifestUserAgent } = require('../services/ManifestUserAgent');
+    userAgent = manifestUserAgent(userAgent) || DEFAULT_UA;
+    const contextUrl = (value, fallback, originOnly = false) => {
+      if (typeof value !== 'string' || value.length > 2048 || /[\u0000-\u0020\u007f]/.test(value)) return fallback;
+      try {
+        const parsed = new URL(value);
+        if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return fallback;
+        return originOnly ? parsed.origin : parsed.href;
+      } catch (_) { return fallback; }
+    };
+    referer = contextUrl(referer, DEFAULT_REFERER);
+    origin = contextUrl(origin, DEFAULT_ORIGIN, true);
+    // The provider injects DEFAULT_UA even when no source specified one. Keep
+    // the proxy's historical default in that case.
+    const manifestUa = userAgent === DEFAULT_UA ? '' : manifestUserAgent(userAgent);
+    const proxyUrl = `${BASE_URL}/api/manifest?url=${encodeURIComponent(streamUrl)}&referer=${encodeURIComponent(referer)}&origin=${encodeURIComponent(origin)}${manifestUa ? `&hlsua=${encodeURIComponent(manifestUa)}` : ''}`;
 
     const stream = new StreamEntity({
       name: 'Ak47Live',
@@ -604,7 +634,8 @@ class Ak47LiveProvider extends BaseProvider {
           }
         }
       },
-      resolution: 'HD'
+      resolution: 'HD',
+      language: detectLanguage(channelLabel)
     });
 
     return [stream];

@@ -85,38 +85,49 @@ function playlistHasContent(text) {
 
 // Fetch + validate the upstream manifest. Throws on failure so coalesced
 // waiters share the same outcome; successful bodies are cached by the caller.
-async function fetchUpstreamManifest(targetUrl, referer, origin) {
-  const deadlineAt = performance.now() + 10000;
+// Total budget for one upstream playlist fetch (attempt + retry). 3.5 s cut off
+// slow-but-working CDNs (cdn.hdm1.net playlists answered 502 to the player);
+// players poll live playlists every few seconds, so 8 s is still bounded.
+function manifestFetchTimeoutMs(env = process.env) {
+  const value = Number(env.MANIFEST_FETCH_TIMEOUT_MS);
+  return Number.isFinite(value) && value >= 1000 && value <= 30000 ? value : 8000;
+}
+
+async function fetchUpstreamManifest(targetUrl, referer, origin, { withResponseUrl = false, userAgent: requestedUserAgent = '' } = {}) {
+  const timeoutMs = manifestFetchTimeoutMs();
+  const deadlineAt = performance.now() + timeoutMs;
   const isVavoo = Boolean(
     (targetUrl && (targetUrl.includes('/sunshine/') || targetUrl.includes('vavoo.') || targetUrl.includes(':8008'))) ||
     (referer && referer.includes('vavoo.'))
   );
-  const userAgent = isVavoo
+  const userAgent = requestedUserAgent || (isVavoo
     ? 'MediaHubMX/2'
-    : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36';
+    : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36');
 
   const headers = {
     'Referer': referer || (isVavoo ? 'https://vavoo.to/' : 'https://embed.st/'),
     'Origin': origin || (isVavoo ? 'https://vavoo.to' : 'https://embed.st'),
     'User-Agent': userAgent
   };
-  // _safeFetch: impit (browser TLS fingerprint) with automatic undici fallback.
-  // A hard 10 s timeout ensures a hung upstream can never hold the viewer's poll.
+  // Public targets use the guarded socket transport. Never fall back to a
+  // separately resolved native connection after a guard rejection.
+  // The bounded budget (manifestFetchTimeoutMs) keeps a hung upstream from holding the player.
   const attempt = async () => {
     const remainingMs = Math.ceil(deadlineAt - performance.now());
-    if (remainingMs <= 0) throw Object.assign(new Error('Manifest timeout 10000ms'), { name: 'TimeoutError', code: 'ETIMEDOUT' });
-    // outboundGuard: the URL comes from the request, so every hop of the redirect
-    // chain is vetted by the SSRF guard (a public URL 302-ing to the LAN or the
-    // cloud metadata address must not be fetched and returned as a playlist).
-    const result = await _safeFetch(targetUrl, { headers, timeoutMs: remainingMs, outboundGuard: true });
+    if (remainingMs <= 0) throw Object.assign(new Error(`Manifest timeout ${timeoutMs}ms`), { name: 'TimeoutError', code: 'ETIMEDOUT' });
+    const result = await _safeFetch(targetUrl, { headers, timeoutMs: remainingMs, guardExternal: true, diagnosticOwner: 'manifest' });
     if (!result.ok) {
       // Carry the upstream status so the caller can tell "the token/CDN said no"
       // apart from "our proxy is broken" — they need different HTTP responses.
       const err = new Error(`HTTP ${result.status}`);
       err.statusCode = result.status;
+      err.upstreamStatus = result.status;
       throw err;
     }
-    return await result.text();
+    const body = await result.text();
+    // Preserve the default string result for existing callers. The HLS
+    // playlist router opts into metadata for final-redirect relative paths.
+    return withResponseUrl ? { body, url: result.url || targetUrl } : body;
   };
 
   try {
@@ -125,6 +136,7 @@ async function fetchUpstreamManifest(targetUrl, referer, origin) {
     // Transient upstream trouble: these load balancers (lb*.wfty.st, strmd.st) are
     // observed to throw 500/502/503/504 intermittently or reset connections (ECONNRESET)
     // during high load. A single retry after a short pause recovers the large majority.
+    if (err && err.code === 'ERR_OUTBOUND_CAPACITY') throw err;
     const status = err && err.statusCode;
     const isNetworkTransient = err && (
       err.code === 'ECONNRESET' ||
@@ -139,7 +151,13 @@ async function fetchUpstreamManifest(targetUrl, referer, origin) {
     if (deadlineAt - performance.now() <= 400) throw err;
     await new Promise((r) => setTimeout(r, 400));
     console.warn(`[ManifestProxy] Upstream ${status || err.code || 'network glitch'} — retrying once: ${String(targetUrl).slice(0, 90)}`);
-    return await attempt(); // a second failure propagates with statusCode intact
+    try { return await attempt(); }
+    catch (retryError) {
+      if (retryError && retryError.code === 'ERR_OUTBOUND_CAPACITY' && Number.isInteger(err.upstreamStatus)) {
+        retryError.previousUpstreamStatus = err.upstreamStatus;
+      }
+      throw retryError;
+    }
   }
 }
 

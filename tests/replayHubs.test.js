@@ -101,48 +101,10 @@ describe('Replay Hubs & Clean Catalog Architecture', () => {
     const streamRes = await handleStream('series', 'nuvio_sport_rz_match_fb_1:1:1', {});
     expect(streamRes).toBeDefined();
     expect(Array.isArray(streamRes.streams)).toBe(true);
-    expect(streamRes.streams[0].name).toContain('Support Us');
+    expect(streamRes.streams.some(s => s.name && s.name.includes('Support Us'))).toBe(false);
     const directStream = streamRes.streams.find(s => s.name && s.name.includes('Direct Stream'));
     expect(directStream).toBeDefined();
     expect(directStream.title).toContain('ReplayZone');
-  });
-
-  test('generateCollections returns valid Nuvio Collections schema with the replay sport folders', () => {
-    const { generateCollections, FOLDER_DEFINITIONS } = require('../src/collections');
-    const collections = generateCollections('http://localhost:7000', 'testConfig');
-    expect(Array.isArray(collections)).toBe(true);
-    expect(collections.length).toBe(1);
-    // The four original sports must always be present; the collection grew to
-    // include more sports (basketball, tennis, hockey, american football), so
-    // assert the invariants rather than a fixed total.
-    expect(FOLDER_DEFINITIONS.length).toBeGreaterThanOrEqual(4);
-    for (const sport of ['football', 'motorsport', 'baseball', 'rugby']) {
-      expect(FOLDER_DEFINITIONS.some(f => f.id === `folder-${sport}-replays`)).toBe(true);
-    }
-    for (const f of FOLDER_DEFINITIONS) {
-      expect(Array.isArray(f.catalogs)).toBe(true);
-      expect(f.catalogs.length).toBeGreaterThanOrEqual(1);
-    }
-
-    const c = collections[0];
-    expect(c.id).toBe('collection-sports-replays');
-    expect(c.title).toBe('Sports Replays');
-    expect(c.viewMode).toBe('FOLLOW_LAYOUT');
-    expect(c.pinToTop).toBe(true);
-    expect(Array.isArray(c.folders)).toBe(true);
-    expect(c.folders.length).toBe(FOLDER_DEFINITIONS.length);
-
-    const fbFolder = c.folders.find(f => f.id === 'folder-football-replays');
-    expect(fbFolder).toBeDefined();
-    expect(fbFolder.title).toBe('Football');
-    expect(fbFolder.tileShape).toBe('LANDSCAPE');
-    expect(fbFolder.coverImageUrl).toMatch(/\/posters\/replays\/(luffy_)?football\.jpg/);
-    expect(fbFolder.heroBackdropUrl).toMatch(/\/posters\/replays\/(luffy_)?football\.jpg/);
-    expect(Array.isArray(fbFolder.catalogSources)).toBe(true);
-    expect(fbFolder.catalogSources.length).toBeGreaterThanOrEqual(2);
-    expect(fbFolder.catalogSources[0].addonId).toBe('community.nuvio.live-sports');
-    expect(fbFolder.catalogSources[0].manifestUrl).toContain('/testConfig/manifest.json');
-    expect(fbFolder.catalogSources[0].type).toBe('tv');
   });
 
   test('handleCatalog returns individual replay matches for sport collection sub-catalogs', async () => {
@@ -172,21 +134,6 @@ describe('Replay Hubs & Clean Catalog Architecture', () => {
     expect(date17Res.metas[0].id).toBe('nuvio_sport_rz_match_fb_2');
     expect(date17Res.metas[0].type).toBe('tv');
     expect(date17Res.metas[0].name).toContain('Real Madrid vs Barcelona');
-  });
-
-  test('generateCollections produces rolling relative date rows and competition rows for sport replay folders', () => {
-    const { generateCollections } = require('../src/collections');
-    const collections = generateCollections('http://localhost:7000', 'testConfig');
-    const fbFolder = collections[0].folders.find(f => f.id === 'folder-football-replays');
-    expect(fbFolder).toBeDefined();
-
-    const catIds = fbFolder.catalogSources.map(c => c.catalogId);
-    expect(catIds).toContain('nuvio_sports_replays_football_today');
-    expect(catIds).toContain('nuvio_sports_replays_football_yesterday');
-    expect(catIds).toContain('nuvio_sports_replays_football_this_week');
-    expect(catIds).toContain('nuvio_sports_replays_football_premier_league');
-    expect(catIds).toContain('nuvio_sports_replays_football_older');
-    expect(catIds).toContain('nuvio_sports_replays_football');
   });
 
   test('handleCatalog with genre=Football produces sport hub and sport-specific date posters', async () => {

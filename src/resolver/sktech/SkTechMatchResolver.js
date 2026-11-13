@@ -1,8 +1,8 @@
 'use strict';
+const { fetchUndici: fetch } = require('../../services/ProviderOutbound');
 
 const SkTechCrypto = require('./SkTechCrypto');
 const SkTechEmbedExtractor = require('./SkTechEmbedExtractor');
-const { BASE_URL } = require('../../config');
 
 const BASE_API_URL = 'https://dk01-64n.pages.dev/';
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -200,13 +200,15 @@ class SkTechMatchResolver {
         }
       } else if (line.startsWith('#EXTVLCOPT:')) {
         const opt = line.slice(11).trim();
-        const [k, v] = opt.split('=');
+        const separator = opt.indexOf('=');
+        const k = separator < 0 ? '' : opt.slice(0, separator);
+        const v = separator < 0 ? '' : opt.slice(separator + 1);
         if (k && v) {
           if (/referrer/i.test(k))    curOpts['Referer']    = v;
           if (/user-agent/i.test(k))  curOpts['User-Agent'] = v;
         }
       } else if (line.startsWith('http') && curMeta) {
-        const parsed = SkTechEmbedExtractor.parseDelimited(line);
+        const parsed = SkTechEmbedExtractor.parseDelimited(line, { defaultUserAgent: false });
         if (parsed.url) {
           const clean   = this.cleanEventTitle(curMeta.rawTitle, curMeta.tvgName);
           const isTestOrDemo = /^test\b|^demo\b|^placeholder\b|^sample\b/i.test(clean) ||
@@ -246,7 +248,7 @@ class SkTechMatchResolver {
             resolution:    resTag,
             type:          'fancode_direct',
             streamUrl:     parsed.url,
-            streamHeaders: { ...curOpts, ...parsed.headers },
+            streamHeaders: { 'User-Agent': DEFAULT_UA, ...curOpts, ...parsed.headers },
             streamTitle
           };
 
@@ -407,7 +409,6 @@ class SkTechMatchResolver {
     const hlsStreams = [];
     const r2Streams = [];
     const embedStreams = [];
-    const dashStreams = [];
 
     for (const opt of rawOptions) {
       const serverName = opt.name || 'HD Server';
@@ -457,31 +458,9 @@ class SkTechMatchResolver {
           score: 95
         });
       }
-      // Case 3: Akamai / AWS DASH with ClearKey → zero-bandwidth HLS conversion
-      else if (parsed.url.includes('.mpd') && api && api.includes(':')) {
-        const parts = api.trim().split(':');
-        const kid = (parts[0] || '').trim();
-        const key = (parts[1] || '').trim();
-
-        if (/^[0-9a-fA-F]{32}$/.test(key)) {
-          const payload = Buffer.from(JSON.stringify({
-            mpdUrl: parsed.url,
-            key: key.toLowerCase(),
-            kid: kid.toLowerCase(),
-            headers: parsed.headers || {}
-          })).toString('base64url');
-
-          dashStreams.push({
-            name: '⚡ Direct Stream',
-            title: `SK Tech (${serverName ? `${serverName} • 1080p FHD` : '1080p FHD'})`,
-            url: `${BASE_URL}/api/dash/index.m3u8?d=${payload}`,
-            behaviorHints: { notWebReady: false },
-            score: 95
-          });
-        }
-        // .mpd with a malformed key stays unplayable — dropped, never emitted raw
-      }
-      // Case 3b: DASH without any ClearKey cannot be played natively — skip
+      // Case 3: ClearKey DASH is dropped, not relayed.
+      // Playing it means decrypting every segment on this server (/api/dash),
+      // i.e. ≈3.7 GB of addon egress per viewer-hour at 1080p. Policy: no.
       else if (parsed.url.includes('.mpd')) {
         continue;
       }
@@ -517,8 +496,8 @@ class SkTechMatchResolver {
       }
     }
 
-    // Prioritize direct HLS & R2 first, then embeds, then DASH ClearKey
-    return [...hlsStreams, ...r2Streams, ...embedStreams, ...dashStreams];
+    // Direct HLS & R2 first, then embeds. DASH never leaves this resolver.
+    return [...hlsStreams, ...r2Streams, ...embedStreams];
   }
 }
 

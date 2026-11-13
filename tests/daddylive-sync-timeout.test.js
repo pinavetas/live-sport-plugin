@@ -116,6 +116,12 @@ describe('ceiling is coupled to the circuit breaker, never above it', () => {
     expect(loadHelper({ env: { DADDYLIVE_SYNC_TIMEOUT_MS: '9999' }, load: 900 })()).toBe(9999);
   });
 
+  test('fixed and scaled budgets cannot exceed the guarded transport limit', () => {
+    expect(loadHelper({ env: { DADDYLIVE_SYNC_TIMEOUT_MS: '60000' } })()).toBe(30000);
+    expect(loadHelper({ env: { SYNC_TIMEOUT_BASE_MS: '60000' }, load: 0 })()).toBe(30000);
+    expect(loadHelper({ env: { SYNC_TIMEOUT_BASE_MS: '-5' }, load: 0 })()).toBeGreaterThan(0);
+  });
+
   test('the breaker timeout is exported so this coupling cannot drift silently', () => {
     expect(typeof BREAKER_TIMEOUT_MS).toBe('number');
     expect(BREAKER_TIMEOUT_MS).toBeGreaterThan(0);
@@ -136,8 +142,35 @@ describe('call sites are wired correctly', () => {
     expect((ctor.match(/raceMirrors\(this\.baseDomains, cbTimeout,/g) || []).length).toBe(2);
   });
 
-  test('the 4 resolve-path fetches keep their literal 6000 (bounded by handleStream)', () => {
-    expect((source.match(/AbortSignal\.timeout\(6000\)/g) || []).length).toBe(4);
+  test('discovery retains its six-second ceiling and respects earlier parent or phase cancellation', async () => {
+    jest.useFakeTimers();
+    try {
+      const start = source.indexOf('function discoverySignal(');
+      const end = source.indexOf('\n}', start);
+      const sandbox = { AbortSignal: {
+        any: AbortSignal.any.bind(AbortSignal),
+        timeout(ms) {
+          const controller = new AbortController();
+          setTimeout(() => controller.abort(new DOMException('Discovery timed out', 'TimeoutError')), ms);
+          return controller.signal;
+        }
+      } };
+      vm.createContext(sandbox);
+      vm.runInContext(source.slice(start, end + 2) + '; this.makeSignal = discoverySignal;', sandbox);
+      const ordinary = sandbox.makeSignal();
+      await jest.advanceTimersByTimeAsync(5999);
+      expect(ordinary.aborted).toBe(false);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(ordinary.reason.name).toBe('TimeoutError');
+      for (const field of ['signal', 'mediaController']) {
+        const controller = new AbortController();
+        const signal = sandbox.makeSignal({ [field]: field === 'signal' ? controller.signal : controller });
+        const reason = new DOMException('Earlier deadline', 'AbortError');
+        controller.abort(reason);
+        expect(signal.aborted).toBe(true);
+        expect(signal.reason).toBe(reason);
+      }
+    } finally { jest.clearAllTimers(); jest.useRealTimers(); }
   });
 
   test('no sync fetch was left at the flat 6000 regression value', () => {

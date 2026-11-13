@@ -47,6 +47,9 @@ describe('DaddyLive mirror budget vs circuit breaker', () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2026-11-07T12:00:00Z'));
     provider = new DaddyLiveProvider({ circuitBreaker: fakeCB });
+    // Production runs a single domain today; the mirror race still has to hold
+    // its budget whenever more than one is configured.
+    provider.baseDomains = ['https://mirror-a.example', 'https://mirror-b.example', 'https://mirror-c.example'];
   });
 
   afterEach(() => {

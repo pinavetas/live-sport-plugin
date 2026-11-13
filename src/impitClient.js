@@ -64,7 +64,7 @@ function getProxyImpit(proxyUrl) {
   if (_impitProxyInstance !== undefined) return _impitProxyInstance;
   try {
     const { Impit } = require('impit');
-    _impitProxyInstance = new Impit({ proxyUrl });
+    _impitProxyInstance = new Impit({ browser: 'chrome142', proxyUrl });
     _impitProxyBornAt = Date.now();
     _impitProxyUrl = proxyUrl;
     console.log(`[impitClient] impit proxy client initialized with ${proxyUrl}`);
@@ -97,14 +97,152 @@ function getVanillaImpit() {
   return _impitVanillaInstance;
 }
 
-function isDamitvTarget(url) {
-  if (!url || typeof url !== 'string') return false;
-  return url.includes('damitv.st');
+const { isDamitvTarget, isDembedTarget, providerRequestHeaders } = require('./services/ProviderRequestHeaders');
+
+const { isLeafTarget, isDamitvMediaTarget } = require('./services/GuardedEgressPolicy');
+
+// ── DamiTV media via curl ────────────────────────────────────────────────────
+// damitv.st answers 403 to impit's TLS fingerprint on /c/*.m3u8 playlists, for
+// every browser profile impit offers (chrome142, chrome, chrome124,
+// firefox133 were all refused). The identical URL, token and headers are
+// accepted over curl through the same SOCKS proxy, on both HTTP/1.1 and
+// HTTP/2. Proxied requests deliberately never fall back to undici (it would
+// bypass the proxy), and this host has no direct route to damitv at all, so
+// curl is the only engine that can serve proxied damitv media.
+let _curlAvailable; // undefined = not probed yet
+function hasCurl() {
+  if (_curlAvailable !== undefined) return _curlAvailable;
+  try {
+    const { execFileSync } = require('child_process');
+    execFileSync('curl', ['--version'], { stdio: 'ignore', timeout: 5000 });
+    _curlAvailable = true;
+  } catch (_) {
+    _curlAvailable = false;
+    console.warn('[impitClient] curl unavailable; proxied DamiTV media has no working engine');
+  }
+  return _curlAvailable;
 }
 
-function isDembedTarget(url) {
-  if (!url || typeof url !== 'string') return false;
-  return url.includes('dembed.st');
+function socksHostPort(proxyUrl) {
+  try {
+    const u = new URL(proxyUrl);
+    return `${u.hostname}:${u.port || '1080'}`;
+  } catch (_) {
+    return null;
+  }
+}
+
+function curlHeaderBlocks(raw) {
+  return String(raw || '').split(/\r?\n\r?\n/).map((b) => b.trim()).filter(Boolean);
+}
+
+/** Status of the last response block (redirect chains emit several). */
+function curlLastStatus(raw) {
+  const blocks = curlHeaderBlocks(raw);
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const m = blocks[i].match(/^HTTP\/\d(?:\.\d)?\s+(\d{3})/m);
+    if (m) return Number(m[1]);
+  }
+  return null;
+}
+
+/** Headers of the last response block, as a Headers-like reader. */
+function curlLastHeaders(raw) {
+  const blocks = curlHeaderBlocks(raw);
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const lines = blocks[i].split(/\r?\n/);
+    if (!/^HTTP\//.test(lines[0] || '')) continue;
+    const out = {};
+    for (const line of lines.slice(1)) {
+      const idx = line.indexOf(':');
+      if (idx <= 0) continue;
+      out[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim();
+    }
+    out.get = (name) => out[String(name).toLowerCase()] || null;
+    return out;
+  }
+  return { get: () => null };
+}
+
+/**
+ * Fetch one playlist through the SOCKS proxy with curl.
+ * Returns a safeFetch-shaped response, or null when curl cannot be used so the
+ * caller falls back to impit unchanged.
+ */
+function curlFetchThroughSocks(url, options = {}) {
+  const { method = 'GET', headers = {}, timeoutMs = 15000, proxyUrl, maxBodyBytes, signal } = options;
+  if (!hasCurl()) return Promise.resolve(null);
+  const target = socksHostPort(proxyUrl);
+  if (!target) return Promise.resolve(null);
+
+  const fs = require('fs');
+  const os = require('os');
+  const pathMod = require('path');
+  const { execFile } = require('child_process');
+
+  let dir;
+  try {
+    dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'nuvio-damitv-'));
+  } catch (_) {
+    return Promise.resolve(null);
+  }
+  const headerFile = pathMod.join(dir, 'headers.txt');
+  const bodyFile = pathMod.join(dir, 'body.bin');
+
+  const args = [
+    '--silent', '--show-error', '--location',
+    '--max-time', String(Math.max(1, Math.ceil(timeoutMs / 1000))),
+    '--socks5-hostname', target,
+    '--dump-header', headerFile,
+    '--output', bodyFile,
+    '--request', method
+  ];
+  for (const [k, v] of Object.entries(headers || {})) {
+    if (v === undefined || v === null || v === '') continue;
+    args.push('--header', `${k}: ${v}`);
+  }
+  args.push(String(url));
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+      resolve(value);
+    };
+
+    const child = execFile('curl', args, { maxBuffer: 1024 * 1024 }, () => {
+      try {
+        if (!fs.existsSync(headerFile)) return finish(null);
+        const rawHeaders = fs.readFileSync(headerFile, 'utf8');
+        const status = curlLastStatus(rawHeaders);
+        if (!status) return finish(null);
+        const body = fs.existsSync(bodyFile) ? fs.readFileSync(bodyFile) : Buffer.alloc(0);
+        const limited = Number.isSafeInteger(maxBodyBytes) && maxBodyBytes > 0 && body.length > maxBodyBytes
+          ? body.subarray(0, maxBodyBytes)
+          : body;
+        finish({
+          ok: status >= 200 && status < 300,
+          status,
+          url,
+          headers: curlLastHeaders(rawHeaders),
+          bodyTruncated: limited.length !== body.length,
+          text: async () => limited.toString('utf8'),
+          json: async () => JSON.parse(limited.toString('utf8')),
+          arrayBuffer: async () => limited.buffer.slice(limited.byteOffset, limited.byteOffset + limited.byteLength),
+        });
+      } catch (_) {
+        finish(null);
+      }
+    });
+
+    if (signal && typeof signal.addEventListener === 'function') {
+      const onAbort = () => { try { child.kill(); } catch (_) {} };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
 }
 
 // -- impit TLS skip list ------------------------------------------------------
@@ -183,6 +321,8 @@ try {
 // Enough for the mirror 301s observed in production, small enough that a rogue
 // redirect loop costs about what a single timed-out request costs.
 const MAX_REDIRECT_HOPS = 5;
+
+const { filterRedirectHeaders, removeBodyHeaders, shouldDropRedirectBody } = require('./services/RedirectHeaderPolicy');
 
 /**
  * Read at most maxBytes from a Fetch-style or Undici response body.
@@ -286,6 +426,11 @@ function isDeadHost(url) {
 }
 
 async function safeFetch(url, opts = {}) {
+  // Local integration candidate: public metadata callers share guarded native
+  // and Undici transports; neither fallback can bypass destination validation.
+  if (opts.guardExternal === true) {
+    return require('./services/SharedOutboundFetch').fetchSharedOutbound(url, opts);
+  }
   const deadMatch = isDeadHost(url);
   if (deadMatch) {
     return {
@@ -396,43 +541,43 @@ async function fetchWithinDeadline(url, opts, deadlineAt) {
   // (see the redirect loop below), so they cannot be destructured as const.
   let { method = 'GET', headers = {}, body } = opts;
 
-  // Selective proxying: route DamiTV requests through local WARP SOCKS5 proxy if configured
+  // Selective proxying: route DamiTV/Leaf requests through local WARP SOCKS5 proxy if configured
   const warpProxyUrl = process.env.WARP_PROXY_URL || process.env.DAMITV_PROXY_URL;
+  const leafProxyUrl = process.env.LEAF_PROXY_URL || warpProxyUrl;
   const isDamitv = isDamitvTarget(url);
   const isDembed = isDembedTarget(url);
-  const proxyUrl = opts.proxyUrl || (isDamitv && warpProxyUrl ? warpProxyUrl : null);
+  const isLeaf = isLeafTarget(url);
+  const proxyUrl = opts.proxyUrl || (isDamitv ? warpProxyUrl : (isLeaf ? leafProxyUrl : null));
   // Direct (non-proxied) requests to hosts whose certificate chain impit
   // deterministically rejects skip the doomed TLS handshake entirely and go
   // straight to the undici path below.
   const impit = proxyUrl ? getProxyImpit(proxyUrl)
     : (isDamitv ? (getVanillaImpit() || getImpit()) : (impitTlsBlocked(url) ? null : getImpit()));
+  if (proxyUrl && !impit) {
+    const error = new Error('[impitClient] Proxy client unavailable; refusing direct fallback');
+    error.code = 'EPROXYUNAVAILABLE';
+    throw error;
+  }
   const maxAttempts = Math.max(1, attempts);
   // redirect: 'manual' returns 3xx responses as-is on both engines so the
   // caller (guardedFetch) can vet every hop before following it.
   const manualRedirect = opts.redirect === 'manual';
 
-  if (isDamitv) {
-    const headerKeys = Object.keys(headers || {});
-    const uaKey = headerKeys.find(k => k.toLowerCase() === 'user-agent');
-    const currentUa = uaKey ? headers[uaKey] : '';
-    const hasValidUa = currentUa && !currentUa.includes('Chrome/127');
-    const hasRef = headerKeys.some(k => k.toLowerCase() === 'referer');
-    headers = {
-      ...headers,
-      ...(hasValidUa ? {} : { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' }),
-      ...(hasRef ? {} : { 'Referer': 'https://damitv.st/' }),
-    };
-  } else if (isDembed) {
-    const headerKeys = Object.keys(headers || {});
-    const hasUa = headerKeys.some(k => k.toLowerCase() === 'user-agent');
-    const hasRef = headerKeys.some(k => k.toLowerCase() === 'referer');
-    const hasDest = headerKeys.some(k => k.toLowerCase() === 'sec-fetch-dest');
-    headers = {
-      ...(hasUa ? {} : { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' }),
-      ...(hasRef ? {} : { 'Referer': 'https://dlive.sx/' }),
-      ...(hasDest ? {} : { 'Sec-Fetch-Dest': 'iframe', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Site': 'cross-site' }),
-      ...headers,
-    };
+  headers = providerRequestHeaders(url, headers);
+
+  // DamiTV media: impit is refused at the TLS layer, so route these through
+  // curl over the same proxy before Path A can answer 403. headers[] has
+  // already been normalised for damitv above.
+  if (isDamitvMediaTarget(url) && proxyUrl) {
+    const viaCurl = await curlFetchThroughSocks(url, {
+      method,
+      headers,
+      timeoutMs: Math.max(1, Math.ceil(deadlineAt - performance.now())),
+      proxyUrl,
+      maxBodyBytes: opts.maxBodyBytes,
+      signal
+    });
+    if (viaCurl) return viaCurl;
   }
 
   let targetHostname = null;
@@ -475,6 +620,7 @@ async function fetchWithinDeadline(url, opts, deadlineAt) {
           const impit403 = {
             ok: false,
             status: res.status,
+            url: res.url || url,
             headers: res.headers,
             bodyTruncated,
             text: async () => Buffer.from(buf).toString('utf8'),
@@ -496,6 +642,7 @@ async function fetchWithinDeadline(url, opts, deadlineAt) {
         return {
           ok: res.status >= 200 && res.status < 300,
           status: res.status,
+          url: res.url || url,
           headers: res.headers,
           bodyTruncated,
           text: async () => Buffer.from(buf).toString('utf8'),
@@ -559,8 +706,8 @@ async function fetchWithinDeadline(url, opts, deadlineAt) {
   // dlive.sx is the observed case), so without following them the caller saw
   // `ok:false, status:301` and silently recorded a healthy primary domain as a
   // failure. Follow the chain here:
-  //   - 301/302/303 "moved": the request becomes a bodyless GET, as a browser
-  //     would send it (HEAD stays HEAD, since it has no body to drop);
+  //   - 301/302 convert POST to a bodyless GET; 303 converts every method
+  //     except HEAD. Other methods retain their method and body on 301/302.
   //   - 307/308 "relocated": method and body are preserved, the resource is
   //     still the same one;
   //   - missing/empty Location is not followable, so the redirect response is
@@ -599,16 +746,17 @@ async function fetchWithinDeadline(url, opts, deadlineAt) {
     } catch (_) { break; }
     if (nextUrl.protocol !== 'http:' && nextUrl.protocol !== 'https:') break;
 
-    if (method !== 'HEAD' && res.statusCode !== 307 && res.statusCode !== 308) {
+    // Compare full origins (scheme, host, effective port), not hostname alone.
+    // Credentials remain removed if a later redirect returns to the old host.
+    if (nextUrl.origin !== new URL(currentUrl).origin) {
+      headers = filterRedirectHeaders(headers);
+    }
+
+    if (shouldDropRedirectBody(res.statusCode, method)) {
       method = 'GET';
       body = undefined;
-      // A framing header describing a body that no longer exists corrupts the
-      // request, so drop it when the body is dropped. (Plain-object headers are
-      // what every caller in this codebase passes.)
-      if (headers && headers.constructor === Object && 'content-length' in headers) {
-        headers = Object.assign({}, headers);
-        delete headers['content-length'];
-      }
+      // Remove body-specific headers in every supported header representation.
+      headers = removeBodyHeaders(headers);
     }
     currentUrl = nextUrl.toString();
   }
@@ -618,6 +766,7 @@ async function fetchWithinDeadline(url, opts, deadlineAt) {
   return {
     ok: res.statusCode >= 200 && res.statusCode < 300,
     status: res.statusCode,
+    url: currentUrl,
     headers: res.headers,
     bodyTruncated,
     text: async () => Buffer.from(buf).toString('utf8'),
@@ -636,4 +785,4 @@ function isImpitAvailable() {
   return getImpit() !== null;
 }
 
-module.exports = { safeFetch, isImpitAvailable, getImpit, isDamitvTarget, isDembedTarget, readLimitedBody };
+module.exports = { safeFetch, isImpitAvailable, getImpit, isDamitvTarget, isDamitvMediaTarget, isDembedTarget, isLeafTarget, readLimitedBody };

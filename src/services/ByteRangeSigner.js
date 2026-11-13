@@ -2,7 +2,18 @@
 
 const crypto = require('crypto');
 
-const DEFAULT_SECRET = process.env.APP_SECRET || process.env.SESSION_SECRET || 'nuvio-tiktok-byterange-secret-v1';
+const CONFIGURED_SECRET = process.env.APP_SECRET || process.env.SESSION_SECRET || '';
+// Production HLS segment redirect tokens must verify across every worker.
+// A process-local fallback would cause intermittent 403s in PM2/cluster mode.
+const SIGNING_DISABLED = !CONFIGURED_SECRET && process.env.NODE_ENV === 'production';
+// Local development/tests remain usable without a shared secret, but never
+// fall back to a key publicly known from the repository.
+const DEFAULT_SECRET = SIGNING_DISABLED ? null : CONFIGURED_SECRET || crypto.randomBytes(32).toString('hex');
+if (SIGNING_DISABLED) {
+  console.error('[ByteRangeSigner] FATAL: signed HLS redirects disabled: configure a shared APP_SECRET or SESSION_SECRET and restart all workers. The addon remains available.');
+} else if (!CONFIGURED_SECRET) {
+  console.warn('[ByteRangeSigner] No shared secret configured; using a process-local development secret. Signed URLs will not survive restarts or work across instances.');
+}
 const DEFAULT_TTL_MS = 120 * 1000; // 120 seconds sliding TTL
 
 /**
@@ -16,6 +27,10 @@ class ByteRangeSigner {
     this.secret = secret;
   }
 
+  get enabled() {
+    return !!this.secret;
+  }
+
   /**
    * Encode segment data into a URL-safe Base64 token and HMAC signature.
    *
@@ -26,8 +41,14 @@ class ByteRangeSigner {
    * @param {number} [data.prefixBytes=42]
    * @param {number} [ttlMs=120000]
    * @returns {{ token: string, psig: string }}
+   * @throws {Error} ERR_HLS_SIGNING_DISABLED when production has no secret.
    */
   encodeSegmentToken(data, ttlMs = DEFAULT_TTL_MS) {
+    if (!this.enabled) {
+      throw Object.assign(new Error('Signed HLS redirects are disabled'), {
+        code: 'ERR_HLS_SIGNING_DISABLED', statusCode: 503
+      });
+    }
     const exp = Math.floor((Date.now() + ttlMs) / 1000);
     const payloadObj = {
       u: data.url,
@@ -57,6 +78,7 @@ class ByteRangeSigner {
    * @returns {Object|null} Decoded payload or null if invalid/expired
    */
   verifySegmentToken(token, psig) {
+    if (!this.enabled) return null;
     if (!token || !psig || typeof token !== 'string' || typeof psig !== 'string') {
       return null;
     }

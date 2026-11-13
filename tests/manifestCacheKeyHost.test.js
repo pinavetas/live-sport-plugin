@@ -71,7 +71,8 @@ describe('manifest proxy cache is scoped to the requesting base URL', () => {
   beforeEach(() => {
     manifestProxy.manifestCache.clear();
     manifestProxy.fetchUpstreamManifest.mockReset();
-    manifestProxy.fetchUpstreamManifest.mockResolvedValue(MASTER);
+    // With { withResponseUrl: true } the route expects { body, url } (url = final, post-redirect URL).
+    manifestProxy.fetchUpstreamManifest.mockImplementation(async (url, _r, _o, opts) => (opts && opts.withResponseUrl ? { body: MASTER, url } : MASTER));
   });
 
   test('two hosts asking for the same upstream each get their own base URL', async () => {

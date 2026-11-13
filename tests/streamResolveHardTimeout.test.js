@@ -1,5 +1,12 @@
 'use strict';
 
+// LiveTVProvider fetches through the guarded provider transport (fetchUndici).
+jest.mock('../src/services/ProviderOutbound', () => ({
+  ...jest.requireActual('../src/services/ProviderOutbound'),
+  fetchUndici: jest.fn(),
+}));
+const providerOutbound = require('../src/services/ProviderOutbound');
+
 const StreamResolveCache = require('../src/services/StreamResolveCache');
 const LiveTVProvider = require('../src/providers/LiveTVProvider');
 
@@ -69,14 +76,13 @@ describe('StreamResolveCache hard mint timeout', () => {
 });
 
 describe('LiveTVProvider unshorten', () => {
-  const originalFetch = global.fetch;
-  afterEach(() => { global.fetch = originalFetch; });
+  afterEach(() => { providerOutbound.fetchUndici.mockReset(); });
 
   test('every hop carries an abort signal and has its body cancelled', async () => {
     const cancels = [];
     const signals = [];
     let hop = 0;
-    global.fetch = jest.fn(async (url, opts) => {
+    providerOutbound.fetchUndici.mockImplementation(async (url, opts) => {
       signals.push(opts.signal);
       hop++;
       const cancel = jest.fn(async () => {});
@@ -89,13 +95,13 @@ describe('LiveTVProvider unshorten', () => {
 
     const out = await LiveTVProvider._unshorten('https://short.example/start');
     expect(out).toBe('https://short.example/2');
-    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(providerOutbound.fetchUndici).toHaveBeenCalledTimes(3);
     for (const s of signals) expect(s).toBeInstanceOf(AbortSignal);
     for (const c of cancels) expect(c).toHaveBeenCalledTimes(1);
   });
 
   test('a hop that times out stops unshortening and returns the last known URL', async () => {
-    global.fetch = jest.fn((url, opts) => new Promise((_, reject) => {
+    providerOutbound.fetchUndici.mockImplementation((url, opts) => new Promise((_, reject) => {
       opts.signal.addEventListener('abort', () => reject(opts.signal.reason));
     }));
     jest.spyOn(AbortSignal, 'timeout').mockImplementation(() => {

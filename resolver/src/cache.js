@@ -3,22 +3,26 @@
 // worker-side StreamResolveCache keys ("source:matchId:srcId"); matchId is
 // recovered as the segment between the first two colons for pruning.
 
+import { randomUUID } from 'node:crypto'
+
 const MAX_ENTRIES = 500
 const DEFAULT_CLAIM_TTL_MS = 30000
+const MAX_CLAIM_TTL_MS = 120000
+const MAX_CLAIMS = 1000
 const CLAIM_SWEEP_INTERVAL_MS = 1000
 
 const entries = new Map() // key -> { streams, status, expiresAt, storedAt }
-const claims = new Map()  // key -> claimExpiresAt (a worker is actively minting)
+const claims = new Map()  // key -> { expiresAt, ownerToken, fenced }
 let nextClaimSweepAt = 0
 
 // A failed/abandoned mint may never POST or DELETE its reservation. Reclaim
 // expired keys even if they are never requested again. Throttle full scans to
 // once per second of cache activity; no background timer keeps the server alive.
-function sweepExpiredClaims(now) {
-  if (now < nextClaimSweepAt) return
+function sweepExpiredClaims(now, force = false) {
+  if (!force && now < nextClaimSweepAt) return
   nextClaimSweepAt = now + CLAIM_SWEEP_INTERVAL_MS
-  for (const [key, expiresAt] of claims) {
-    if (expiresAt <= now) claims.delete(key)
+  for (const [key, claim] of claims) {
+    if (claim.expiresAt <= now) claims.delete(key)
   }
 }
 
@@ -41,53 +45,94 @@ export function cacheGet(key) {
   const now = Date.now()
   sweepExpiredClaims(now)
   // The addressed key expires immediately even between full sweeps.
-  const claimExpiry = claims.get(key)
-  if (claimExpiry !== undefined && claimExpiry <= now) claims.delete(key)
+  const claim = claims.get(key)
+  if (claim && claim.expiresAt <= now) claims.delete(key)
   const e = entries.get(key)
   if (!e) {
     // No entry yet — but if a mint claim is held, the key is being minted by
     // another worker right now. Reporting 'minting' (not 'miss') lets the
     // polling worker wait for the result instead of duplicating the mint.
     const held = claims.get(key)
-    if (held && held > now) return { status: 'minting' }
+    if (held && held.expiresAt > now) return { status: 'minting' }
     return { status: 'miss' }
   }
   if (now > e.expiresAt) {
     entries.delete(key)
     const held = claims.get(key)
-    if (held && held > now) return { status: 'minting' }
+    if (held && held.expiresAt > now) return { status: 'minting' }
     return { status: 'miss' }
   }
-  return { status: e.status, streams: e.streams, expiresAt: e.expiresAt }
+  return { status: e.status, streams: e.streams, expiresAt: e.expiresAt, revision: e.revision }
 }
 
 // Reserve the right to mint a key. ok:false means another worker holds a
 // fresh claim and is minting right now — the caller should poll cacheGet.
-export function cacheClaim(key, ttlMs = DEFAULT_CLAIM_TTL_MS) {
+export function cacheClaim(key, ttlMs = DEFAULT_CLAIM_TTL_MS, fenced = false, vacantOnly = false) {
   const now = Date.now()
   sweepExpiredClaims(now)
+  if (vacantOnly) {
+    if (!fenced) return { ok: false, reason: 'fence-required' }
+    const entry = entries.get(key)
+    // This check and acquisition are synchronous: a late mint cannot claim
+    // over a result another worker published just before the request arrived.
+    if (entry && entry.expiresAt >= now) return { ok: false, reason: 'cache-present' }
+  }
   const held = claims.get(key)
-  if (held && held > now) return { ok: false }
+  if (held && held.expiresAt > now) return { ok: false }
+  if (held) claims.delete(key)
+  if (claims.size >= MAX_CLAIMS) sweepExpiredClaims(now, true)
+  // Never evict a live owner to make room for another mint.
+  if (claims.size >= MAX_CLAIMS) return { ok: false, reason: 'claim-capacity' }
   const requestedTtl = Number(ttlMs)
   const ttl = Number.isFinite(requestedTtl) && requestedTtl > 0 ? requestedTtl : DEFAULT_CLAIM_TTL_MS
-  claims.set(key, now + Math.max(5000, ttl))
-  return { ok: true }
+  const ownerToken = randomUUID()
+  claims.set(key, { expiresAt: now + Math.min(MAX_CLAIM_TTL_MS, Math.max(5000, ttl)), ownerToken, fenced })
+  return fenced ? { ok: true, ownerToken, supportsVacantClaim: true, vacantOnly } : { ok: true }
 }
 
-export function cacheSet(key, streams, ttlMs, status = 'ok') {
+// Token-bearing operations must still own the current unexpired reservation.
+// Unfenced legacy callers are supported, but cannot alter an active fenced claim.
+function ownershipError(key, ownerToken) {
+  const held = claims.get(key)
+  if (ownerToken !== undefined) {
+    if (typeof ownerToken !== 'string' || !held || held.expiresAt <= Date.now() || held.ownerToken !== ownerToken) {
+      return { ok: false, reason: 'stale-owner' }
+    }
+  } else if (held && held.fenced && held.expiresAt > Date.now()) {
+    return { ok: false, reason: 'owner-required' }
+  }
+  return null
+}
+
+export function cacheSet(key, streams, ttlMs, status = 'ok', ownerToken) {
+  const rejected = ownershipError(key, ownerToken)
+  if (rejected) return rejected
   const ttl = Math.max(1000, Number(ttlMs) || 60000)
+  const revision = randomUUID()
   entries.set(key, {
     streams: Array.isArray(streams) ? streams : [],
     status: status === 'failed' ? 'failed' : 'ok',
     expiresAt: Date.now() + ttl,
     storedAt: Date.now(),
+    revision,
   })
   claims.delete(key)
   evictIfNeeded()
-  return { ok: true, entries: entries.size }
+  return { ok: true, entries: entries.size, revision }
 }
 
-export function cacheDelete(key) {
+export function cacheDelete(key, ownerToken, expectedRevision) {
+  const rejected = ownershipError(key, ownerToken)
+  if (rejected) return rejected
+  if (expectedRevision !== undefined) {
+    const entry = entries.get(key)
+    if (typeof expectedRevision !== 'string' || !entry || entry.revision !== expectedRevision) {
+      return { ok: false, reason: 'stale-revision' }
+    }
+    entries.delete(key)
+    // Invalidating a published entry never releases an unrelated mint claim.
+    return { ok: true }
+  }
   entries.delete(key)
   claims.delete(key)
   return { ok: true }

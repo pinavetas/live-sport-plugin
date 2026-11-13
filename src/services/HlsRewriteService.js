@@ -59,14 +59,20 @@ function isTikTokCloakedSegment(url) {
  */
 function resolveSegmentUrl(segmentUri, manifestUrl) {
   try {
-    const chunkUrl = new URL(segmentUri, manifestUrl);
+    const raw = String(segmentUri).trim();
+    const chunkUrl = new URL(raw, manifestUrl);
     const manifestObj = new URL(manifestUrl);
+    const isAbsoluteReference = /^[a-z][a-z\d+.-]*:/i.test(raw) || raw.startsWith('//');
 
-    manifestObj.searchParams.forEach((val, key) => {
-      if (!chunkUrl.searchParams.has(key)) {
-        chunkUrl.searchParams.set(key, val);
-      }
-    });
+    // Relative paths on the same host can inherit a parent manifest token.
+    // Never copy credentials from one CDN origin to another.
+    if (!isAbsoluteReference && chunkUrl.origin === manifestObj.origin) {
+      manifestObj.searchParams.forEach((val, key) => {
+        if (!chunkUrl.searchParams.has(key)) {
+          chunkUrl.searchParams.set(key, val);
+        }
+      });
+    }
 
     return chunkUrl.toString();
   } catch (_) {
@@ -101,9 +107,14 @@ function segmentAddressMode() {
 }
 
 /**
- * Build the signed 307 redirect URL for a cloaked TikTok segment.
+ * Build the signed 307 redirect URL for a cloaked TikTok segment, or keep the
+ * direct CDN URL when production signing is disabled.
  */
 function buildByteRangeRedirectUrl(absoluteUrl, opts = {}) {
+  // Missing production configuration disables only this legacy hop. Both URI
+  // and full-playlist rewriting use the existing direct-CDN mode instead.
+  // Never turn signing failure into a server-side video proxy fallback.
+  if (byteRangeSigner.enabled === false) return absoluteUrl;
   const { referer = '', origin = '', absoluteAddonBaseUrl = '' } = opts;
   const { token, psig } = byteRangeSigner.encodeSegmentToken({
     url: absoluteUrl,
@@ -119,16 +130,44 @@ function buildByteRangeRedirectUrl(absoluteUrl, opts = {}) {
 /**
  * Rewrite one playlist entry into the URL the player should fetch.
  */
+function buildManifestProxyUrl(upstreamUrl, opts = {}) {
+  const { referer = '', origin = '', userAgent = '', rckSuffix = '', absoluteAddonBaseUrl = '' } = opts;
+  let manifestPath = `/api/manifest?url=${encodeURIComponent(upstreamUrl)}`;
+  if (referer) manifestPath += `&referer=${encodeURIComponent(referer)}`;
+  if (origin) manifestPath += `&origin=${encodeURIComponent(origin)}`;
+  if (userAgent) manifestPath += `&hlsua=${encodeURIComponent(userAgent)}`;
+  manifestPath += rckSuffix || '';
+  return absoluteAddonBaseUrl ? new URL(manifestPath, absoluteAddonBaseUrl).toString() : manifestPath;
+}
+
+// fMP4 media, keys and init sections must reach the player byte-exact: the TS
+// uncloak filter in /api/hlschunk is skipped for them (raw=1).
+const RAW_RELAY_PATH = /\.(?:m4s|mp4|m4a|m4v|cmfv|cmfa|aac|key|bin|vtt|webvtt)$/i;
+
+/** /api/hlschunk URL that fetches `absoluteUrl` with the playlist's upstream headers. */
+function buildSegmentRelayUrl(absoluteUrl, opts = {}, { raw = false } = {}) {
+  const { referer = '', origin = '', userAgent = '', absoluteAddonBaseUrl = '' } = opts;
+  let chunkPath = `/api/hlschunk?url=${encodeURIComponent(absoluteUrl)}`;
+  if (referer) chunkPath += `&referer=${encodeURIComponent(referer)}`;
+  if (origin) chunkPath += `&origin=${encodeURIComponent(origin)}`;
+  if (userAgent) chunkPath += `&ua=${encodeURIComponent(userAgent)}`;
+  let isRaw = raw;
+  if (!isRaw) {
+    try { isRaw = RAW_RELAY_PATH.test(new URL(absoluteUrl).pathname); } catch (_) {}
+  }
+  if (isRaw) chunkPath += '&raw=1';
+  return absoluteAddonBaseUrl ? new URL(chunkPath, absoluteAddonBaseUrl).toString() : chunkPath;
+}
+
 function rewriteHlsUri(segmentUri, manifestUrl, opts = {}) {
-  const { referer = '', origin = '', rckSuffix = '', absoluteAddonBaseUrl = '' } = opts;
+  const { referer = '', origin = '', absoluteAddonBaseUrl = '' } = opts;
   const absoluteUrl = resolveSegmentUrl(segmentUri, manifestUrl);
 
   if (absoluteUrl.includes('.m3u8')) {
-    let manifestPath = `/api/manifest?url=${encodeURIComponent(absoluteUrl)}`;
-    if (referer) manifestPath += `&referer=${encodeURIComponent(referer)}`;
-    if (origin) manifestPath += `&origin=${encodeURIComponent(origin)}`;
-    manifestPath += rckSuffix || '';
-    return absoluteAddonBaseUrl ? new URL(manifestPath, absoluteAddonBaseUrl).toString() : manifestPath;
+    if (typeof opts.toPlaylistUrl === 'function') {
+      return opts.toPlaylistUrl(absoluteUrl, opts);
+    }
+    return buildManifestProxyUrl(absoluteUrl, opts);
   }
 
   if (isTikTokCloakedSegment(absoluteUrl)) {
@@ -163,6 +202,11 @@ function rewriteHlsUri(segmentUri, manifestUrl, opts = {}) {
     return absoluteUrl;
   }
 
+  // The client will not send the CDN's required headers (see
+  // SegmentRelayPolicy): stream the segment through /api/hlschunk, which adds
+  // them. Costs server bandwidth, only for such clients.
+  if (opts.relaySegments) return buildSegmentRelayUrl(absoluteUrl, opts);
+
   // Plain MPEG-TS segments stream directly from the upstream CDN (0 VPS bandwidth bleeding).
   const isPureDisguisedTs = absoluteUrl.includes('.png') || absoluteUrl.includes('.webp') || absoluteUrl.includes('.js');
   if (isPureDisguisedTs && !absoluteUrl.includes('.ts')) {
@@ -170,6 +214,77 @@ function rewriteHlsUri(segmentUri, manifestUrl, opts = {}) {
   }
 
   return absoluteUrl;
+}
+
+/**
+ * HLS tags can carry URI= resources even when the resource is not an ordinary
+ * segment line. Keep key/initialization resources direct; playlist resources
+ * (including extensionless audio/video renditions) go through /api/manifest.
+ * Leave non-HTTP DRM schemes alone.
+ */
+function rewriteHlsTagUris(line, manifestUrl, opts = {}) {
+  const colon = line.indexOf(':');
+  if (colon < 0) return line;
+  const tag = line.slice(0, colon);
+  if (!/^#EXT-X-(?:KEY|SESSION-KEY|MEDIA|I-FRAME-STREAM-INF|IMAGE-STREAM-INF|RENDITION-REPORT|PART|PRELOAD-HINT|MAP|SESSION-DATA)$/.test(tag)) return line;
+
+  const text = line.slice(colon + 1);
+  const replacements = [];
+  let i = 0;
+  while (i < text.length) {
+    while (i < text.length && (text[i] === ',' || /\s/.test(text[i]))) i++;
+    const keyStart = i;
+    while (i < text.length && /[A-Za-z0-9-]/.test(text[i])) i++;
+    const key = text.slice(keyStart, i);
+    if (!key || text[i] !== '=') {
+      while (i < text.length && text[i] !== ',') i++;
+      continue;
+    }
+    i++;
+    if (text[i] === '"') {
+      const valueStart = i + 1;
+      i++;
+      while (i < text.length && text[i] !== '"') i++;
+      const valueEnd = i;
+      const value = text.slice(valueStart, valueEnd);
+      if (i < text.length) i++;
+      if (key === 'URI' && value) {
+        try {
+          const resolved = new URL(value, manifestUrl);
+          if (resolved.protocol === 'http:' || resolved.protocol === 'https:') {
+            // Child playlists must go through our manifest proxy so they retain
+            // provider headers, recovery identity (rck), and nested redirect handling.
+            // URI meaning comes from the HLS tag, not just the filename.
+            // KEY, SESSION-KEY, MAP, and SESSION-DATA resources stay direct even
+            // if their endpoint happens to end in ".m3u8".
+            const isPlaylistReference = tag === '#EXT-X-MEDIA'
+              || tag === '#EXT-X-I-FRAME-STREAM-INF'
+              || tag === '#EXT-X-RENDITION-REPORT'
+              || tag === '#EXT-X-IMAGE-STREAM-INF';
+            const isSegmentReference = tag === '#EXT-X-PART' || tag === '#EXT-X-PRELOAD-HINT';
+            const rewrittenUri = isPlaylistReference
+              ? (typeof opts.toPlaylistUrl === 'function'
+                  ? opts.toPlaylistUrl(resolveSegmentUrl(value, manifestUrl), opts)
+                  : buildManifestProxyUrl(resolveSegmentUrl(value, manifestUrl), opts))
+              : isSegmentReference
+                ? rewriteHlsUri(value, manifestUrl, opts)
+                // Keys / init sections: relayed byte-exact for clients that
+                // will not send the CDN's headers, direct otherwise.
+                : (opts.relaySegments ? buildSegmentRelayUrl(resolved.toString(), opts, { raw: true }) : resolved.toString());
+            replacements.push({ start: valueStart, end: valueEnd, value: rewrittenUri });
+          }
+        } catch (_) {}
+      }
+    } else {
+      while (i < text.length && text[i] !== ',') i++;
+    }
+  }
+  if (!replacements.length) return line;
+  let rewritten = text;
+  for (const item of replacements.reverse()) {
+    rewritten = rewritten.slice(0, item.start) + item.value + rewritten.slice(item.end);
+  }
+  return line.slice(0, colon + 1) + rewritten;
 }
 
 /**
@@ -190,6 +305,10 @@ function rewriteHlsPlaylist(manifestBody, manifestUrl, opts = {}) {
   const rewritten = [];
   let currentDuration = null;
   let hasPrecedingByteRange = false;
+  // The URI after #EXT-X-STREAM-INF is a variant playlist even when its path
+  // has no .m3u8 (e.g. live.php?...&extension=m3u8); it must go through
+  // /api/manifest, never be treated (or relayed) as a media segment.
+  let nextIsVariantPlaylist = false;
 
   const requiresByteRange = segmentAddressMode() !== 'proxy' && lines.some(l => {
     const t = l.trim();
@@ -207,6 +326,12 @@ function rewriteHlsPlaylist(manifestBody, manifestUrl, opts = {}) {
     }
 
     if (trimmed.startsWith('#')) {
+      if (trimmed.startsWith('#EXT-X-STREAM-INF')) nextIsVariantPlaylist = true;
+      const rewrittenTag = rewriteHlsTagUris(line, manifestUrl, opts);
+      if (rewrittenTag !== line) {
+        rewritten.push(rewrittenTag);
+        continue;
+      }
       if (trimmed.startsWith('#EXT-X-VERSION:')) {
         if (requiresByteRange) {
           const v = parseInt(trimmed.slice('#EXT-X-VERSION:'.length).trim(), 10);
@@ -245,6 +370,16 @@ function rewriteHlsPlaylist(manifestBody, manifestUrl, opts = {}) {
 
     // URI line
     const absoluteUrl = resolveSegmentUrl(trimmed, manifestUrl);
+
+    if (nextIsVariantPlaylist) {
+      nextIsVariantPlaylist = false;
+      rewritten.push(typeof opts.toPlaylistUrl === 'function'
+        ? opts.toPlaylistUrl(absoluteUrl, opts)
+        : buildManifestProxyUrl(absoluteUrl, opts));
+      currentDuration = null;
+      hasPrecedingByteRange = false;
+      continue;
+    }
 
     if (absoluteUrl.includes('.m3u8')) {
       rewritten.push(rewriteHlsUri(trimmed, manifestUrl, opts));

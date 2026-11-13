@@ -17,15 +17,16 @@ const express = require('express');
 const cors    = require('cors');
 const { getRouter } = require('stremio-addon-sdk');
 const { createProxyMiddleware } = require('http-proxy-middleware');
-const { resolverProxyOptions } = require('./resolverProxyOptions');
+const resolverProxyEvents = require('./services/ResolverProxyEvents');
+const { resolverTransport } = require('./services/ResolverTransportRuntime');
 const child_process = require('child_process');
 const path = require('path');
 
 const { builder } = require('./manifest');
-const { handleCatalog, handleMeta, isReplayMatch, hasCustomAiContent } = require('./catalog');
+const { handleCatalog, handleMeta, isReplayMatch } = require('./catalog');
 const { createReplaySubcatalogHandler } = require('./routes/replaySubcatalogs');
 const { handleStream } = require('./streams');
-const { PORT, BASE_URL, getRequestBaseUrl, getLocalIp } = require('./config');
+const { PORT, BASE_URL, STREAM_BASE_URL, getRequestBaseUrl, getLocalIp } = require('./config');
 const { isLocalDirectRequest } = require('./services/localRequest');
 const container = require('./container');
 const https = require('https');
@@ -54,6 +55,20 @@ app.set('container', container);
 app.set('trust proxy', true);
 app.use(cors());
 
+// Opt-in access log (LOG_REQUESTS=1): one line per request with client IP,
+// path, status and duration. Off by default: config segments and stream URLs
+// in the path can carry personal settings and upstream tokens.
+if (/^(1|true|yes)$/i.test(String(process.env.LOG_REQUESTS || ''))) {
+  app.use((req, res, next) => {
+    const startedAt = Date.now();
+    res.on('finish', () => {
+      const url = req.originalUrl.length > 200 ? `${req.originalUrl.slice(0, 200)}…` : req.originalUrl;
+      console.log(`[HTTP] ${req.ip} ${req.method} ${url} -> ${res.statusCode} ${Date.now() - startedAt}ms`);
+    });
+    next();
+  });
+}
+
 // Artwork under /posters is large (the replay hero JPEGs are ~100-200 KB) and
 // rarely changes, but it used to be sent with no-store. That made Cloudflare
 // report BYPASS, so every view pulled the bytes from origin - the largest
@@ -70,124 +85,19 @@ app.use('/posters', express.static(path.join(__dirname, 'public', 'posters'), po
 app.use('/posters', express.static(path.join(__dirname, 'posters'), posterStaticOptions));
 
 // Serve static assets from public (logos, cryptocurrency QR codes, etc.)
-app.use(express.static(path.join(__dirname, '..', 'public')));
-app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.static(path.join(process.cwd(), 'public')));
+// index:false — otherwise express.static answers "/" with public/index.html
+// and the configure page route below is never reached.
+const publicStaticOptions = { index: false };
+app.use(express.static(path.join(__dirname, '..', 'public'), publicStaticOptions));
+app.use(express.static(path.join(__dirname, 'public'), publicStaticOptions));
+app.use(express.static(path.join(process.cwd(), 'public'), publicStaticOptions));
 
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
-});
-
-app.get(['/configure', '/:config/configure'], (req, res) => {
+app.get(['/', '/configure', '/:config/configure'], (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'configure.html'));
 });
 
-app.get(['/donate', '/:config/donate'], (req, res) => {
-  res.redirect('/#donate');
-});
-
-// ─── Nuvio Native Collections ─────────────────────────────────────────
-// Serves Nuvio Collections JSON schema for Sports Replays & Live Sports.
-// Compatible with Nuvio's Collection import from URL or file.
-const { generateCollections } = require('./collections');
-
-// Rolling/competition replay rows for the sport collections. Kept OUT of the
-// static manifest (see the note in the /manifest.json handler) so the manifest
-// stays under the Stremio SDK's 8192-byte limit.
-const REPLAY_MANIFEST_ROWS = [
-  // Football
-  { type: 'tv', id: 'nuvio_sports_replays_football_today', name: "📅 Today's Replays", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_football_yesterday', name: "📅 Yesterday's Replays", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_football_this_week', name: "📅 This Week's Replays", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_football_older', name: "📅 Older Replays", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_football_premier_league', name: "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_football_ucl', name: "⭐ Champions League", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_football_recent', name: "🔥 Recent Replays", extra: [{ name: 'skip', isRequired: true }] },
-
-  // Motorsport
-  { type: 'tv', id: 'nuvio_sports_replays_motorsport_today', name: "📅 Today's Races", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_motorsport_yesterday', name: "📅 Yesterday's Races", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_motorsport_this_week', name: "📅 This Week's Races", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_motorsport_older', name: "📅 Older Races", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_motorsport_f1', name: "🏎️ Formula 1", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_motorsport_recent', name: "🔥 Recent Motorsport", extra: [{ name: 'skip', isRequired: true }] },
-
-  // Baseball
-  { type: 'tv', id: 'nuvio_sports_replays_baseball_today', name: "📅 Today's Games", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_baseball_yesterday', name: "📅 Yesterday's Games", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_baseball_this_week', name: "📅 This Week's Games", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_baseball_older', name: "📅 Older Games", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_baseball_mlb', name: "⚾ MLB", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_baseball_recent', name: "🔥 Recent Baseball", extra: [{ name: 'skip', isRequired: true }] },
-
-  // Rugby
-  { type: 'tv', id: 'nuvio_sports_replays_rugby_today', name: "📅 Today's Matches", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_rugby_yesterday', name: "📅 Yesterday's Matches", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_rugby_this_week', name: "📅 This Week's Matches", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_rugby_older', name: "📅 Older Matches", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_rugby_recent', name: "🔥 Recent Rugby", extra: [{ name: 'skip', isRequired: true }] },
-
-  // Basketball
-  { type: 'tv', id: 'nuvio_sports_replays_basketball_today', name: "\uD83D\uDCC5 Today's Games", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_basketball_yesterday', name: "\uD83D\uDCC5 Yesterday's Games", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_basketball_this_week', name: "\uD83D\uDCC5 This Week's Games", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_basketball_older', name: '\uD83D\uDCC5 Older Games', extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_basketball_nba', name: '\uD83C\uDFC0 NBA', extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_basketball_recent', name: "🔥 Recent Basketball", extra: [{ name: 'skip', isRequired: true }] },
-
-  // Tennis
-  { type: 'tv', id: 'nuvio_sports_replays_tennis_today', name: "\uD83D\uDCC5 Today's Matches", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_tennis_yesterday', name: "\uD83D\uDCC5 Yesterday's Matches", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_tennis_this_week', name: "\uD83D\uDCC5 This Week's Matches", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_tennis_older', name: '\uD83D\uDCC5 Older Matches', extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_tennis_atp', name: '\uD83C\uDFBE ATP Tour', extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_tennis_recent', name: "🔥 Recent Tennis", extra: [{ name: 'skip', isRequired: true }] },
-
-  // Hockey
-  { type: 'tv', id: 'nuvio_sports_replays_hockey_today', name: "\uD83D\uDCC5 Today's Games", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_hockey_yesterday', name: "\uD83D\uDCC5 Yesterday's Games", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_hockey_this_week', name: "\uD83D\uDCC5 This Week's Games", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_hockey_older', name: '\uD83D\uDCC5 Older Games', extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_hockey_nhl', name: '\uD83C\uDFD2 NHL', extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_hockey_recent', name: "🔥 Recent Hockey", extra: [{ name: 'skip', isRequired: true }] },
-
-  // American Football
-  { type: 'tv', id: 'nuvio_sports_replays_american_football_today', name: "\uD83D\uDCC5 Today's Games", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_american_football_yesterday', name: "\uD83D\uDCC5 Yesterday's Games", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_american_football_this_week', name: "\uD83D\uDCC5 This Week's Games", extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_american_football_older', name: '\uD83D\uDCC5 Older Games', extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_american_football_nfl', name: '\uD83C\uDFC8 NFL', extra: [{ name: 'skip', isRequired: true }] },
-  { type: 'tv', id: 'nuvio_sports_replays_american_football_recent', name: "🔥 Recent NFL", extra: [{ name: 'skip', isRequired: true }] }
-];
-
-app.get(['/collections.json', '/nuvio-collections.json', '/:config/collections.json', '/:config/nuvio-collections.json'], (req, res) => {
-  const reqBaseUrl = getRequestBaseUrl(req);
-  const config = req.params.config || '';
-  // Explicit query overrides let a bare collections URL still pin the replay
-  // scope, since each row queries its own manifestUrl.
-  const options = {
-    replayFilter: typeof req.query.replayFilter === 'string' ? req.query.replayFilter : undefined,
-    languages: typeof req.query.languages === 'string' ? req.query.languages : undefined,
-  };
-  const collections = generateCollections(reqBaseUrl, config, options);
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.json(collections);
-});
-
-app.get(['/api/collections/download', '/:config/api/collections/download'], (req, res) => {
-  const reqBaseUrl = getRequestBaseUrl(req);
-  const config = req.params.config || '';
-  const options = {
-    replayFilter: typeof req.query.replayFilter === 'string' ? req.query.replayFilter : undefined,
-    languages: typeof req.query.languages === 'string' ? req.query.languages : undefined,
-  };
-  const collections = generateCollections(reqBaseUrl, config, options);
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="nuvio-sports-collections.json"');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.send(JSON.stringify(collections, null, 2));
+app.get('/status', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'public', 'status.html'));
 });
 
 // ─── Local-direct gate for internal/debug endpoints ─────────────────────────
@@ -236,11 +146,29 @@ app.get('/api/options', (req, res) => {
   } catch (_) {
     languages = [];
   }
+  // Team names from the fixtures currently cached, most frequent first. They
+  // feed the favourite-teams picker's suggestions; free text is still accepted.
+  let teams = [];
+  try {
+    const cs = container.resolve('cacheService');
+    const cached = (cs && (typeof cs.getMatchesReadOnly === 'function' ? cs.getMatchesReadOnly() : (typeof cs.getMatches === 'function' ? cs.getMatches() : []))) || [];
+    const counts = new Map();
+    for (const m of cached) {
+      for (const t of [m && m.team1, m && m.team2]) {
+        const name = t && typeof t.name === 'string' ? t.name.trim() : '';
+        if (name && name.length <= 60) counts.set(name, (counts.get(name) || 0) + 1);
+      }
+    }
+    teams = [...counts.entries()].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0])).slice(0, 400).map((e) => e[0]);
+  } catch (_) {
+    teams = [];
+  }
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cache-Control', 'public, max-age=3600');
   res.json({
     languages,
+    teams,
     englishAlwaysFirst: true,
     replayFilters: [
       { value: 'all', label: 'All replays' },
@@ -851,14 +779,32 @@ app.get('/img', async (req, res) => {
 // absent, all fetches silently use undici — streams continue to work.
 app.use(require('./routes/streamProxy'));
 app.use(require('./routes/manifest'));
+app.use(require('./routes/leafManifest'));
+app.use(require('./routes/scoreZoneStream'));
 app.use(require('./routes/hlsResource'));
 app.use(require('./routes/embed'));
-app.use('/api/parser', require('./routes/parserStudio'));
 // Zero-bandwidth DASH→HLS converter (must stay above the /api resolver proxy)
 app.use(require('./routes/dash'));
+// Internal resolver cache APIs are used directly over loopback by cluster workers.
+// Only the resolver's stream and health endpoints may cross the public /api proxy.
+app.use('/api', require('./services/PublicResolverApiGate'));
+app.use('/api', require('./services/ResolverTrustPolicy').createResolverTrustGate());
+// Do not route new requests to a port where this worker observed that its
+// resolver failed to bind. This does not verify other workers' ownership.
+app.use('/api', require('./services/ResolverConflictGate'));
 // Mount the HLS Video Proxy (routes to the internal resolver on port RESOLVER_PORT)
-// http-proxy-middleware v4 options (on.error, not the ignored legacy onError).
-app.use('/api', createProxyMiddleware(resolverProxyOptions(RESOLVER_PORT)));
+app.use('/api', createProxyMiddleware({
+  ...(resolverTransport ? resolverTransport.proxyOptions : { target: `http://127.0.0.1:${RESOLVER_PORT}/api` }),
+  // A socket target has no TCP hostname to synthesize as Host. Preserve the
+  // incoming host in that mode; the configured TLS servername is separate.
+  changeOrigin: !resolverTransport,
+  xfwd: true,
+  // The proxy library's default logger includes request URLs. Resolver URLs
+  // can contain playback credentials, so log only fixed messages.
+  logger: { info: () => {}, warn: () => console.warn('[Resolver Proxy] Warning'),
+    error: () => console.error('[Resolver Proxy] Request failed') },
+  on: { proxyReq: resolverProxyEvents.proxyReq, error: resolverProxyEvents.error }
+}));
 
 // ─── Universal Dynamic Base URL Response Rewriter ─────────────────────────────
 // Intercepts /manifest.json, /catalog/*, /meta/*, and /stream/* responses to
@@ -870,7 +816,34 @@ app.use('/api', createProxyMiddleware(resolverProxyOptions(RESOLVER_PORT)));
 // A substring scan is far cheaper than JSON-parsing multi-megabyte hub
 // responses that carry no relative URLs, so payloads without any prefix are
 // passed through untouched. Keep in sync with the prefix lists in rewriteUrl.
-const REWRITE_SCAN_PREFIXES = ['/img', '/watch', '/api/manifest', '/api/dash', '/logo', '/api/mp4proxy', '/api/fastmp4', '/api/hlschunk', '/api/hls', '/hls', '/posters', '/donate'];
+const STREAM_PREFIXES = [
+  '/api/manifest',
+  '/api/dash',
+  '/api/hls',
+  '/hls/resource',
+  '/api/soccerfull',
+  '/api/leaf',
+  '/api/mp4proxy',
+  '/api/fastmp4',
+  '/api/scorezone',
+  '/api/hlschunk'
+];
+
+const METADATA_PREFIXES = [
+  '/img',
+  '/watch',
+  '/logo',
+  '/posters',
+  '/donate'
+];
+
+const REWRITE_SCAN_PREFIXES = [...STREAM_PREFIXES, ...METADATA_PREFIXES];
+// Match complete endpoint names or their path/file forms, never a lookalike
+// such as /api/leaflet. Generic upstream /hls paths are not addon endpoints.
+const matchesRewritePrefix = (url, prefix) => url === prefix ||
+  url.startsWith(`${prefix}/`) || url.startsWith(`${prefix}?`) ||
+  url.startsWith(`${prefix}#`) ||
+  (url.startsWith(`${prefix}.`) && /^\.[A-Za-z0-9]+(?:[?#]|$)/.test(url.slice(prefix.length)));
 
 app.use((req, res, next) => {
   const isAddonRoute = req.path === '/manifest.json' || 
@@ -882,6 +855,7 @@ app.use((req, res, next) => {
   if (!isAddonRoute) return next();
 
   const currentBaseUrl = getRequestBaseUrl(req);
+  const effectiveStreamBaseUrl = STREAM_BASE_URL || currentBaseUrl;
   const originalWrite = res.write;
   const originalEnd = res.end;
   const chunks = [];
@@ -913,16 +887,32 @@ app.use((req, res, next) => {
 
         const rewriteUrl = (url) => {
           if (!url || typeof url !== 'string') return url;
-          // Relative URLs
-          if (url.startsWith('/img') || url.startsWith('/watch') || url.startsWith('/api/manifest') || url.startsWith('/api/dash') || url.startsWith('/logo') || url.startsWith('/api/mp4proxy') || url.startsWith('/api/fastmp4') || url.startsWith('/api/hlschunk') || url.startsWith('/api/hls') || url.startsWith('/hls') || url.startsWith('/posters') || url.startsWith('/donate')) {
-            modified = true;
-            return `${currentBaseUrl}${url}`;
+          // Relative stream URLs -> dedicated stream subdomain (if configured)
+          for (const prefix of STREAM_PREFIXES) {
+            if (matchesRewritePrefix(url, prefix)) {
+              modified = true;
+              return `${effectiveStreamBaseUrl}${url}`;
+            }
           }
-          // Absolute URLs with legacy/static base or localhost/LAN IP
-          const match = url.match(/^(?:https?:\/\/[^\/]+)(\/(?:img|watch|api\/manifest|api\/dash|api\/mp4proxy|api\/fastmp4|api\/hlschunk|api\/hls|hls|logo|posters|donate)(?:\.[A-Za-z0-9]+)?(?:[?\/].*)?)$/);
-          if (match) {
+          // Relative metadata & static URLs -> main addon domain
+          for (const prefix of METADATA_PREFIXES) {
+            if (matchesRewritePrefix(url, prefix)) {
+              modified = true;
+              return `${currentBaseUrl}${url}`;
+            }
+          }
+          // Absolute URLs matching known addon stream endpoints. Keep generic
+          // CDN /hls/ paths untouched; only /hls/resource belongs to the addon.
+          const streamMatch = url.match(/^(?:https?:\/\/[^\/]+)(\/(?:api\/manifest|api\/dash|api\/mp4proxy|api\/fastmp4|api\/hlschunk|api\/hls|hls\/resource|api\/soccerfull|api\/leaf|api\/scorezone)(?:[?\/].*|\.[A-Za-z0-9]+)?)$/);
+          if (streamMatch) {
             modified = true;
-            return `${currentBaseUrl}${match[1]}`;
+            return `${effectiveStreamBaseUrl}${streamMatch[1]}`;
+          }
+          // Absolute URLs matching metadata prefixes
+          const metaMatch = url.match(/^(?:https?:\/\/[^\/]+)(\/(?:img|watch|logo|posters|donate)(?:[?\/].*|\.[A-Za-z0-9]+)?)$/);
+          if (metaMatch) {
+            modified = true;
+            return `${currentBaseUrl}${metaMatch[1]}`;
           }
           return url;
         };
@@ -996,9 +986,8 @@ app.get('/:config?/manifest.json', (req, res, next) => {
   // Clone manifest catalogs
   const newManifest = JSON.parse(JSON.stringify(manifest));
 
-  // Compact personalization params (see generateCollections): the Nuvio
-  // Collections export appends these to each row's manifestUrl, so they must
-  // mean the same thing as the config keys.
+  // Compact personalization params (rf/lg/ws, see applyCompactParams): they
+  // must mean the same thing as the config keys.
   if (typeof req.query.rf === 'string' && req.query.rf.trim()) {
     parsedConfig.replayFilter = req.query.rf.trim();
   }
@@ -1009,21 +998,12 @@ app.get('/:config?/manifest.json', (req, res, next) => {
     parsedConfig.webStreams = req.query.ws.trim();
   }
 
-  // ── Replay collection rows, injected here to stay under the 8kb manifest cap ──
-  // The Stremio SDK rejects a manifest > 8192 bytes at build time, and the base
-  // manifest already sits close to that ceiling. The sport-head catalogs are
-  // declared in the manifest; their rolling date/competition rows below are
-  // appended at request time instead, which keeps every row queryable by the
-  // collection folders without paying the build-time size cost.
-  for (const extra of REPLAY_MANIFEST_ROWS) {
-    if (!newManifest.catalogs.some((c) => c.id === extra.id)) newManifest.catalogs.push(extra);
-  }
   
   if (typeof parsedConfig.sports === 'string' && parsedConfig.sports !== 'all') {
     const enabledSports = parsedConfig.sports.split(',');
     
     // General catalogs to always keep (Your Teams leads first)
-    const keepCatalogs = ['nuvio_sports_teams', 'nuvio_sports_live', 'nuvio_sports_custom_ai', 'nuvio_sports_upcoming', 'nuvio_sports_networks', 'nuvio_sports_replays'];
+    const keepCatalogs = ['nuvio_sports_teams', 'nuvio_sports_live', 'nuvio_sports_upcoming', 'nuvio_sports_networks', 'nuvio_sports_replays'];
     
     // Add specific catalogs based on selection
     const sportCatalogs = ['football', 'cricket', 'basketball', 'motorsport', 'hockey', 'baseball', 'mma', 'golf', 'tennis', 'rugby', 'american_football', 'darts'];
@@ -1048,17 +1028,6 @@ app.get('/:config?/manifest.json', (req, res, next) => {
     newManifest.catalogs = newManifest.catalogs.filter(c => c.id !== 'nuvio_sports_teams');
   }
 
-  // Hide custom AI games catalog if no dynamic parsers are configured and no custom matches exist
-  // (in-memory only: mounted providers first, then a flag scan of the cache;
-  // reading the parser storage file per match blocked the event loop).
-  try {
-    const cs = container.resolve('cacheService');
-    const cachedMatches = (cs && cs.getMatchesReadOnly ? cs.getMatchesReadOnly() : (cs ? cs.getMatches() : [])) || [];
-    if (!hasCustomAiContent(cachedMatches)) {
-      newManifest.catalogs = newManifest.catalogs.filter(c => c.id !== 'nuvio_sports_custom_ai');
-    }
-  } catch (_) {}
-
   // Catalog management: hide sport catalogs that currently have no content.
   // Dead shelves (a catalog chip that always opens empty) are worse UX than an
   // absent one. Guarded so this only applies once a sync has actually produced
@@ -1076,7 +1045,7 @@ app.get('/:config?/manifest.json', (req, res, next) => {
 
       // Always-keep catalogs: not tied to a single sport.
       const ALWAYS_KEEP = new Set([
-        'nuvio_sports_teams', 'nuvio_sports_live', 'nuvio_sports_custom_ai',
+        'nuvio_sports_teams', 'nuvio_sports_live',
         'nuvio_sports_upcoming', 'nuvio_sports_other', 'nuvio_sports_networks'
       ]);
 
@@ -1099,8 +1068,7 @@ app.get('/:config?/manifest.json', (req, res, next) => {
       newManifest.catalogs = newManifest.catalogs.filter((c) => {
         if (ALWAYS_KEEP.has(c.id)) return true;
 
-        // Keep all replay catalogs in manifest so Nuvio Collections can query them!
-        // Because they have isRequired: true on 'skip', Stremio/Nuvio will NOT display them on the Home screen.
+        // Replay rows are not tied to live fixtures: keep them unless replays are disabled.
         if (c.id === 'nuvio_sports_replays' || c.id.startsWith('nuvio_sports_replays_')) {
           if (parsedConfig.replayFilter === 'disabled') {
             return false;
@@ -1134,10 +1102,9 @@ app.get('/:config?/manifest.json', (req, res, next) => {
 });
 
 // Compact personalization params (rf = replayFilter, lg = languages, ws = webStreams).
-// generateCollections appends these to the manifestUrl it embeds in the Nuvio
-// Collections export, so every catalog/meta/stream request a collection makes
-// carries them. A full base64 config segment per row pushed that export past
-// Nuvio's paste size ceiling, hence the short params.
+// Short query-string overrides for the matching config keys, accepted on
+// catalog/meta/stream requests (links shared before the Collections export was
+// removed still carry them).
 function applyCompactParams(target, query) {
   const out = target && typeof target === 'object' ? target : {};
   if (query && typeof query.rf === 'string' && query.rf.trim()) out.replayFilter = query.rf.trim();
@@ -1181,10 +1148,6 @@ app.use(getRouter(builder.getInterface()));
 app.use(require('./routes/watch'));
 app.use(require('./routes/health'));
 // ─── Start Server ─────────────────────────────────────────────────────────────
-
-// Initialize dynamic AI-generated parsers
-const dynamicParserRegistry = require('./services/DynamicParserRegistry');
-dynamicParserRegistry.init(container);
 
 // In cluster mode, only the primary worker instance runs background cron syncs
 if (workerOffset === 0) {

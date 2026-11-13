@@ -1,5 +1,16 @@
 'use strict';
 
+jest.mock('../src/services/StreamedWasmPool', () => ({
+  resolveWasmStream: jest.fn(async () => { throw new Error('Unexpected WASM execution in unit fixture'); }),
+  destroy: jest.fn(async () => {})
+}));
+jest.mock('../src/services/ProviderOutbound', () => ({
+  safeFetch: jest.fn(async () => { throw new Error('Unexpected provider I/O in unit fixture'); }),
+  request: jest.fn(async () => { throw new Error('Unexpected provider I/O in unit fixture'); }),
+  fetch: jest.fn(async () => { throw new Error('Unexpected provider I/O in unit fixture'); }),
+  streamingFetch: jest.fn(async () => { throw new Error('Unexpected provider I/O in unit fixture'); })
+}));
+
 const ChannelIdentityService = require('../src/services/ChannelIdentityService');
 const { compareStreams } = require('../src/services/LanguagePriorityService');
 const MatchAggregator = require('../src/services/MatchAggregator');
@@ -78,6 +89,53 @@ describe('Universal 24/7 Channel Identity & Aggregation Architecture', () => {
       const m6 = ChannelIdentityService.parseChannel('M6 France');
       expect(m6.canonicalTitle).toBe('M6');
       expect(m6.channelNumber).toBeNull();
+    });
+
+    test('glues detached brand digits so "TF 1" and "TF1" resolve to one channel', () => {
+      const spaced = ChannelIdentityService.parseChannel('TF 1');
+      expect(spaced.canonicalTitle).toBe('TF1');
+      expect(spaced.identityKey).toBe('tf1');
+      expect(spaced.channelNumber).toBeNull();
+
+      const spacedHd = ChannelIdentityService.parseChannel('TF 1 HD');
+      expect(spacedHd.canonicalTitle).toBe('TF1');
+      expect(spacedHd.channelNumber).toBeNull();
+
+      const glued = ChannelIdentityService.parseChannel('TF1 France');
+      expect(glued.canonicalTitle).toBe('TF1');
+      expect(glued.channelNumber).toBeNull();
+
+      // Digits that are part of a real channel number must keep their identity.
+      expect(ChannelIdentityService.parseChannel('TV 1000').channelNumber).toBe('1000');
+      expect(ChannelIdentityService.parseChannel('Sky Sports F1').channelNumber).toBeNull();
+      expect(ChannelIdentityService.parseChannel('beIN Sports 1').channelNumber).toBe('1');
+      expect(ChannelIdentityService.parseChannel('Astro Cricket 1').channelNumber).toBe('1');
+    });
+
+    test('merges the spaced and glued TF1 cards into one', () => {
+      const agg = new MatchAggregator({});
+      const build = (id, rawName, source) => {
+        const ident = ChannelIdentityService.parseChannel(rawName, { group: 'France' });
+        const entity = new MatchEntity({
+          id,
+          title: ident.canonicalTitle,
+          category: 'networks',
+          date: '0',
+          league: 'France',
+          sources: [{ source, channelName: rawName }]
+        });
+        entity.channelIdentityKey = ident.identityKey;
+        entity.channelNumber = ident.channelNumber;
+        entity.canonicalTitle = ident.canonicalTitle;
+        return entity;
+      };
+
+      const daddy = build('dlv_ch_469_tf1', 'TF1 France', 'daddylive');
+      const vavoo = build('vavoo_ch_tf-1-france', 'TF 1', 'vavoo');
+
+      expect(daddy.channelNumber).toBeNull();
+      expect(vavoo.channelNumber).toBeNull();
+      expect(agg.isSameEvent(daddy, vavoo)).toBe(true);
     });
 
     test('splits glued digits for multi-letter channel names and extracts channel number', () => {

@@ -10,6 +10,7 @@ const { pipeline, Readable } = require('stream');
 const https = require('https');
 const { checkOutboundUrl, rejectBlockedUrl } = require('../services/OutboundUrlGuard');
 const adaptiveDnsResolver = require('../services/AdaptiveDnsResolver');
+const { manifestUserAgent } = require('../services/ManifestUserAgent');
 const router = express.Router();
 
 const hlsChunkHttpsAgent = new https.Agent({
@@ -457,7 +458,8 @@ router.get('/api/hlschunk', async (req, res) => {
     const agent = isHttps ? hlsChunkHttpsAgent : hlsChunkHttpAgent;
 
     const headers = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
+      // The provider's own UA when the playlist carried one (sanitised).
+      'User-Agent': manifestUserAgent(req.query.ua) || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
     };
     if (referer) headers['Referer'] = referer;
     if (origin) headers['Origin'] = origin;
@@ -469,13 +471,22 @@ router.get('/api/hlschunk', async (req, res) => {
       headers,
       timeout: 15000
     }, upstreamRes => {
+      // raw=1: fMP4 / key / init bytes pass through untouched (no TS uncloak
+      // scan), with the upstream type and length so ranges stay valid.
+      const raw = req.query.raw === '1';
       res.status(upstreamRes.statusCode);
       res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Content-Type', 'video/mp2t');
+      res.setHeader('Content-Type', raw ? (upstreamRes.headers['content-type'] || 'application/octet-stream') : 'video/mp2t');
+      if (raw) {
+        for (const name of ['content-length', 'content-range', 'accept-ranges']) {
+          if (upstreamRes.headers[name]) res.setHeader(name, upstreamRes.headers[name]);
+        }
+      }
 
       // pipeline() propagates an upstream reset to the response (destroyed,
       // not left hanging) and never leaves an 'error' event unhandled.
-      pipeline(upstreamRes, createSegmentUncloakStream(), res, (err) => {
+      const stages = raw ? [upstreamRes, res] : [upstreamRes, createSegmentUncloakStream(), res];
+      pipeline(...stages, (err) => {
         if (!err) return;
         if (!res.writableFinished && !upstreamReq.destroyed) upstreamReq.destroy();
         if (!clientGone) console.warn('[HLSChunk] Stream ended early:', err.message);

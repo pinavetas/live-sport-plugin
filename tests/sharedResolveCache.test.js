@@ -1,7 +1,8 @@
+
 /**
  * Shared resolve cache integration tests.
  *
- * Boots the REAL resolver server (ESM, child process) on an ephemeral port,
+ * Boots the REAL resolver server (ESM, child process) on a fixed test port,
  * then drives two separate StreamResolveCache instances ("worker 0" and
  * "worker 1") against it and verifies the cross-worker behaviors:
  *   - worker 1 inherits worker 0's mint without re-minting
@@ -9,42 +10,30 @@
  *   - claim dedupe: a worker polling during another's mint inherits the result
  *   - graceful fallback: unreachable resolver degrades to local minting
  */
-const { spawn } = require('child_process');
 const path = require('path');
+const { createOwnedResolverFixture } = require('./fixtures/ownedResolverFixture');
 
 const PORT = 7099;
 const BASE = `http://127.0.0.1:${PORT}`;
 
-let resolverChild = null;
-
-async function waitHealthy(timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const r = await fetch(`${BASE}/api/health`, { signal: AbortSignal.timeout(1000) });
-      if (r.ok) return true;
-    } catch (_) {}
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  throw new Error('resolver did not become healthy');
-}
+const resolver = createOwnedResolverFixture({
+  port: PORT,
+  serverPath: path.join(__dirname, '..', 'resolver', 'src', 'server.js'),
+});
 
 beforeAll(async () => {
-  process.env.RESOLVER_PORT = String(PORT);
-  delete process.env.RESOLVE_CACHE_SHARED; // default: shared enabled
-  resolverChild = spawn(process.execPath, [path.join(__dirname, '..', 'resolver', 'src', 'server.js')], {
-    env: { ...process.env, PORT: String(PORT), HOST: '127.0.0.1' },
-    stdio: 'ignore',
-  });
-  await waitHealthy();
-});
+  // Require our child's listener and fresh cache API before exercising L2.
+  // A port collision fails setup with child stdout/stderr and exit diagnostics.
+  await resolver.start();
+}, 15000);
 
-afterAll(() => {
-  if (resolverChild) resolverChild.kill('SIGKILL');
-});
+afterAll(async () => { await resolver.dispose(); });
 
 describe('Shared resolve cache (worker 0 + worker 1 via resolver)', () => {
   const StreamResolveCache = require('../src/services/StreamResolveCache');
+
+  // Include the final outage scenario: its own stop must cause the transition.
+  beforeEach(() => resolver.assertRunning());
 
   test('worker 1 inherits worker 0’s mint without re-minting', async () => {
     const worker0 = new StreamResolveCache();
@@ -116,6 +105,47 @@ describe('Shared resolve cache (worker 0 + worker 1 via resolver)', () => {
     expect(r[0].url).toBe('https://cdn.example/claim.m3u8');
   });
 
+  test.each(['streams', 'error'])('late owner cannot alter another worker’s result over HTTP (%s)', async outcome => {
+    const originalFetch = global.fetch;
+    const key = `provider:ownership_${outcome}:source`;
+    let ownerToken;
+    let started, finish, fail, releaseDone;
+    const mintStarted = new Promise(resolve => { started = resolve; });
+    const work = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
+    const released = new Promise(resolve => { releaseDone = resolve; });
+    global.fetch = async (url, opts = {}) => {
+      const response = await originalFetch(url, opts);
+      if (url.includes('claim=1&fenced=1') && !ownerToken) {
+        const claim = await response.clone().json();
+        if (claim.ok) ownerToken = claim.ownerToken;
+      }
+      if (opts.method === 'DELETE' && url.includes('ownerToken=')) releaseDone();
+      return response;
+    };
+    try {
+      const a = new StreamResolveCache();
+      const aResponse = a.getOrCreate(key, () => { started(); return work; });
+      await mintStarted;
+      expect(typeof ownerToken).toBe('string');
+      // Explicitly release A's reservation, then reacquire it as B. Controlled
+      // clock unit tests cover natural expiry; this tests the same ownership
+      // replacement and worker POST/DELETE wiring against the real HTTP server.
+      const release = await (await originalFetch(`${BASE}/api/cache/${encodeURIComponent(key)}?ownerToken=${encodeURIComponent(ownerToken)}`, { method: 'DELETE' })).json();
+      expect(release.ok).toBe(true);
+      const b = new StreamResolveCache();
+      await b.getOrCreate(key, async () => [{ url: 'https://cdn.example/new.m3u8' }]);
+      if (outcome === 'error') fail(new Error('late provider failure'));
+      else finish([{ url: 'https://cdn.example/old.m3u8' }]);
+      await aResponse;
+      if (outcome === 'error') await released;
+      const current = await (await originalFetch(`${BASE}/api/cache/${encodeURIComponent(key)}`)).json();
+      expect(current.status).toBe('ok');
+      expect(current.streams).toEqual([{ url: 'https://cdn.example/new.m3u8' }]);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
   test('empty active set clears shared match entries but keeps evergreen channels', async () => {
     const cache = new StreamResolveCache();
     const endedKey = 'provider:ended_prune:s1';
@@ -162,18 +192,16 @@ describe('Shared resolve cache (worker 0 + worker 1 via resolver)', () => {
   });
 
   test('unreachable resolver falls back to local minting', async () => {
-    process.env.RESOLVER_PORT = '7098'; // nothing listens here
-    try {
-      const worker = new StreamResolveCache();
-      let mints = 0;
-      const r = await worker.getOrCreate('cdnlive:match_fallback:s4', async () => {
-        mints++;
-        return [{ url: 'https://cdn.example/fallback.m3u8' }];
-      });
-      expect(mints).toBe(1);
-      expect(r[0].url).toBe('https://cdn.example/fallback.m3u8');
-    } finally {
-      process.env.RESOLVER_PORT = String(PORT);
-    }
+    // Keep this scenario last: stop and await our own listener's closure instead
+    // of assuming an unrelated port is unused. Teardown is idempotent.
+    await resolver.stop();
+    const worker = new StreamResolveCache();
+    let mints = 0;
+    const r = await worker.getOrCreate('cdnlive:match_fallback:s4', async () => {
+      mints++;
+      return [{ url: 'https://cdn.example/fallback.m3u8' }];
+    });
+    expect(mints).toBe(1);
+    expect(r[0].url).toBe('https://cdn.example/fallback.m3u8');
   });
 });

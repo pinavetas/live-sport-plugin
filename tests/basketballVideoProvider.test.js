@@ -1,4 +1,17 @@
+// These parser/extractor unit tests do not exercise or launch WASM workers.
+jest.mock('../src/services/StreamedWasmPool', () => ({
+  resolveWasmStream: jest.fn(() => { throw new Error('Unexpected WASM execution in provider unit fixture'); }),
+  destroy: jest.fn(async () => {})
+}));
+
 'use strict';
+
+jest.mock('../src/services/ProviderOutbound', () => ({
+  request: jest.fn(() => { throw new Error('Unexpected provider I/O in unit fixture'); }),
+  safeFetch: jest.fn(() => { throw new Error('Unexpected provider I/O in unit fixture'); }),
+  fetch: jest.fn(() => { throw new Error('Unexpected provider I/O in unit fixture'); })
+}));
+
 
 const crypto = require('crypto');
 const BasketballVideoProvider = require('../src/providers/BasketballVideoProvider');
@@ -228,6 +241,48 @@ describe('BasketballVideoProvider', () => {
       const cached = await provider.resolveStream('https://basketball-video.com/sample-game');
       expect(cached).toHaveLength(1);
       expect(cached[0].url).toBe('https://vd123.okcdn.ru/video.mp4');
+    });
+
+    test('unwraps modern bridge domains (nhlgamestoday, guidedesgemmes) and extracts direct streams', async () => {
+      const matchPageHtml = `
+        <div class="fullstory">
+          <p><b>Server #1 (OK)</b></p>
+          <p><a class="su-button" href="https://nhlgamestoday.com/nhl-games-on-tv-today-friday"><span>Watch</span></a></p>
+          <p>-------------------------------------</p>
+          <p><b>Condensed Game</b></p>
+          <p><a class="su-button" href="https://guidedesgemmes.com/les-usages-spirituels"><span>Watch</span></a></p>
+        </div>
+      `;
+
+      const nhlBridgeHtml = '<html><body><iframe src="//ok.ru/videoembed/111222333"></iframe></body></html>';
+      const gemmeBridgeHtml = '<html><body><iframe src="//ok.ru/videoembed/444555666"></iframe></body></html>';
+
+      const mockOkMeta1 = {
+        videos: [{ name: 'hd', url: 'https://vd1.okcdn.ru/server1.mp4' }]
+      };
+      const mockOkMeta2 = {
+        videos: [{ name: 'full', url: 'https://vd2.okcdn.ru/condensed.mp4' }]
+      };
+
+      provider.fetchPage = {
+        fire: jest.fn().mockImplementation(async (url) => {
+          if (url.includes('basketball-video.com')) return matchPageHtml;
+          if (url.includes('nhlgamestoday.com')) return nhlBridgeHtml;
+          if (url.includes('guidedesgemmes.com')) return gemmeBridgeHtml;
+          if (url.includes('111222333')) return '<div data-options="' + JSON.stringify({ flashvars: { metadata: JSON.stringify(mockOkMeta1) } }).replace(/"/g, '&quot;') + '"></div>';
+          if (url.includes('444555666')) return '<div data-options="' + JSON.stringify({ flashvars: { metadata: JSON.stringify(mockOkMeta2) } }).replace(/"/g, '&quot;') + '"></div>';
+          throw new Error('Unexpected url: ' + url);
+        })
+      };
+
+      const streams = await provider.resolveStream('https://basketball-video.com/memphis-vs-sacramento');
+      expect(streams).toHaveLength(2);
+      expect(streams[0].title).toBe('Server #1 (OK) (720p) [OK.ru]');
+      expect(streams[0].url).toBe('https://vd1.okcdn.ru/server1.mp4');
+      expect(streams[0].behaviorHints.notWebReady).toBe(false);
+      expect(streams[1].title).toBe('Condensed Game (1080p) [OK.ru]');
+      expect(streams[1].url).toBe('https://vd2.okcdn.ru/condensed.mp4');
+      expect(streams[1].behaviorHints.notWebReady).toBe(false);
     });
 
     test('prioritizes Byse (SprintCDN) streams at index 0 over OK.ru streams', async () => {

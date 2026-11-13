@@ -18,21 +18,8 @@ const {
 const { rewriteHlsUri, rewriteHlsPlaylist, preprobeManifestSegments } = require('../services/HlsRewriteService');
 const { safeFetch: _safeFetch } = require('../impitClient');
 const { getRequestBaseUrl } = require('../config');
-const { checkOutboundUrl, rejectBlockedUrl } = require('../services/OutboundUrlGuard');
-
-/**
- * SSRF gate for URLs fetched inside the shared manifest promise (re-minted
- * upstreams differ from the URL validated at the route entry). Throws an error
- * carrying the verdict so the route can answer with the canonical 403.
- */
-async function assertOutboundAllowed(url) {
-  const verdict = await checkOutboundUrl(url);
-  if (!verdict.ok) {
-    const err = new Error(`Blocked outbound URL (${verdict.reason})`);
-    err.blockedVerdict = verdict;
-    throw err;
-  }
-}
+const { manifestUserAgent } = require('../services/ManifestUserAgent');
+const { shouldRelaySegments, playlistHasIspBlockedHost } = require('../services/SegmentRelayPolicy');
 
 // Variant BANDWIDTH declarations seen in master playlists, keyed by the
 // absolute upstream URL of the child media playlist. When that child is served
@@ -52,21 +39,25 @@ router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
   const defaultOrigin = isVavooTarget ? 'https://vavoo.to' : 'https://embed.st';
   const referer = req.query.referer || defaultReferer;
   const origin = req.query.origin || defaultOrigin;
+  const userAgent = manifestUserAgent(req.query.hlsua);
 
   if (!targetUrl) return res.status(400).send('Missing url');
   if (targetUrl.includes('.mpd')) return handleDashManifestProxy(req, res);
 
   // Playlist-only proxy (same as WatchFooty / Streamed.pk .ts): this host fetches
   // the m3u8 with the CDN Referer, then the player pulls every media byte from the CDN.
-  // Recovery key for this stream, if the URL was emitted by our own resolver.
+  // Rewritten child playlists embed this base URL and recovery key, so both
+  // are part of cache identity to prevent one viewer's rewritten URLs leaking to another.
+  const requestBaseUrl = getRequestBaseUrl(req);
   const rck = readRck(req);
   const rckSuffix = rck ? '&rck=' + encodeURIComponent(rck) : '';
-  // The cached body is the REWRITTEN playlist, which bakes in absolute URLs on
-  // this request's base URL plus the rck suffix. Both must be part of the key,
-  // or a client reaching the addon through another host (LAN vs tunnel) would
-  // be served child URLs pointing at a host it cannot reach.
-  const addonBaseUrl = getRequestBaseUrl(req);
-  const cacheKey = `${targetUrl}|${referer}|${origin}|${addonBaseUrl}|${rck || ''}`;
+  // Explicit tuple boundaries prevent collisions when URL/header values contain '|'.
+  // This identity also fences remint outcomes, rewritten per-host URLs, negative
+  // entries, and in-flight manifest requests from unrelated viewers.
+  // Clients that do not apply proxyHeaders (Stremio) get segments relayed
+  // through /api/hlschunk; the rewritten body differs, so it is part of the key.
+  const relaySegments = shouldRelaySegments(req);
+  const cacheKey = JSON.stringify([targetUrl, referer, origin, userAgent, rck || '', requestBaseUrl, relaySegments ? 'relay' : 'direct']);
   const entry = manifestCacheGet(cacheKey);
   if (entry && entry.negative) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -79,11 +70,6 @@ router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
     res.setHeader('X-Manifest-Cache', 'HIT');
     return res.send(entry.body);
   }
-
-  // SSRF gate — the cache above only ever holds URLs that already passed it, so
-  // it runs here, before the first outbound request for this key.
-  const verdict = await checkOutboundUrl(targetUrl);
-  if (!verdict.ok) return rejectBlockedUrl(res, verdict, 'ManifestProxy');
 
   try {
     let fetchPromise = manifestInFlight.get(cacheKey);
@@ -101,12 +87,10 @@ router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
           }
         }
 
-        let out;
+        let upstream;
         try {
-          if (effectiveUrl !== targetUrl) await assertOutboundAllowed(effectiveUrl);
-          out = await fetchUpstreamManifest(effectiveUrl, referer, origin);
+          upstream = await fetchUpstreamManifest(effectiveUrl, referer, origin, { withResponseUrl: true, userAgent });
         } catch (firstErr) {
-          if (firstErr && firstErr.blockedVerdict) throw firstErr;
           const fresh = (isExpiryStatus(firstErr) && rck) ? await attemptRemint(rck, effectiveUrl || targetUrl) : null;
           if (!fresh || fresh === effectiveUrl) throw firstErr;
           
@@ -135,9 +119,12 @@ router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
           // Preserve the variant the player asked for (see mergeRemintedUrl).
           effectiveUrl = mergeRemintedUrl(targetUrl, fresh, rck);
           reminted = true;
-          await assertOutboundAllowed(effectiveUrl);
-          out = await fetchUpstreamManifest(effectiveUrl, referer, origin);
+          upstream = await fetchUpstreamManifest(effectiveUrl, referer, origin, { withResponseUrl: true, userAgent });
         }
+        const out = upstream.body;
+        // Re-fetch redirected bases on later polls; concurrent viewers still coalesce.
+        const cacheable = !upstream.url || upstream.url === effectiveUrl;
+        effectiveUrl = upstream.url || effectiveUrl;
         if (!out.includes('#EXT')) {
           console.error('[ManifestProxy] Upstream returned non-m3u8 body for', effectiveUrl);
           throw new Error('Upstream returned non-m3u8 body');
@@ -148,6 +135,12 @@ router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
         if (!playlistHasContent(out)) {
           console.warn('[ManifestProxy] Upstream playlist has no media entries (empty live window) for', effectiveUrl);
           throw new Error('Upstream playlist has no media entries');
+        }
+
+        // Reject anti-piracy trap playlists (_antipiracy segments) so the player can fail over immediately
+        if (/_antipiracy|antipiracy/i.test(out)) {
+          console.warn('[ManifestProxy] Upstream returned anti-piracy trap for', effectiveUrl);
+          throw new Error('Upstream anti-piracy tripwire triggered');
         }
 
         let dynamicTtl = MANIFEST_TTL_MS;
@@ -187,33 +180,49 @@ router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
         }
         let injectedStart = out.includes('#EXT-X-START');
 
+        // Media on an ISP-DNS-blocked host is unreachable for a player on this
+        // network too: relay it regardless of the client's headers.
+        let relayThisPlaylist = relaySegments;
         if (!isMaster) {
           await preprobeManifestSegments(out, effectiveUrl, { referer, origin });
+          if (!relayThisPlaylist) relayThisPlaylist = await playlistHasIspBlockedHost(out, effectiveUrl);
         }
 
         const rewrittenResult = rewriteHlsPlaylist(out, effectiveUrl, {
           referer,
           origin,
+          userAgent,
           rckSuffix,
-          absoluteAddonBaseUrl: addonBaseUrl,
+          absoluteAddonBaseUrl: requestBaseUrl,
+          relaySegments: relayThisPlaylist,
           bitrate: out.includes('#EXT-X-STREAM-INF') ? undefined : variantBitrateCache.get(effectiveUrl)
         });
-        manifestCacheSet(cacheKey, rewrittenResult, dynamicTtl);
-        return rewrittenResult;
+        if (cacheable) manifestCacheSet(cacheKey, rewrittenResult, dynamicTtl);
+        return { body: rewrittenResult, cacheable };
       })().finally(() => {
         manifestInFlight.delete(cacheKey);
       });
       manifestInFlight.set(cacheKey, fetchPromise);
     }
 
-    const finalBody = await fetchPromise;
+    const result = await fetchPromise;
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('X-Manifest-Cache', 'MISS');
-    res.send(finalBody);
+    res.setHeader('X-Manifest-Cache', result.cacheable ? 'MISS' : 'BYPASS');
+    if (!result.cacheable) res.setHeader('Cache-Control', 'no-store');
+    res.send(result.body);
   } catch (err) {
-    if (err && err.blockedVerdict) return rejectBlockedUrl(res, err.blockedVerdict, 'ManifestProxy');
     // Preserve the old 404 semantics so players can fail over to another stream.
+    if (err.code === 'ERR_OUTBOUND_CAPACITY') {
+      if (Number.isInteger(err.previousUpstreamStatus)) {
+        console.warn(`[ManifestProxy] Local capacity exhausted on retry; previous upstream HTTP ${err.previousUpstreamStatus}`);
+      } else {
+        console.warn('[ManifestProxy] Local outbound capacity exhausted');
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(503).send('Outbound capacity temporarily exhausted');
+    }
+    if (err.code === 'ERR_OUTBOUND_BLOCKED') return res.status(403).json({ error: 'Blocked outbound URL', reason: err.reason });
     // Failures are negatively cached (15 s) so player polls stop hammering the dead upstream.
     // In parallel, drop the originating resolve-cache entry so the next click mints fresh.
     notifyResolveCacheOfDeadStream(req.originalUrl || req.url);
@@ -230,6 +239,7 @@ router.get(['/api/manifest', '/api/manifest.m3u8'], async (req, res) => {
     const isTransientUpstream = upstreamStatus >= 500 && upstreamStatus <= 599;
     if (err.message === 'Upstream returned non-m3u8 body' ||
         err.message === 'Upstream playlist has no media entries' ||
+        err.message === 'Upstream anti-piracy tripwire triggered' ||
         isExpired || isTransientUpstream) {
       if (isExpired) {
         console.warn(`[ManifestProxy] Upstream refused with ${upstreamStatus} (expired token?) for ${targetUrl}`);
@@ -413,10 +423,6 @@ async function handleDashManifestProxy(req, res) {
   const targetUrl = req.query.url;
   if (!targetUrl) return res.status(400).send('Missing url');
 
-  // SSRF gate — must run before the upstream MPD fetch below.
-  const verdict = await checkOutboundUrl(targetUrl);
-  if (!verdict.ok) return rejectBlockedUrl(res, verdict, 'DashManifestProxy');
-
   const token = req.query.token || req.query.keys || '';
   const referer = req.query.referer || '';
   const origin = req.query.origin || (referer ? (() => { try { return new URL(referer).origin; } catch (_) { return ''; } })() : '');
@@ -429,7 +435,7 @@ async function handleDashManifestProxy(req, res) {
   if (cookie) headers['Cookie'] = cookie;
 
   try {
-    const result = await _safeFetch(targetUrl, { headers, timeoutMs: 10000, outboundGuard: true });
+    const result = await _safeFetch(targetUrl, { headers, timeoutMs: 10000, guardExternal: true });
     if (!result.ok) {
       return res.status(result.status).send(`Upstream returned HTTP ${result.status}`);
     }
@@ -545,6 +551,11 @@ async function handleDashManifestProxy(req, res) {
     return res.send(mpd);
   } catch (err) {
     console.error('[ManifestProxy] DASH error:', err.message);
+    if (err.code === 'ERR_OUTBOUND_CAPACITY') {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(503).send('Outbound capacity temporarily exhausted');
+    }
+    if (err.code === 'ERR_OUTBOUND_BLOCKED') return res.status(403).json({ error: 'Blocked outbound URL', reason: err.reason });
     return res.status(502).send('Manifest proxy error: ' + err.message);
   }
 }

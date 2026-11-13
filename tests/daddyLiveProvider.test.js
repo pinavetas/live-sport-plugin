@@ -1,3 +1,18 @@
+jest.mock('../src/services/DaddyLiveMediaCheck', () => ({
+  checkDaddyLiveMedia: jest.fn(async () => ({ status: 'ok' }))
+}));
+
+// Container wiring is exercised, but native workers and external I/O are not.
+jest.mock('../src/services/StreamedWasmPool', () => ({
+  resolveWasmStream: jest.fn(async () => { throw new Error('Unexpected WASM execution in unit fixture'); }),
+  destroy: jest.fn(async () => {})
+}));
+jest.mock('../src/services/ProviderOutbound', () => ({
+  safeFetch: jest.fn(async () => { throw new Error('Unexpected provider I/O in unit fixture'); }),
+  request: jest.fn(async () => { throw new Error('Unexpected provider I/O in unit fixture'); }),
+  fetch: jest.fn(async () => { throw new Error('Unexpected provider I/O in unit fixture'); }),
+  streamingFetch: jest.fn(async () => { throw new Error('Unexpected provider I/O in unit fixture'); })
+}));
 const DaddyLiveProvider = require('../src/providers/DaddyLiveProvider');
 const CircuitBreakerService = require('../src/services/CircuitBreakerService');
 const MatchEntity = require('../src/domain/MatchEntity');
@@ -13,6 +28,10 @@ describe('DaddyLiveProvider', () => {
   beforeEach(() => {
     circuitBreaker = new CircuitBreakerService();
     provider = new DaddyLiveProvider({ circuitBreaker });
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
   });
 
   describe('decodeEconfig', () => {
@@ -74,6 +93,22 @@ describe('DaddyLiveProvider', () => {
     });
   });
 
+  describe('isCloakedStream', () => {
+    test('flags cloaked domain signatures and png chunks', () => {
+      expect(DaddyLiveProvider.isCloakedStream('https://edge.wedd48c.top/premium31/index.m3u8')).toBe(true);
+      expect(DaddyLiveProvider.isCloakedStream('https://cowedd4855ws.net/live/index.m3u8')).toBe(true);
+      expect(DaddyLiveProvider.isCloakedStream('https://cdn.tiktokcdn.com/live/stream.m3u8')).toBe(true);
+      expect(DaddyLiveProvider.isCloakedStream('https://stream.example.com/hls/segment.png')).toBe(true);
+      expect(DaddyLiveProvider.isCloakedStream('https://stream.example.com/hls/segment.png?token=abc')).toBe(true);
+    });
+
+    test('preserves legitimate plain-TS and clean stream manifests', () => {
+      expect(DaddyLiveProvider.isCloakedStream('https://cdn.wideiptv.top/TNT1UK/index.m3u8')).toBe(false);
+      expect(DaddyLiveProvider.isCloakedStream('https://643t8a.7odxv0l067ka.net:8443/hls/live.m3u8')).toBe(false);
+      expect(DaddyLiveProvider.isCloakedStream('https://cdn.example.com/live/master.m3u8')).toBe(false);
+    });
+  });
+
   describe('getMatches and schedule parsing', () => {
     test('parses UK GMT schedule headers, extracts teams, leagues, and dates', async () => {
       const mockSchedule = {
@@ -129,7 +164,7 @@ describe('DaddyLiveProvider', () => {
       };
 
       const testNow = Date.parse('21 March 2025 12:00:00 UTC');
-      const dateNowSpy = jest.spyOn(Date, 'now').mockReturnValue(testNow);
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] }).setSystemTime(testNow);
 
       // Mock proxyFetch to return mock HTML, and mock the parser to return mockSchedule
       provider.proxyFetch = jest.fn().mockResolvedValue({
@@ -139,7 +174,6 @@ describe('DaddyLiveProvider', () => {
       provider.parseScheduleHtml = jest.fn().mockReturnValue(mockSchedule);
 
       const matches = await provider.getMatches();
-      dateNowSpy.mockRestore();
 
       // Should have 4 matches (Empty Sport skipped because 0 channels)
       expect(matches.length).toBe(4);
@@ -187,6 +221,93 @@ describe('DaddyLiveProvider', () => {
       expect(ncaaMatch.sources[0].channelName).toBe('A&E TV USA');
     });
 
+    test('anchors late-night kickoffs to the real day when the header ordinal is malformed ("28h")', async () => {
+      const mockSchedule = {
+        'Wednesday 28h Oct 2026 - Schedule Time UK GMT': {
+          'NBA</span>': [
+            {
+              time: '00:00',
+              event: 'NBA : Chicago Bulls vs New York Knicks',
+              channels: [{ channel_name: 'NBA League Pass', channel_id: '8' }]
+            }
+          ]
+        }
+      };
+
+      const testNow = Date.parse('29 October 2026 02:00:00 UTC');
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] }).setSystemTime(testNow);
+      provider.proxyFetch = jest.fn().mockResolvedValue({ ok: true, text: async () => '<html>MOCK</html>' });
+      provider.parseScheduleHtml = jest.fn().mockReturnValue(mockSchedule);
+
+      const matches = await provider.getMatches();
+
+      const match = matches.find(m => m.title.includes('Knicks'));
+      expect(match).toBeDefined();
+      expect(Number(match.date)).toBe(Date.parse('29 October 2026 00:00:00 UTC'));
+      expect(match.status).toBe('');
+    });
+
+    test('still rolls a pre-06:00 kickoff into the next day for a well-formed header', async () => {
+      const mockSchedule = {
+        'Wednesday 28th Oct 2026 - Schedule Time UK GMT': {
+          'NBA</span>': [
+            {
+              time: '00:00',
+              event: 'NBA : Chicago Bulls vs New York Knicks',
+              channels: [{ channel_name: 'NBA League Pass', channel_id: '8' }]
+            },
+            {
+              time: '20:00',
+              event: 'NBA : Toronto Raptors vs Orlando Magic',
+              channels: [{ channel_name: 'MSG USA', channel_id: '765' }]
+            }
+          ]
+        }
+      };
+
+      // 21:00 on the 28th: the 20:00 event is live, the 00:00 event is still ahead.
+      const testNow = Date.parse('28 October 2026 21:00:00 UTC');
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] }).setSystemTime(testNow);
+      provider.proxyFetch = jest.fn().mockResolvedValue({ ok: true, text: async () => '<html>MOCK</html>' });
+      provider.parseScheduleHtml = jest.fn().mockReturnValue(mockSchedule);
+
+      const matches = await provider.getMatches();
+
+      const lateNight = matches.find(m => m.title.includes('Knicks'));
+      const evening = matches.find(m => m.title.includes('Raptors'));
+      expect(lateNight).toBeDefined();
+      expect(evening).toBeDefined();
+      // Same-day kickoff stays put; the post-midnight one rolls to the 29th.
+      expect(Number(evening.date)).toBe(Date.parse('28 October 2026 20:00:00 UTC'));
+      expect(Number(lateNight.date)).toBe(Date.parse('29 October 2026 00:00:00 UTC'));
+      expect(lateNight.status).toBe('upcoming');
+    });
+
+    test('does not add a second day when the day header is unusable', async () => {
+      const mockSchedule = {
+        'Schedule Time UK GMT': {
+          'NBA</span>': [
+            {
+              time: '00:00',
+              event: 'NBA : Chicago Bulls vs New York Knicks',
+              channels: [{ channel_name: 'NBA League Pass', channel_id: '8' }]
+            }
+          ]
+        }
+      };
+
+      const testNow = Date.parse('29 October 2026 02:00:00 UTC');
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] }).setSystemTime(testNow);
+      provider.proxyFetch = jest.fn().mockResolvedValue({ ok: true, text: async () => '<html>MOCK</html>' });
+      provider.parseScheduleHtml = jest.fn().mockReturnValue(mockSchedule);
+
+      const matches = await provider.getMatches();
+
+      const match = matches.find(m => m.title.includes('Knicks'));
+      expect(match).toBeDefined();
+      expect(Number(match.date)).toBe(Date.parse('29 October 2026 00:00:00 UTC'));
+    });
+
     test('handles fetch errors gracefully without throwing', async () => {
       provider.proxyFetch = jest.fn().mockRejectedValue(new Error('Network offline'));
       const matches = await provider.getMatches();
@@ -218,7 +339,13 @@ describe('DaddyLiveProvider', () => {
       expect(stream.title).toContain('A&E USA');
       expect(stream.url).toContain('/api/manifest?url=' + encodeURIComponent(mockStreamUrl));
       expect(stream.behaviorHints.notWebReady).toBe(false);
-      expect(stream.behaviorHints.proxyHeaders).toBeUndefined();
+      expect(stream.behaviorHints.proxyHeaders).toEqual({
+        request: {
+          'Origin': 'https://tiestep.top',
+          'Referer': 'https://tiestep.top/',
+          'User-Agent': expect.stringContaining('Chrome/132')
+        }
+      });
     });
 
     test('falls back to EmbedExtractorChain if _econfig is not present', async () => {
@@ -306,6 +433,7 @@ describe('DaddyLiveProvider', () => {
     });
 
     test('falls back to secondary baseDomain when first schedule endpoint fails', async () => {
+      provider.baseDomains = ['https://thedaddy.li', 'https://mirror.example.com'];
       const mockSchedule = {
         'Friday 21st March 2025 - Schedule Time UK GMT': {
           'Soccer': [{
@@ -361,10 +489,12 @@ describe('DaddyLiveProvider', () => {
       const result = await resolveSource(
         { source: 'daddylive', id: '55', channelName: 'ESPN' },
         { category: 'basketball', title: 'Lakers vs Warriors' },
-        null
+        null,
+        { signal: new AbortController().signal }
       );
 
-      expect(spy).toHaveBeenCalledWith('55', 'basketball', 'Lakers vs Warriors', expect.objectContaining({ source: 'daddylive' }));
+      expect(spy).toHaveBeenCalledWith('55', 'basketball', 'Lakers vs Warriors',
+        expect.objectContaining({ source: 'daddylive' }), expect.objectContaining({ signal: expect.any(AbortSignal) }));
       expect(result.length).toBe(1);
       expect(result[0]._source).toBe('daddylive');
       spy.mockRestore();
@@ -473,7 +603,7 @@ describe('DaddyLiveProvider', () => {
       };
 
       const testNow = Date.parse('21 March 2025 12:00:00 UTC');
-      const dateNowSpy = jest.spyOn(Date, 'now').mockReturnValue(testNow);
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] }).setSystemTime(testNow);
 
       provider.proxyFetch = jest.fn().mockResolvedValue({
         ok: true,
@@ -482,7 +612,6 @@ describe('DaddyLiveProvider', () => {
       provider.parseScheduleHtml = jest.fn().mockReturnValue(mockSchedule);
 
       const matches = await provider.getMatches();
-      dateNowSpy.mockRestore();
 
       // Fulham vs Everton only had Event Stream channels, so it must be dropped (0 streams)
       expect(matches.find(m => m.title.includes('Fulham'))).toBeUndefined();

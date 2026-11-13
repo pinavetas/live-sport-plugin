@@ -1,8 +1,10 @@
+const { BASE_URL } = require('../config');
 const crypto = require('crypto');
-const undici = require('undici');
+const undici = require('../services/ProviderOutbound');
 const BaseProvider = require('./BaseProvider');
 const MatchEntity = require('../domain/MatchEntity');
 const StreamEntity = require('../domain/StreamEntity');
+const { unpack } = require('./deanEdwardsUnpack');
 
 function b64Decode(str) {
   let b64 = str.replace(/-/g, '+').replace(/_/g, '/');
@@ -91,10 +93,16 @@ class SoccerFullProvider extends BaseProvider {
       if (!linkMatch) continue;
 
       const rawUrl = linkMatch[1];
-      if (!rawUrl.endsWith('.html')) continue;
+      let parsedUrl;
+      try {
+        parsedUrl = new URL(rawUrl, `${this.baseUrl}/`);
+      } catch (_) {
+        continue;
+      }
+      if (parsedUrl.origin !== this.baseUrl || parsedUrl.username || parsedUrl.password || !parsedUrl.pathname.endsWith('.html')) continue;
 
-      const matchUrl = rawUrl.startsWith('/') ? rawUrl : `/${rawUrl}`;
-      const slug = matchUrl.replace(/^\//, '').replace(/\.html$/, '');
+      const matchUrl = parsedUrl.pathname + parsedUrl.search;
+      const slug = parsedUrl.pathname.replace(/^\//, '').replace(/\.html$/, '');
 
       // Title
       let title = linkMatch[2] ? linkMatch[2].trim() : '';
@@ -134,7 +142,8 @@ class SoccerFullProvider extends BaseProvider {
         }
       }
 
-      // If no explicit date in slug, leave empty for unanchored upstream fixture merge
+      // Missing date stays unknown; it must not identify a dated meeting just
+      // because another archive lists the same two teams.
       const matchDate = dateMs ? String(dateMs) : '';
 
       // Extract numeric ID if present
@@ -277,16 +286,7 @@ class SoccerFullProvider extends BaseProvider {
     const servers = [];
     const seenSids = new Set();
 
-    // 1. Extract modern post-id or data-id from the main player container
-    const postIdMatch = html.match(/id="video"[^>]*\s+post-id="(\d+)"/i) ||
-                        html.match(/post-id="(\d+)"/i) ||
-                        html.match(/data-id="(\d+)"/i);
-    if (postIdMatch && !seenSids.has(postIdMatch[1])) {
-      seenSids.add(postIdMatch[1]);
-      servers.push({ sid: postIdMatch[1], label: 'Full Match' });
-    }
-
-    // 2. Parse video-server buttons: <a href="...?sid=16484" class="video-server ...">1st Half</a>
+    // 1. Parse video-server buttons: <a href="...?sid=16484" class="video-server ...">1st Half</a>
     const btnRegex = /<a\s+[^>]*href=["'][^"']*[?&]sid=(\d+)[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
     let m;
     while ((m = btnRegex.exec(html)) !== null) {
@@ -305,11 +305,23 @@ class SoccerFullProvider extends BaseProvider {
       }
     }
 
-    // 3. Also check if the default iframe has an SID not yet captured
-    const defaultIframe = html.match(/<iframe[^>]+src=["']\/play\/(\d+)["']/i);
+    // 2. Also check if the default iframe or JSON-LD has an SID not yet captured
+    const defaultIframe = html.match(/<iframe[^>]+src=["']\/play\/(\d+)["']/i) ||
+                          html.match(/"embedUrl":\s*"[^"]*\/play\/(\d+)"/i);
     if (defaultIframe && !seenSids.has(defaultIframe[1])) {
       seenSids.add(defaultIframe[1]);
-      servers.unshift({ sid: defaultIframe[1], label: 'Highlights' });
+      servers.unshift({ sid: defaultIframe[1], label: 'Full Match' });
+    }
+
+    // 3. Fallback: Only if no default /play/ iframe exists, check post-id / data-id
+    if (!defaultIframe) {
+      const postIdMatch = html.match(/id="video"[^>]*\s+post-id="(\d+)"/i) ||
+                          html.match(/post-id="(\d+)"/i) ||
+                          html.match(/data-id="(\d+)"/i);
+      if (postIdMatch && !seenSids.has(postIdMatch[1])) {
+        seenSids.add(postIdMatch[1]);
+        servers.push({ sid: postIdMatch[1], label: 'Full Match' });
+      }
     }
 
     return servers;
@@ -340,7 +352,68 @@ class SoccerFullProvider extends BaseProvider {
 
       // Extract iframe src
       const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
-      if (!iframeMatch) return [];
+      if (!iframeMatch) {
+        // Shape A: ArtPlayer app with var m3u8Url = "/hls/<sid>.m3u8" or external CDN
+        const m3u8Match = html.match(/var\s+m3u8Url\s*=\s*["']([^"']+)["']/i);
+        if (m3u8Match) {
+          const rawM3u8 = m3u8Match[1].trim();
+          if (rawM3u8.includes('.m3u8')) {
+            const cleanLabel = this._formatPartLabel(label);
+            const isExternalCdn = /^https?:\/\//i.test(rawM3u8) && !rawM3u8.includes('soccerfull.net');
+            if (isExternalCdn) {
+              // Quick lightweight probe to discard upstream dead/404 playlists
+              try {
+                const probeRes = await undici.request(rawM3u8, {
+                  method: 'GET',
+                  headers: {
+                    ...this.defaultHeaders,
+                    Referer: `${this.baseUrl}/`
+                  },
+                  headersTimeout: 3000,
+                  bodyTimeout: 3000
+                });
+                if (probeRes.statusCode === 404) return [];
+              } catch (_) {}
+
+              const directStream = new StreamEntity({
+                name: 'SoccerFull',
+                title: `SoccerFull | ${cleanLabel} (Auto)`,
+                resolution: 'Auto',
+                url: rawM3u8,
+                behaviorHints: {
+                  notWebReady: false,
+                  proxyHeaders: {
+                    request: {
+                      'User-Agent': this.defaultHeaders['User-Agent'],
+                      Referer: `${this.baseUrl}/`
+                    }
+                  }
+                }
+              });
+              this._setCache(this._streamCache, playUrl, [directStream], 30 * 60 * 1000);
+              return [directStream];
+            } else {
+              const fullM3u8 = new URL(rawM3u8, this.baseUrl).toString();
+              // Self-hosted playlist on soccerfull.net: served without CORS headers and with
+              // TikTok-cloaked segments, so it is published through /api/soccerfull/manifest.
+              const playlistUrl = `${BASE_URL}/api/soccerfull/manifest?url=${encodeURIComponent(fullM3u8)}`;
+              const artStream = new StreamEntity({
+                name: 'SoccerFull',
+                title: `SoccerFull | ${cleanLabel} (Auto)`,
+                resolution: 'Auto',
+                url: playlistUrl,
+                isTikTok: true,
+                behaviorHints: {
+                  notWebReady: false
+                }
+              });
+              this._setCache(this._streamCache, playUrl, [artStream], 30 * 60 * 1000);
+              return [artStream];
+            }
+          }
+        }
+        return [];
+      }
 
       const iframeSrc = iframeMatch[1];
 
@@ -358,7 +431,14 @@ class SoccerFullProvider extends BaseProvider {
           streams.push(...okStreams);
         }
       }
-      // B. Vixeo host (vixeo.io)
+      // B. HGCloud host (hgcloud.to, audinifer.com, vibuxer.com, hanerix.com)
+      else if (/hgcloud|audinifer|vibuxer|hanerix/i.test(iframeSrc)) {
+        const hgStreams = await this.extractHgCloud(iframeSrc, label);
+        if (Array.isArray(hgStreams) && hgStreams.length > 0) {
+          streams.push(...hgStreams);
+        }
+      }
+      // C. Vixeo host (vixeo.io)
       else if (iframeSrc.includes('vixeo.io')) {
         const streamUrl = await this.extractVixeo(iframeSrc);
         if (streamUrl) {
@@ -687,6 +767,90 @@ class SoccerFullProvider extends BaseProvider {
     } catch (err) {
       console.warn(`[SoccerFull] Vidara extraction failed for ${vidaraUrl}:`, err.message);
       return null;
+    }
+  }
+
+  /**
+   * Extracts direct CDN HLS URL from HGCloud / StreamCloud mirror hosts
+   * Host in {hgcloud.to, audinifer.com, vibuxer.com, hanerix.com}.
+   * Extracts <code> from /e/<code>. Unpacks Dean Edwards packed script and extracts links.hls2.
+   */
+  async extractHgCloud(iframeSrc, label = '') {
+    try {
+      const codeMatch = iframeSrc.match(/\/e\/([a-zA-Z0-9_-]+)/);
+      const code = codeMatch ? codeMatch[1] : '';
+      if (!code) return [];
+
+      const mirrorHosts = ['hgcloud.to', 'audinifer.com', 'vibuxer.com', 'hanerix.com'];
+      try {
+        const uHost = new URL(iframeSrc.startsWith('http') ? iframeSrc : `https://${iframeSrc}`).hostname;
+        if (uHost && !mirrorHosts.includes(uHost)) {
+          mirrorHosts.unshift(uHost);
+        }
+      } catch (_) {}
+
+      for (const host of mirrorHosts) {
+        try {
+          const embedUrl = `https://${host}/e/${code}`;
+          const res = await undici.request(embedUrl, {
+            headers: {
+              ...this.defaultHeaders,
+              Referer: host === 'hgcloud.to' ? `${this.baseUrl}/` : 'https://hgcloud.to/'
+            },
+            headersTimeout: 6000,
+            bodyTimeout: 6000
+          });
+          if (res.statusCode !== 200) continue;
+          const html = await res.body.text();
+
+          // If the body has no packed payload (it is the 819-byte JS shell on hgcloud.to), try each mirror host in turn
+          if (!html.includes('function(p,a,c,k,e,d)')) {
+            continue;
+          }
+
+          const packerBlock = html.match(/(?:eval\s*)?\(\s*function\(p,a,c,k,e,d\)[\s\S]*?\.split\(['"]\|['"]\)\s*\)\s*\)?/);
+          if (!packerBlock) continue;
+
+          const unpacked = unpack(packerBlock[0]);
+          if (!unpacked) continue;
+
+          const linksMatch = unpacked.match(/var\s+links\s*=\s*(\{[^;]+\});/);
+          if (!linksMatch) continue;
+
+          let links;
+          try {
+            links = JSON.parse(linksMatch[1]);
+          } catch (_) {
+            continue;
+          }
+
+          // Emit links.hls2 ONLY (ACAO '*', notWebReady: false)
+          if (links && links.hls2 && typeof links.hls2 === 'string') {
+            const cleanLabel = this._formatPartLabel(label);
+            return [new StreamEntity({
+              name: 'SoccerFull',
+              title: `SoccerFull | ${cleanLabel} (Auto)`,
+              resolution: 'Auto',
+              url: links.hls2,
+              behaviorHints: {
+                notWebReady: false,
+                proxyHeaders: {
+                  request: {
+                    'User-Agent': this.defaultHeaders['User-Agent'],
+                    'Referer': `https://${host}/`,
+                    'Origin': `https://${host}`
+                  }
+                }
+              }
+            })];
+          }
+        } catch (_) {
+          continue;
+        }
+      }
+      return [];
+    } catch (_) {
+      return [];
     }
   }
 }

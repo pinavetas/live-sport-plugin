@@ -70,6 +70,8 @@ The addon is immediately available at `http://localhost:7000` (or `http://YOUR_S
    git clone https://github.com/rajhodedara/live-sport-plugin.git
    cd live-sport-plugin
    npm install
+   npm run timezone:prepare
+   export ICU_TIMEZONE_FILES_DIR="$PWD/.timezone-data/2026f-le"
    npm run build
    npm start
    ```
@@ -107,6 +109,8 @@ For high concurrency on production servers, use the pre-configured [ecosystem.co
 git clone https://github.com/rajhodedara/live-sport-plugin.git
 cd live-sport-plugin
 npm install
+npm run timezone:prepare
+export ICU_TIMEZONE_FILES_DIR="$PWD/.timezone-data/2026f-le"
 npm run build
 
 # Start using the production PM2 cluster configuration
@@ -116,6 +120,10 @@ npx pm2 startup
 ```
 
 ---
+
+## Automatic daylight saving time
+
+Match times use UTC instants and the selected IANA timezone, with the rules for each event date. The build checks timezone behavior before producing a candidate. Docker prepares pinned official ICU data during image construction; local and PM2 setup requires the preparation step above. See [timezone setup and maintenance](docs/TIMEZONE_MAINTENANCE.md) for Windows commands, runtime verification, regional rule updates and cache handling.
 
 ## ⏪ Full Match Replays & Catch-Up Hubs
 
@@ -145,13 +153,12 @@ Catalogs automatically adapt based on current time:
 ### ⚡ Seamless Playback & Multi-Part Coverage
 - **Direct Playable TV Items:** Every replay is mapped directly as a playable video item—no fake TV show seasons, episodes, or multiple nested menus.
 - **Multi-Part & Highlights Options:** Choose between full unbroken match streams, split 1st Half / 2nd Half coverage, and condensed highlight packages.
-- **Nuvio Native Collections:** Built-in `/collections.json` endpoint powers horizontal landscape row browsing out-of-the-box.
 
 ---
 
 ## ✨ Key Features
 
-- **🏟️ Multi-Source Live Aggregator:** Concurrently scrapes and unifies live fixtures from 13+ scrapers (DaddyLive, Streamed.pk, StreamFree, WatchFooty, SportyHunter, TimStreams, StreamSports99, Streamic, CDNLiveTV, DamiTV, EmbedIndia, PpvSt, ReplayZone) into a deduplicated catalog with merged stream choices.
+- **🏟️ Multi-Source Live Aggregator:** Concurrently scrapes and unifies live fixtures from 13+ scrapers (DaddyLive, Streamed.pk, StreamFree, WatchFooty, SportyHunter, TimStreams, StreamSports99, Streamic, CDNLiveTV, DamiTV, EmbedIndia, PpvSt, ReplayZone, ScoreZone) into a deduplicated catalog with merged stream choices.
 - **⚡ Coalescing Zero-Lag HLS Manifest Proxy (`/api/manifest`):** High-speed HLS proxy powered by `impit` with persistent keep-alive connections. Coalesces concurrent in-flight upstream requests (`manifestInFlight`) to eliminate duplicate fetches during live player segment polls and prevent ISP/upstream throttling.
 - **🔐 Native WebAssembly (WASM) Decryption:** Executes native WebAssembly binaries (`stream-lock.wasm`, `gasm.wasm`, `gasm_india.wasm`) directly in Node.js to decrypt obfuscated tokens and unlock protected third-party stream endpoints with zero headless browser overhead.
 - **🌐 Universal Dynamic Host Routing:** Zero hardcoded local IPs. Automatically inspects incoming `Host`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `cf-visitor` headers to dynamically rewrite all manifests, streams, and asset URLs to match the client's gateway (local LAN, Cloudflare Tunnels, Ngrok, or custom domains).
@@ -200,7 +207,7 @@ Configure the addon by editing `.env` or setting environment variables:
 ### Interactive Configuration UI (`/configure`)
 Visit `http://localhost:7000/configure` to customize:
 - **Sports Filtering:** Select from 14+ sports categories (Soccer, Basketball, Cricket, F1 & Racing, NFL, Hockey, Baseball, MMA, Golf, Tennis, Rugby, College Sports, Darts, Other).
-- **Streaming Sources Selection:** Individually enable or disable scrapers (DaddyLive, StreamFree, TimStreams, Streamed.pk, SportyHunter, WatchFooty, CDNLiveTV, StreamSports99, Streamic, DamiTV, EmbedIndia, PpvSt, ReplayZone).
+- **Streaming Sources Selection:** Individually enable or disable scrapers (DaddyLive, StreamFree, TimStreams, Streamed.pk, SportyHunter, WatchFooty, CDNLiveTV, StreamSports99, Streamic, DamiTV, EmbedIndia, PpvSt, ReplayZone, ScoreZone).
 - **Localization & Timezones:** Automatically detects or manually configures your local IANA timezone to render match kick-offs in your local time.
 - **Priority Tracking ("⭐ Your Teams"):** Enter comma-separated favorite clubs or athletes (e.g. `Arsenal, Lakers, Ferrari`) to dynamically generate a dedicated priority catalog.
 

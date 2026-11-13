@@ -31,16 +31,22 @@ export async function route(req, res) {
     return
   }
 
-  const proto = (req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim()
-  const host = req.headers['x-forwarded-host'] || req.headers.host
-  
-  let baseOrigin = process.env.BASE_URL || `${proto}://${host}`
-  if (req.headers['x-forwarded-host']) {
-    const fwHost = req.headers['x-forwarded-host'].split(',')[0].trim()
-    baseOrigin = `${proto}://${fwHost}`
-  }
+  let loc
+  try {
+    const proto = (req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim()
+    const host = req.headers['x-forwarded-host'] || req.headers.host
 
-  const loc = new URL(req.url ?? '/', baseOrigin)
+    let baseOrigin = process.env.BASE_URL || `${proto}://${host}`
+    if (req.headers['x-forwarded-host']) {
+      const fwHost = req.headers['x-forwarded-host'].split(',')[0].trim()
+      baseOrigin = `${proto}://${fwHost}`
+    }
+
+    loc = new URL(req.url ?? '/', baseOrigin)
+  } catch {
+    json(res, 400, { ok: false, error: 'invalid request URL' })
+    return
+  }
   const { pathname, searchParams, origin } = loc
 
   try {
@@ -54,21 +60,28 @@ export async function route(req, res) {
     // GET    /api/cache/:key?claim=1    → reserve the mint (ok:false = held)
     // POST   /api/cache/:key            → store { streams, ttlMs, status }
     //                                     or { activeIds } for prune
-    // DELETE /api/cache/:key            → drop entry + claim (noteFailure)
+    // PATCH  /api/cache/:key?revision=  → invalidate one published generation
+    // DELETE /api/cache/:key            → legacy deletion / owner claim release
     // GET    /api/cache-stats           → entry counters
     if (pathname === '/api/cache-stats') {
       json(res, 200, cacheStats())
       return
     }
     if (pathname.startsWith('/api/cache/')) {
-      const key = decodeURIComponent(pathname.slice('/api/cache/'.length))
+      let key
+      try {
+        key = decodeURIComponent(pathname.slice('/api/cache/'.length))
+      } catch {
+        json(res, 400, { ok: false, error: 'invalid cache key encoding' })
+        return
+      }
       if (!key) {
         json(res, 400, { ok: false, error: 'missing key' })
         return
       }
       if (req.method === 'GET') {
         if (searchParams.get('claim') === '1') {
-          json(res, 200, cacheClaim(key, Number(searchParams.get('ttl')) || undefined))
+          json(res, 200, cacheClaim(key, Number(searchParams.get('ttl')) || undefined, searchParams.get('fenced') === '1', searchParams.get('vacant') === '1'))
           return
         }
         json(res, 200, cacheGet(key))
@@ -86,11 +99,17 @@ export async function route(req, res) {
           json(res, 200, cachePrune(body.activeIds))
           return
         }
-        json(res, 200, cacheSet(key, body ? body.streams : [], body ? body.ttlMs : undefined, body ? body.status : undefined))
+        json(res, 200, cacheSet(key, body ? body.streams : [], body ? body.ttlMs : undefined, body ? body.status : undefined, body ? body.ownerToken : undefined))
         return
       }
       if (req.method === 'DELETE') {
-        json(res, 200, cacheDelete(key))
+        json(res, 200, cacheDelete(key, searchParams.has('ownerToken') ? searchParams.get('ownerToken') : undefined))
+        return
+      }
+      if (req.method === 'PATCH') {
+        // Old resolvers reject PATCH with 405 instead of ignoring a new
+        // DELETE parameter and accidentally deleting a newer generation.
+        json(res, 200, cacheDelete(key, undefined, searchParams.get('revision') || ''))
         return
       }
       json(res, 405, { error: 'method not allowed' })

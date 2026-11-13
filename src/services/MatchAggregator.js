@@ -17,8 +17,10 @@ const STOP_WORDS = new Set([
 ]);
 
 const { parseTimezone } = require('../timezone');
+const { OVERLAY_SOURCE: LEAF_OVERLAY_SOURCE } = require('./LiveOverlayService');
 const ChannelIdentityService = require('./ChannelIdentityService');
 const MatchEntity = require('../domain/MatchEntity');
+const { eventSquadIdentity, canonicalizeAge } = require('./EventSquadIdentity');
 
 /**
  * Parses a provider-supplied match date into epoch milliseconds.
@@ -50,6 +52,104 @@ function _parseEventDate(raw) {
   // Last resort for non-ISO shapes (e.g. "September 14, 2026").
   const fallback = Date.parse(str);
   return Number.isNaN(fallback) ? 0 : fallback;
+}
+
+const DAY_MS = 86400000;
+// Live-overlay candidate window. An ephemeral provider only publishes fixtures
+// that are live or about to be; a catalog row dated further away than this
+// cannot be the same event, so it is dropped before the expensive
+// normalisation pass (see buildLiveOverlay).
+const LIVE_OVERLAY_WINDOW_MS = 12 * 60 * 60 * 1000;
+const MAX_REPLAY_CLAIMS = 32;
+const REPLAY_DAY_PROVIDERS = new Set(['basketballvideo', 'hockeyreplays', 'nflvideo', 'mlblive', 'soccerfull']);
+const REPLAY_MONTHS = 'january february march april may june july august september october november december'.split(' ');
+const REPLAY_MONTH_PATTERN = [...new Set(REPLAY_MONTHS.flatMap(month =>
+  [month, month.slice(0, 3), ...(month === 'september' ? ['sept'] : [])]))].join('|');
+const REPLAY_TITLE_DATES = [
+  new RegExp(`\\b(${REPLAY_MONTH_PATTERN})\\.?\\s+(\\d{1,2}),?\\s+(20\\d{2})\\b`, 'i'),
+  new RegExp(`\\b(\\d{1,2}),?\\s+(${REPLAY_MONTH_PATTERN})\\.?,?\\s+(20\\d{2})\\b`, 'i')
+];
+
+function _replayTitleDay(title) {
+  for (let i = 0; i < REPLAY_TITLE_DATES.length; i++) {
+    const match = REPLAY_TITLE_DATES[i].exec(title);
+    if (!match) continue;
+    const monthText = match[i === 0 ? 1 : 2].toLowerCase();
+    const month = REPLAY_MONTHS.findIndex(name => name.startsWith(monthText));
+    const day = Number(match[i === 0 ? 2 : 1]);
+    const year = Number(match[3]);
+    const time = Date.UTC(year, month, day);
+    const parsed = new Date(time);
+    if (parsed.getUTCMonth() === month && parsed.getUTCDate() === day) return time;
+  }
+  return 0;
+}
+
+function _replayClaim(event, date, title) {
+  const provider = event.sources?.[0]?.source || '';
+  const titleDay = _replayTitleDay(title);
+  // These providers derive midnight (SoccerFull: noon) from a calendar day,
+  // whereas LiveTV's clock, including 00:00, is an actual UTC kickoff.
+  const dayOnly = /^\d{4}-\d{2}-\d{2}$/.test(String(event.date || '')) ||
+    REPLAY_DAY_PROVIDERS.has(provider) || (!date && Boolean(titleDay));
+  const time = dayOnly ? (titleDay || (date ? Math.floor(date / DAY_MS) * DAY_MS : 0)) : date;
+  const game = title.match(/\bgame\s*[-#]?\s*(\d{1,2})\b/i)?.[1] || '';
+  const id = String(event.id || '');
+  return { provider, time, dayOnly, game, id,
+    key: [provider, time, dayOnly, game, time ? '' : id].join('\u0000') };
+}
+
+function _replayClaims(event, date, title) {
+  // A flat string survives CacheService's custom-field cloning without shared
+  // mutable arrays. Bound and validate it before reusing cached constraints.
+  const stored = event._replayIdentityClaims;
+  if (typeof stored === 'string' && stored.length <= 131072) {
+    try {
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed) && parsed.length > 0 && parsed.length <= MAX_REPLAY_CLAIMS && parsed.every(c =>
+        Array.isArray(c) && c.length === 5 && typeof c[0] === 'string' && c[0].length <= 64 &&
+        Number.isSafeInteger(c[1]) && c[1] >= 0 && typeof c[2] === 'boolean' &&
+        typeof c[3] === 'string' && /^\d{0,2}$/.test(c[3]) && typeof c[4] === 'string' && c[4].length <= 2048)) {
+        return parsed.map(([provider, time, dayOnly, game, id]) => ({ provider, time, dayOnly, game, id,
+          key: [provider, time, dayOnly, game, time ? '' : id].join('\u0000') }));
+      }
+    } catch (_) {}
+  }
+  return [_replayClaim(event, date, title)];
+}
+
+function _serializeReplayClaims(claims) {
+  return JSON.stringify(claims.map(c => [c.provider, c.time, c.dayOnly, c.game, c.id]));
+}
+
+function _replayClaimCompatible(a, b) {
+  // A shared team pair or reused ID cannot turn Game 4 into Game 5.
+  if (a.game && b.game && Number(a.game) !== Number(b.game)) return false;
+  if (!a.time || !b.time) return Boolean(a.id) && a.id === b.id;
+  if (a.dayOnly && b.dayOnly) return a.time === b.time;
+  if (!a.dayOnly && !b.dayOnly) {
+    // Allow a small kickoff correction, rather than the former four-day span
+    // which collapsed successive games in a playoff series.
+    return Math.abs(a.time - b.time) <= 3600000;
+  }
+  const day = a.dayOnly ? a : b;
+  const precise = a.dayOnly ? b : a;
+  const delta = precise.time - day.time;
+  if (day.provider && day.provider === precise.provider) return delta >= 0 && delta < DAY_MS;
+  // A local calendar day can cross the UTC date boundary (UTC+14..UTC-12).
+  // This preserves e.g. October 15 replay day / October 16 02:00 UTC kickoff.
+  return delta >= -14 * 3600000 && delta < 36 * 3600000;
+}
+
+function _mergeReplayClaims(a, b) {
+  return [...new Map([...a, ...b].map(claim => [claim.key, claim])).values()];
+}
+
+function _replayClaimsCompatible(a, b) {
+  if (a.length + b.length > MAX_REPLAY_CLAIMS && _mergeReplayClaims(a, b).length > MAX_REPLAY_CLAIMS) return false;
+  // Retain every original date/game constraint, so a coarse date or a preferred
+  // title cannot become a bridge between two different precise fixtures.
+  return a.every(left => b.every(right => _replayClaimCompatible(left, right)));
 }
 
 /**
@@ -98,6 +198,31 @@ const COMPOUND_ALIASES = [
     [/\bformula\s*(?:four|4)\b|\bf[- ]?4\b/g, 'formulafour'],
     [/\bformula\s*e\b|\bformula-e\b/g, 'formulae'],
     [/\bgrand\s*prix\b|\bgp\b/g, 'grandprix'],
+    // Motorsport Circuits & Grand Prix Names
+    [/\bsao\s*paulo\b|\binterlagos\b/g, 'saopaulo'],
+    [/\b(?:brazil(?:ian)?\s*(?:grand\s*prix|gp)|(?:grand\s*prix|gp)\s*(?:of\s*)?brazil)\b/gi, 'saopaulo grandprix'],
+    [/\blusail\b/g, 'qatar'],
+    [/\bsakhir\b/g, 'bahrain'],
+    [/\byas\s*marina\b/g, 'abudhabi'],
+    [/\bmarina\s*bay\b/g, 'singapore'],
+    [/\bspa\s*francorchamps\b/g, 'spa'],
+    [/\bspielberg\b|\bred\s*bull\s*ring\b/g, 'austrian'],
+    [/\bhungaroring\b/g, 'hungarian'],
+    [/\bzandvoort\b/g, 'dutch'],
+    [/\bsuzuka\b/g, 'japanese'],
+    [/\balbert\s*park\b/g, 'australian'],
+    [/\bmontmelo\b|\bcatalunya\b/g, 'barcelona'],
+    [/\bhermanos\s*rodriguez\b/g, 'mexico'],
+    [/\bricardo\s*tormo\b/g, 'valencia'],
+    [/\btermas\s*de\s*rio\s*hondo\b/g, 'argentina'],
+    [/\bmugello\b/g, 'italian'],
+    [/\bphillip\s*island\b/g, 'australian'],
+    [/\bmandalika\b/g, 'indonesia'],
+    [/\bchang\s*(?:international\s*)?circuit\b|\bburiram\b/g, 'thailand'],
+    [/\bmotegi\b|\btwin\s*ring\s*motegi\b/g, 'japanese'],
+    [/\bsachsenring\b/g, 'german'],
+    [/\bportimao\b|\balgarve\b/g, 'portuguese'],
+    [/\bassen\b|\btt\s*assen\b/g, 'dutch'],
     // Football (Soccer)
     [/\bman(chester)?\s*utd\b|\bmanchester\s*united\b/g, 'manchesterunited'],
     [/\bman\.?\s+united\b/g, 'manchesterunited'], // "Man United" / "Man. United" (gap found by A/B testing)
@@ -130,8 +255,29 @@ const COMPOUND_ALIASES = [
     [/\bsporting\s*gijon\b/g, 'sportinggijon'],
     [/\bsporting\s*(?:cp|clube\s*de\s*portugal|lisbon)\b/g, 'sportingcp'],
     [/\bathletic\s*(club|bilbao)\b/g, 'athleticbilbao'],
-    [/\bbayer(\s*04)?\s*leverkusen\b/g, 'bayerleverkusen'],
-    [/\bborussia\s*m[oö]nchengladbach\b|\bm['’]?gladbach\b/g, 'monchengladbach'],
+    [/\bbayer(\s*04)?\s*leverkusen\b|\bleverkusen\b/g, 'bayerleverkusen'],
+    [/\b(?:borussia\s*)?(?:m[oö]nchengladbach|moenchengladbach|m['’]?gladbach)\b/gi, 'monchengladbach'],
+    [/\bhamburger(\s*sv)?\b|\bhamburg\s*sv\b|\bhsv\b/g, 'hamburg'],
+    [/\b(sv\s*)?werder\s*bremen\b|\bwerder\b/g, 'werderbremen'],
+    [/\bhertha(\s*bsc)?\b|\bhertha\s*berlin\b/g, 'herthaberlin'],
+    [/\beintracht\s*frankfurt\b|\bsge\b/g, 'eintrachtfrankfurt'],
+    [/\b(vfb\s*)?stuttgart\b/g, 'stuttgart'],
+    [/\b(vfl\s*)?wolfsburg\b/g, 'wolfsburg'],
+    [/\b(sc\s*)?freiburg\b/g, 'freiburg'],
+    [/\b(1\.\s*fsv\s*)?mainz(\s*05)?\b/g, 'mainz'],
+    [/\b(fc\s*)?augsburg\b/g, 'augsburg'],
+    [/\b(1\.\s*fc\s*)?union\s*berlin\b/g, 'unionberlin'],
+    [/\b(fc\s*)?st[\s\.]*pauli\b/g, 'stpauli'],
+    [/\b(tsg\s*)?hoffenheim\b/g, 'hoffenheim'],
+    [/\b(1\.\s*fc\s*)?heidenheim\b/g, 'heidenheim'],
+    [/\b(vfl\s*)?bochum\b/g, 'bochum'],
+    [/\b(ksv\s*)?holstein\s*kiel\b|\bholstein\b/g, 'holsteinkiel'],
+    [/\b(fc\s*)?schalke(\s*04)?\b/g, 'schalke'],
+    [/\bhannover(\s*96)?\b/g, 'hannover'],
+    [/\b(1\.\s*fc\s*)?(koln|koeln|cologne)\b/g, 'koln'],
+    [/\bfortuna\s*d[uü]sseldorf\b/g, 'dusseldorf'],
+    [/\b(1\.\s*fc\s*)?kaiserslautern\b/g, 'kaiserslautern'],
+    [/\b(1\.\s*fc\s*)?n[uü]rnberg\b/g, 'nurnberg'],
     [/\bpsv(\s*eindhoven)?\b/g, 'psveindhoven'],
     [/\bfeyenoord(\s*rotterdam)?\b/g, 'feyenoord'],
     [/\b(red\s*star(\s*belgrade)?|crvena\s*zvezda)\b/g, 'crvenazvezda'],
@@ -255,6 +401,35 @@ function _teamsSimilar(a, b) {
   const minLen = Math.min(sa.size, sb.size);
   return minLen > 0 && (common / minLen) >= 0.7;
 }
+
+function _teamPairsSimilar(a, b) {
+  return (_teamsSimilar(a[0], b[0]) && _teamsSimilar(a[1], b[1])) ||
+    (_teamsSimilar(a[0], b[1]) && _teamsSimilar(a[1], b[0]));
+}
+
+function _keysCompatible(k1, k2) {
+  if (k1 === k2) return true;
+  const [g1, a1, s1] = (k1 || '').split('|');
+  const [g2, a2, s2] = (k2 || '').split('|');
+  if (a1 !== a2 || s1 !== s2) return false;
+  if ((g1 === 'men' && !g2) || (g2 === 'men' && !g1)) return true;
+  return false;
+}
+
+function _squadsCompatible(p1, p2) {
+  const a = p1.squad, b = p2.squad;
+  if (!a || !b) return true;
+  if (a.conflicting || b.conflicting || !_keysCompatible(a.key, b.key)) return false;
+  if (!a.teamKeys || !b.teamKeys) return true;
+  if (a.teamKeys.every(key => _keysCompatible(key, a.key)) && b.teamKeys.every(key => _keysCompatible(key, b.key))) return true;
+  if (!p1.teams || !p2.teams) return false;
+  return (_teamsSimilar(p1.teams[0], p2.teams[0]) && _teamsSimilar(p1.teams[1], p2.teams[1]) &&
+      _keysCompatible(a.teamKeys[0], b.teamKeys[0]) && _keysCompatible(a.teamKeys[1], b.teamKeys[1])) ||
+    (_teamsSimilar(p1.teams[0], p2.teams[1]) && _teamsSimilar(p1.teams[1], p2.teams[0]) &&
+      _keysCompatible(a.teamKeys[0], b.teamKeys[1]) && _keysCompatible(a.teamKeys[1], b.teamKeys[0]));
+}
+
+const _resolvedTeam = name => Boolean(name) && !/^(?:tba|tbd|unknown|to be (?:announced|decided|determined)|team(?: [ab12])?|winner.*|loser.*)$/i.test(name);
 
 const COUNTRY_CANONICAL = {
   'uk': 'united kingdom',
@@ -449,17 +624,18 @@ function _tryExtractTeams(title, precomputedSeries) {
 
 const { extractTeamsFromTitle } = require('./TeamNameExtractor');
 
-// Identity key mirroring the merge loop's 7-field source equality (source, id,
-// streamSource, streamId, group, channelName, name — deliberately NOT url),
+// Identity key shared by the merge loop's source equality (deliberately NOT
+// url). Country context can select a different broadcaster even for the same
+// provider display name/ID, so it must survive source deduplication.
 // joined with a byte that cannot occur in provider display fields.
 const sourceIdentityKey = (s) => [
   s.source || '', s.id || '', s.streamSource || '', s.streamId || '',
-  s.group || '', s.channelName || '', s.name || ''
+  s.group || '', s.country || '', s.countryCode || '', s.channelName || '', s.name || ''
 ].join('\u0000');
 
 class MatchAggregator {
-  constructor({ timStreamsProvider, watchFootyProvider, cdnLiveProvider, streamSports99Provider, streamedPkProvider, cacheService, yamlProviders, replayzoneProvider, daddyLiveProvider, teamLogoService, liveTvProvider, damiTvProvider, ppvStProvider, soccerFullProvider, basketballVideoProvider, nflVideoProvider, skTechProvider, fullRacesProvider, hockeyReplaysProvider, mlbLiveProvider, vavooProvider, ak47LiveProvider, leafProvider, madplayProvider, bintvProvider, angulismoProvider, tdtChannelsProvider, nbaMonsterProvider, vipLeagueProvider, strumykProvider, providerHealthService, broadcasterMatchService } = {}) {
-    this.providers = [timStreamsProvider, streamedPkProvider, watchFootyProvider, cdnLiveProvider, ...(yamlProviders || []), replayzoneProvider, ...(liveTvProvider ? [liveTvProvider] : []), ...(daddyLiveProvider ? [daddyLiveProvider] : []), ...(damiTvProvider ? [damiTvProvider] : []), ...(ppvStProvider ? [ppvStProvider] : []), ...(soccerFullProvider ? [soccerFullProvider] : []), ...(basketballVideoProvider ? [basketballVideoProvider] : []), ...(nflVideoProvider ? [nflVideoProvider] : []), ...(skTechProvider ? [skTechProvider] : []), ...(fullRacesProvider ? [fullRacesProvider] : []), ...(hockeyReplaysProvider ? [hockeyReplaysProvider] : []), ...(mlbLiveProvider ? [mlbLiveProvider] : []), ...(vavooProvider ? [vavooProvider] : []), ...(ak47LiveProvider ? [ak47LiveProvider] : []), ...(leafProvider ? [leafProvider] : []), ...(madplayProvider ? [madplayProvider] : []), ...(bintvProvider ? [bintvProvider] : []), ...(angulismoProvider ? [angulismoProvider] : []), ...(tdtChannelsProvider ? [tdtChannelsProvider] : []), ...(nbaMonsterProvider ? [nbaMonsterProvider] : []), ...(vipLeagueProvider ? [vipLeagueProvider] : []), ...(strumykProvider ? [strumykProvider] : [])];
+  constructor({ timStreamsProvider, watchFootyProvider, cdnLiveProvider, streamSports99Provider, streamedPkProvider, cacheService, yamlProviders, replayzoneProvider, daddyLiveProvider, teamLogoService, liveTvProvider, damiTvProvider, ppvStProvider, soccerFullProvider, basketballVideoProvider, nflVideoProvider, skTechProvider, fullRacesProvider, hockeyReplaysProvider, mlbLiveProvider, vavooProvider, ak47LiveProvider, leafProvider, madplayProvider, bintvProvider, angulismoProvider, tdtChannelsProvider, nbaMonsterProvider, vipLeagueProvider, strumykProvider, leafRecapProvider, scorezoneProvider, pitSportProvider, providerHealthService, broadcasterMatchService } = {}) {
+    this.providers = [timStreamsProvider, streamedPkProvider, watchFootyProvider, cdnLiveProvider, ...(yamlProviders || []), replayzoneProvider, ...(liveTvProvider ? [liveTvProvider] : []), ...(daddyLiveProvider ? [daddyLiveProvider] : []), ...((damiTvProvider && typeof damiTvProvider.isEnabled === 'function' && !damiTvProvider.isEnabled()) ? [] : (damiTvProvider ? [damiTvProvider] : [])), ...(ppvStProvider ? [ppvStProvider] : []), ...(soccerFullProvider ? [soccerFullProvider] : []), ...(basketballVideoProvider ? [basketballVideoProvider] : []), ...(nflVideoProvider ? [nflVideoProvider] : []), ...(skTechProvider ? [skTechProvider] : []), ...(fullRacesProvider ? [fullRacesProvider] : []), ...(hockeyReplaysProvider ? [hockeyReplaysProvider] : []), ...(mlbLiveProvider ? [mlbLiveProvider] : []), ...(vavooProvider ? [vavooProvider] : []), ...(ak47LiveProvider ? [ak47LiveProvider] : []), ...(leafProvider ? [leafProvider] : []), ...(madplayProvider ? [madplayProvider] : []), ...(bintvProvider ? [bintvProvider] : []), ...(angulismoProvider ? [angulismoProvider] : []), ...(tdtChannelsProvider ? [tdtChannelsProvider] : []), ...(nbaMonsterProvider ? [nbaMonsterProvider] : []), ...(vipLeagueProvider ? [vipLeagueProvider] : []), ...(strumykProvider ? [strumykProvider] : []), ...(leafRecapProvider ? [leafRecapProvider] : []), ...((scorezoneProvider && typeof scorezoneProvider.isEnabled === 'function' && !scorezoneProvider.isEnabled()) ? [] : (scorezoneProvider ? [scorezoneProvider] : [])), ...(pitSportProvider ? [pitSportProvider] : [])];
     this.streamSports99Provider = streamSports99Provider;
     this.cacheService = cacheService;
     this.teamLogoService = teamLogoService;
@@ -496,21 +672,23 @@ class MatchAggregator {
       if (!match || !Array.isArray(match.sources) || match.sources.length === 0) continue;
       // Do not inject into 24/7 channels or VOD replays
       if (match.category === 'networks' || match.rawCategory === '24/7 TV Channels' || String(match.id || '').includes('_ch_')) continue;
-      if (match.isReplay || (match.id && (match.id.startsWith('rz_') || match.id.startsWith('bv_') || match.id.startsWith('nfl_') || match.id.startsWith('sf_') || match.id.startsWith('fr_') || match.id.startsWith('hr_')))) continue;
+      if (match.isReplay || (match.id && (match.id.startsWith('rz_') || match.id.startsWith('bv_') || match.id.startsWith('nfl_') || match.id.startsWith('sf_') || match.id.startsWith('fr_') || match.id.startsWith('hr_') || match.id.startsWith('leaf_recap_')))) continue;
 
-      // Extract candidate broadcaster names from all sources
-      const candidateNames = [];
+      // Retain the source's country context alongside its broadcaster name.
+      const candidates = [];
       for (const src of match.sources) {
         if (!src) continue;
         const candidateName = src.channelName || src.channel_name || src.channel;
         if (candidateName && typeof candidateName === 'string' && candidateName.trim()) {
-          candidateNames.push(candidateName.trim());
+          candidates.push({ name: candidateName.trim(), context: {
+            group: src.group, country: src.country, countryCode: src.countryCode
+          } });
         }
       }
 
       // Check if this fixture has specific event/overflow channels (e.g., Canal+ Live 3, Canal+ Extra 2)
-      const hasCanalOverflow = candidateNames.some(c => /canal\+?\s*(live|extra)\s*\d+/i.test(c));
-      const hasMovistarOverflow = candidateNames.some(c => /movistar\s*(liga|deportes|campeones)\s*\d+/i.test(c));
+      const hasCanalOverflow = candidates.some(c => /canal\+?\s*(live|extra)\s*\d+/i.test(c.name));
+      const hasMovistarOverflow = candidates.some(c => /movistar\s*(liga|deportes|campeones)\s*\d+/i.test(c.name));
 
       // If specific overflow channels exist, prune any linear channels that were mistakenly added
       if (hasCanalOverflow) {
@@ -532,7 +710,8 @@ class MatchAggregator {
       );
 
       // Prioritize numbered event feeds and filter out conflicting generic network channels
-      const prioritizedCandidates = candidateNames.filter(c => {
+      const prioritizedCandidates = candidates.filter(candidate => {
+        const c = candidate.name;
         if (hasCanalOverflow && /canal\+?\s*(sport|premiere?)/i.test(c) && !/(live|extra)/i.test(c)) {
           return false;
         }
@@ -544,8 +723,8 @@ class MatchAggregator {
 
       let injectedForThisMatch = 0;
 
-      for (const candidateName of prioritizedCandidates) {
-        const vavooSource = this.broadcasterMatchService.createVavooSource(candidateName);
+      for (const candidate of prioritizedCandidates) {
+        const vavooSource = this.broadcasterMatchService.createVavooSource(candidate.name, candidate.context);
         if (vavooSource && vavooSource.id && !existingVavooUrls.has(vavooSource.id)) {
           existingVavooUrls.add(vavooSource.id);
           match.sources.push(vavooSource);
@@ -573,9 +752,9 @@ class MatchAggregator {
     const id = e && e.id != null ? String(e.id) : '';
     const isChannel = Boolean(
       (e && (e.category === 'networks' || e.rawCategory === '24/7 TV Channels' || String(e.id || '').includes('_ch_'))) ||
-      id.startsWith('dlv_ch_') || id.startsWith('cdn_ch_') || id.startsWith('sktech_ch_') || id.startsWith('vavoo_ch_')
+      id.startsWith('dlv_ch_') || id.startsWith('cdn_ch_') || id.startsWith('sktech_ch_') || id.startsWith('vavoo_ch_') || id.startsWith('scorezone_ch_')
     );
-    const title = e && e.title ? _foldText(e.title) : '';
+    const title = e && e.title ? canonicalizeAge(_foldText(e.title)) : '';
     // Fold the title ONCE and thread the folded + lowercased forms through
     // the whole pipeline. The old chain re-ran the NFKD/diacritic cascade
     // 6-11x per row (stripNoise, compoundify, tokenize, motorsport checks and
@@ -598,15 +777,34 @@ class MatchAggregator {
     const extractedTeams = (isMotorsport || isChannel) ? null : _tryExtractTeams(title, motorsportSeries);
     const fallbackTeams = (!extractedTeams && !isMotorsport && !isChannel && e && e.team1 && e.team2 && e.team1.name && e.team2.name)
       ? [
-          _tokenizeF(_compoundifyF(_stripNoiseF(_foldText(e.team1.name)))).join(' '),
-          _tokenizeF(_compoundifyF(_stripNoiseF(_foldText(e.team2.name)))).join(' ')
+          _tokenizeF(_compoundifyF(_stripNoiseF(canonicalizeAge(_foldText(e.team1.name))))).join(' '),
+          _tokenizeF(_compoundifyF(_stripNoiseF(canonicalizeAge(_foldText(e.team2.name))))).join(' ')
         ]
       : null;
 
     let rawCategory = e && e.category ? String(e.category) : '';
-    if (rawCategory === 'football' && /\b(?:euroleague|eurocup|fiba|eurobasket|adriatic league|b1\.league)\b/i.test(`${title} ${e && e.league || ''}`)) {
+    // Handball is not a manifest category. Keep its explicit league evidence
+    // separately so displaying it as "other" cannot merge it into football or
+    // an unknown-sport fixture between the same clubs. The league survives cache
+    // cloning; no inferred sport field needs to be persisted on the row.
+    const isHandball = !isChannel && /\bhandball\b/.test(leagueLower);
+    if (isHandball) {
+      rawCategory = 'other';
+      if (e) e.category = 'other';
+    } else if (!isChannel && rawCategory === 'other' && /\b(?:canada\s*\.\s*cfl|canadian football league)\b/.test(leagueLower)) {
+      // The real LiveTV feed labels the Canadian Football League explicitly,
+      // despite supplying the generic category "other".
+      rawCategory = 'american_football';
+      if (e) e.category = rawCategory;
+    } else if (rawCategory === 'football' && /\b(?:euroleague|eurocup|fiba|eurobasket|adriatic league|b1\.league)\b/i.test(`${title} ${e && e.league || ''}`)) {
       rawCategory = 'basketball';
       if (e) e.category = 'basketball';
+    } else if (!isChannel && rawCategory !== 'college') {
+      const fullContext = `${titleLower} ${leagueLower} ${e && (e.competition || e.footer || '')}`.toLowerCase();
+      if (/\b(?:ncaa|college|ncaab|ncaaf)\b/.test(fullContext) || /\/(?:cbb|cfb)\//.test(fullContext) || (e && e.sources && e.sources.some(s => s.embedUrl && /\/(?:cbb|cfb)\//i.test(s.embedUrl)))) {
+        rawCategory = 'college';
+        if (e) e.category = 'college';
+      }
     }
 
     let channelIdentityKey = (e && e.channelIdentityKey) ? e.channelIdentityKey : null;
@@ -620,12 +818,23 @@ class MatchAggregator {
       if (!canonicalTitle) canonicalTitle = parsed.canonicalTitle;
     }
 
+    const date = _parseEventDate(e && e.date);
+    const isReplay = !isChannel && ((e && e.status === 'finished') || id.startsWith('rz_') || id.startsWith('bv_') || id.startsWith('nfl_') || id.startsWith('sf_') || id.startsWith('livetv_') || id.startsWith('fr_') || id.startsWith('hr_') || id.startsWith('leaf_recap_'));
+    const teams = extractedTeams || fallbackTeams;
+    const tokens = new Set(_tokenizeF(normalized).filter(w => { const n = Number(w); return !(n >= 2000 && n <= 2100); }));
+
     return {
       id,
       category: rawCategory,
-      date: _parseEventDate(e && e.date),
-      teams: extractedTeams || fallbackTeams,
-      tokens: new Set(_tokenizeF(normalized).filter(w => { const n = Number(w); return !(n >= 2000 && n <= 2100); })),
+      isHandball,
+      squad: (isChannel || isMotorsport) ? null : eventSquadIdentity(e || {}),
+      date,
+      replayClaims: isReplay && !isMotorsport ? _replayClaims(e, date, title) : [],
+      teams,
+      tokens,
+      // Metadata-only competitors must enter the same candidate search as
+      // title-derived teams, including ambiguity checks for coarse replays.
+      indexTokens: isReplay && teams ? new Set([...tokens, ...teams.join(' ').split(/\s+/)]) : tokens,
       norm: normalized.replace(/\s+/g, ' ').trim(),
       motorsportSeries,
       // Session is only ever read when BOTH sides of a comparison are
@@ -643,7 +852,7 @@ class MatchAggregator {
         .sort()
         .join(','),
       status: e && e.status ? String(e.status) : '',
-      isReplay: !isChannel && ((e && e.status === 'finished') || id.startsWith('rz_') || id.startsWith('bv_') || id.startsWith('nfl_') || id.startsWith('sf_') || id.startsWith('livetv_') || id.startsWith('fr_') || id.startsWith('hr_')),
+      isReplay,
       isChannel,
       channelIdentityKey,
       channelNumber,
@@ -666,8 +875,9 @@ class MatchAggregator {
   _normalizeCategory(c) {
     if (!c) return c;
     const lc = c.toLowerCase();
-    if (['nbl', 'nba', 'wnba', 'euroleague', 'eurocup', 'fiba', 'ncaa_basketball'].includes(lc)) return 'basketball';
-    if (['nfl', 'ncaa', 'cfl', 'college'].includes(lc)) return 'american_football';
+    if (['college', 'ncaa', 'ncaa_basketball', 'ncaa_football', 'ncaab', 'ncaaf'].includes(lc)) return 'college';
+    if (['nbl', 'nba', 'wnba', 'euroleague', 'eurocup', 'fiba'].includes(lc)) return 'basketball';
+    if (['nfl', 'cfl'].includes(lc)) return 'american_football';
     if (['nrl', 'super_league', 'afl', 'rugby_league', 'rugby_union', 'rugby15'].includes(lc)) return 'rugby';
     if (['mls', 'epl', 'la_liga', 'bundesliga', 'serie_a', 'ligue_1', 'ucl', 'uel', 'soccer', 'football'].includes(lc)) return 'football';
     if (['formula_1', 'formulaone', 'motogp', 'indycar', 'nascar'].includes(lc)) return 'motorsport';
@@ -706,6 +916,8 @@ class MatchAggregator {
       return false;
     }
 
+    if (Boolean(p1.isHandball) !== Boolean(p2.isHandball)) return false;
+
     // 1. Category mismatch guard
     // Some providers use league-specific slugs (nbl, nba, nfl, mls, nrl, afl)
     // while others use the parent sport name (basketball, american_football,
@@ -714,9 +926,12 @@ class MatchAggregator {
     const _normalizeCategory = (c) => this._normalizeCategory(c);
     const c1 = _normalizeCategory(p1.category);
     const c2 = _normalizeCategory(p2.category);
-    const isCollegeFootball = ((p1.category || '').toLowerCase() === 'college' && (c2 === 'american_football' || c2 === 'football')) ||
-                              ((p2.category || '').toLowerCase() === 'college' && (c1 === 'american_football' || c1 === 'football'));
-    if (c1 && c2 && c1 !== 'other' && c2 !== 'other' && c1 !== c2 && !isCollegeFootball) {
+    const COLLEGE_PARENTS = new Set(['american_football', 'football', 'basketball', 'baseball', 'hockey']);
+    const isCollegeSport = (c1 === 'college' && COLLEGE_PARENTS.has(c2)) ||
+                           (c2 === 'college' && COLLEGE_PARENTS.has(c1)) ||
+                           ((p1.category || '').toLowerCase() === 'college' && COLLEGE_PARENTS.has(c2)) ||
+                           ((p2.category || '').toLowerCase() === 'college' && COLLEGE_PARENTS.has(c1));
+    if (c1 && c2 && c1 !== 'other' && c2 !== 'other' && c1 !== c2 && !isCollegeSport) {
       return false;
     }
 
@@ -727,8 +942,9 @@ class MatchAggregator {
       return false;
     }
 
-    // 2. Exact ID match
-    if (p1.id && p2.id && p1.id === p2.id) return true;
+    // Explicit squad distinctions also constrain ID/alias shortcuts. Missing
+    // labels cannot safely inherit a women's, youth or reserve team's sources.
+    if (!isMoto1 && !isMoto2 && !_squadsCompatible(p1, p2)) return false;
 
     // 3. Date window & motorsport identity guards
     if (isMoto1 && isMoto2) {
@@ -747,18 +963,25 @@ class MatchAggregator {
         // Events > 48 hours apart never merge for motorsport
         return false;
       }
+    } else if (p1.isReplay && p2.isReplay) {
+      if (!_replayClaimsCompatible(p1.replayClaims, p2.replayClaims)) return false;
     } else {
-      // Standard date window guard — events more than 24h apart (or 4 days for replays) are definitely different
-      const maxDateDiff = (p1.isReplay && p2.isReplay) ? 345600000 : 86400000;
-      if (p1.date && p2.date && Math.abs(p1.date - p2.date) > maxDateDiff) return false;
+      if (p1.date && p2.date && Math.abs(p1.date - p2.date) > DAY_MS) return false;
+    }
+
+    // IDs and aliases cannot bypass date/session or squad contradictions.
+    if (p1.id && p2.id && p1.id === p2.id) {
+      if (!isMoto1 && !isMoto2 && p1.teams?.every(_resolvedTeam) && p2.teams?.every(_resolvedTeam)) {
+        return _teamPairsSimilar(p1.teams, p2.teams);
+      }
+      // A placeholder such as TBA may acquire its real teams under this ID.
+      return true;
     }
 
     // 5. Dual-team extraction — if both titles parse as "team1 vs team2", require
     //    BOTH teams to independently fuzzy-match. (Skip for motorsport which has no teams).
     if (p1.teams && p2.teams && !isMoto1 && !isMoto2) {
-      const fwd = _teamsSimilar(p1.teams[0], p2.teams[0]) && _teamsSimilar(p1.teams[1], p2.teams[1]);
-      const rev = _teamsSimilar(p1.teams[0], p2.teams[1]) && _teamsSimilar(p1.teams[1], p2.teams[0]);
-      return fwd || rev;
+      return _teamPairsSimilar(p1.teams, p2.teams);
     }
 
     // 6. Channel-identity path — at least one title is not a team-vs-team fixture
@@ -787,7 +1010,7 @@ class MatchAggregator {
     // e.g. "RACE - F1 2026 - Singapore Grand Prix Full Race Replay" vs "Formula 1 Singapore Grand Prix 2026 Race Replay"
     if (isMoto1 && isMoto2) {
       const isGrandPrix = (t) => t.has('grandprix') || t.has('gp') || t.has('formulaone') || t.has('formulatwo') || t.has('formulathree') || t.has('formulafour') || t.has('formulae') || t.has('motogp') || t.has('moto2') || t.has('moto3') || t.has('nascar') || t.has('rally') || t.has('indycar') || t.has('dtm') || t.has('wsbk') || t.has('superbike');
-      if (isGrandPrix(p1.tokens) && isGrandPrix(p2.tokens)) {
+      if ((isGrandPrix(p1.tokens) || p1.motorsportSeries !== 'other') && (isGrandPrix(p2.tokens) || p2.motorsportSeries !== 'other')) {
         const specificShared = [...p1.tokens].filter(x => p2.tokens.has(x) && !MOTORSPORT_GENERICS.has(x) && isNaN(x));
         if (specificShared.length >= 1) return true;
       }
@@ -813,6 +1036,138 @@ class MatchAggregator {
     const union = p1.tokens.size + p2.tokens.size - common;
     if (union > 0 && common / union >= 0.75) return true;
     return false;
+  }
+
+  /**
+   * Leaf only. Which catalog cards should carry Leaf sources right now?
+   *
+   * Deliberately takes NO provider argument. This is not a generic overlay
+   * mechanism: every other provider's catalog participation stays in the full
+   * sync, and giving this path a second tenant would put an unreviewed write
+   * surface next to theirs for no benefit. The source key is fixed by
+   * LiveOverlayService.OVERLAY_SOURCE and the merge side refuses to emit
+   * anything else, so widening this is a code change, not a config change.
+   *
+   * This is the read half of the feature. It never writes the catalog: it
+   * returns `matchId -> leaf sources[]` for the handful of fixtures Leaf is
+   * publishing, and the caller decides what to persist.
+   *
+   * Cost matters (this runs on a short cadence): the catalog is filtered to a
+   * narrow kickoff window BEFORE any _precompute call, because _precompute is
+   * the regex-heavy normaliser and matching 1-5 incoming fixtures must not pay
+   * for 16k catalog rows.
+   *
+   * `ok` is not "did we get rows": it is "did the provider prove it answered".
+   * LeafProvider answers [] both after a thrown request and for a quiet live
+   * schedule, and a wholesale snapshot replace must not treat those the same
+   * (see LeafProvider.lastCatalogOk).
+   *
+   * @returns {Promise<{ok: boolean, reason: string, fetched: number, matched: number, map: Map<string, Array>}>}
+   */
+  async buildLiveOverlay() {
+    const result = (ok, reason, extra = {}) => ({
+      ok, reason, fetched: 0, matched: 0, map: new Map(), ...extra
+    });
+    const wanted = LEAF_OVERLAY_SOURCE;
+    // Key on sourceName first: the display name is capitalised ('Leaf') and
+    // would never match a lowercase selector.
+    const provider = (this.providers || []).find((p) => {
+      if (!p) return false;
+      const key = p.sourceName || p.name;
+      return typeof key === 'string' && key.toLowerCase() === wanted;
+    });
+    if (!provider || typeof provider.getMatches !== 'function') return result(false, 'provider-missing');
+    // Unconfigured providers answer [] and look exactly like "nothing live".
+    // Never let one clear a snapshot it cannot vouch for.
+    if (provider.configured === false) return result(false, 'provider-unconfigured');
+
+    let incoming = [];
+    try {
+      incoming = await provider.getMatches();
+    } catch (err) {
+      return result(false, 'fetch-failed', { error: err && err.message });
+    }
+    const ok = provider.lastCatalogOk === true;
+    if (!Array.isArray(incoming) || incoming.length === 0) {
+      return result(ok, ok ? 'empty' : 'empty-unverified');
+    }
+
+    const cacheService = this.cacheService;
+    const current = cacheService
+      ? ((cacheService.getMatchesReadOnly ? cacheService.getMatchesReadOnly() : cacheService.getMatches()) || [])
+      : [];
+    if (!Array.isArray(current) || current.length === 0) {
+      return result(ok, 'catalog-empty', { fetched: incoming.length });
+    }
+
+    const now = Date.now();
+    const candidates = [];
+    for (const m of current) {
+      if (!m || !m.id) continue;
+      const kickoff = _parseEventDate(m.date);
+      if (kickoff > 0) {
+        if (Math.abs(kickoff - now) > LIVE_OVERLAY_WINDOW_MS) continue;
+      } else if (String(m.status || '').toLowerCase() !== 'live') {
+        // Undated and not marked live: 24/7 channels and undated archive rows.
+        continue;
+      }
+      candidates.push(m);
+    }
+    if (candidates.length === 0) {
+      return result(ok, 'no-candidates', { fetched: incoming.length });
+    }
+
+    // Exact id/alias hits skip the comparison entirely. Built over candidates
+    // only: a row outside the window is not the fixture being published.
+    const byId = new Map();
+    for (const m of candidates) {
+      byId.set(String(m.id), m);
+      if (Array.isArray(m.aliasIds)) {
+        for (const alias of m.aliasIds) {
+          if (alias == null || alias === '') continue;
+          const key = String(alias);
+          if (!byId.has(key)) byId.set(key, m);
+        }
+      }
+    }
+    const candidatePres = candidates.map((m) => this._precompute(m));
+
+    const map = new Map();
+    let matched = 0;
+
+    for (const providerMatch of incoming) {
+      if (!providerMatch || !Array.isArray(providerMatch.sources) || providerMatch.sources.length === 0) continue;
+      const sources = providerMatch.sources.filter((s) => s && String(s.source || '').toLowerCase() === wanted);
+      if (sources.length === 0) continue;
+
+      let target = null;
+      for (const id of [providerMatch.id, ...(Array.isArray(providerMatch.aliasIds) ? providerMatch.aliasIds : [])]) {
+        if (id == null || id === '') continue;
+        const hit = byId.get(String(id));
+        if (hit) { target = hit; break; }
+      }
+      if (!target) {
+        const incomingPre = this._precompute(providerMatch);
+        for (let i = 0; i < candidatePres.length; i++) {
+          if (this._sameEventPre(candidatePres[i], incomingPre)) { target = candidates[i]; break; }
+        }
+      }
+      if (!target) continue;
+
+      const targetId = String(target.id);
+      const list = map.get(targetId) || [];
+      for (const src of sources) {
+        const id = src.id == null ? '' : String(src.id);
+        if (!id) continue;
+        if (list.some((s) => s.id === id)) continue;
+        list.push({ source: wanted, id, ...(src.name ? { name: String(src.name) } : {}) });
+      }
+      if (list.length === 0) continue;
+      map.set(targetId, list);
+      matched++;
+    }
+
+    return { ok, reason: 'ok', fetched: incoming.length, matched, map };
   }
 
   /** Public API preserved: decision on raw matches (computes pre on the fly). */
@@ -851,8 +1206,6 @@ class MatchAggregator {
       aliasIds: Array.from(aliasIds),
       sources: [...(primary.sources || [])]
     });
-    if (secondary.isCustomAi) merged.isCustomAi = true;
-    if (secondary.customAiSource && !merged.customAiSource) merged.customAiSource = secondary.customAiSource;
 
     const getSourceKey = (s) => [
       s.source || '',
@@ -861,6 +1214,8 @@ class MatchAggregator {
       s.streamId || '',
       s.url || '',
       s.group || '',
+      s.country || '',
+      s.countryCode || '',
       s.channelName || '',
       s.name || ''
     ].join('|');
@@ -892,7 +1247,7 @@ class MatchAggregator {
     return merged;
   }
 
-  async _fetchProviderMatches(provider) {
+  async _fetchProviderMatches(provider, shouldRecord = () => true) {
     const startedAt = Date.now();
     const timeoutMs = this.providerSyncTimeoutMs;
     let timer = null;
@@ -905,7 +1260,7 @@ class MatchAggregator {
         if (timer && typeof timer.unref === 'function') timer.unref();
       });
       const matches = await Promise.race([provider.getMatches(), deadline]);
-      if (this.providerHealthService) {
+      if (this.providerHealthService && shouldRecord()) {
         this.providerHealthService.recordResult(provider, {
           matches,
           durationMs: Date.now() - startedAt,
@@ -913,7 +1268,7 @@ class MatchAggregator {
       }
       return matches;
     } catch (error) {
-      if (this.providerHealthService) {
+      if (this.providerHealthService && shouldRecord()) {
         this.providerHealthService.recordResult(provider, {
           matches: [],
           durationMs: Date.now() - startedAt,
@@ -989,7 +1344,11 @@ class MatchAggregator {
           if (!match.sources || !Array.isArray(match.sources) || match.sources.length === 0) continue;
 
           // Reconcile missing kickoff dates from previous sync cache or embedded ID timestamps
-          if (!match.date || match.date === '0' || match.date === 0) {
+          // Replay display dates (e.g. today's date for an undated archive)
+          // are not evidence of its fixture date on a fresh provider refresh.
+          // Keep ordinary live-source kickoff recovery, but leave replay
+          // identity to its original claims or explicit title/calendar data.
+          if ((!match.date || match.date === '0' || match.date === 0) && this._precompute(match).replayClaims.length === 0) {
             if (prevDateMap.has(match.id)) {
               match.date = prevDateMap.get(match.id);
             } else if (Array.isArray(match.aliasIds)) {
@@ -1010,7 +1369,30 @@ class MatchAggregator {
           }
 
         const pre = this._precompute(match);
+        // Fresh calendar replays already trust an explicit validated title day
+        // for identity. Use that same day for sorting, filtering and retention,
+        // rather than retaining a contradictory upstream day or today's display
+        // fallback. Cached claims retain their existing date/precision anchors.
+        if (!Object.prototype.hasOwnProperty.call(match, '_replayIdentityClaims') && pre.replayClaims.length === 1) {
+          const claim = pre.replayClaims[0];
+          const titleDay = _replayTitleDay(String(match.title));
+          if (claim.dayOnly && titleDay && claim.time === titleDay) {
+            match.date = new Date(titleDay).toISOString().slice(0, 10);
+            pre.date = titleDay;
+          }
+        }
         let idx = -1;
+        const uniqueReplay = pre.replayClaims.length > 0;
+        let ambiguousReplay = false;
+        const acceptCandidate = candidate => {
+          if (uniqueReplay && idx !== -1 && idx !== candidate) {
+            idx = -1;
+            ambiguousReplay = true;
+            return true;
+          }
+          idx = candidate;
+          return !uniqueReplay;
+        };
 
         // 1. Fast O(1) Exact ID & Alias check with identity verification
         let candIdx = -1;
@@ -1050,7 +1432,7 @@ class MatchAggregator {
         // Intersect inverted index entries to evaluate ONLY high-probability candidate twins.
         if (idx === -1 && !pre.isChannel) {
           const candidateCounts = new Map();
-          for (const tok of pre.tokens) {
+          for (const tok of pre.indexTokens) {
             if (STOP_WORDS.has(tok) || tok.length < 3) continue;
             const set = tokenIndex.get(tok);
             if (!set) continue;
@@ -1068,12 +1450,11 @@ class MatchAggregator {
               // If fixture has multiple tokens, require at least 2 shared tokens to test
               if (sharedCount < 2 && pre.tokens.size > 2) continue;
               const pCand = finalPres[cIdx];
-              // Date-window early exit: events > 24 hours apart (or 4 days for replays) never merge
-              const maxDateDiff = (pre.isReplay && pCand.isReplay) ? 345600000 : 86400000;
-              if (pre.date && pCand.date && Math.abs(pre.date - pCand.date) > maxDateDiff) continue;
+              // Replay precision/game constraints are checked together below.
+              const maxDateDelta = (pre.category === 'motorsport' || pCand.category === 'motorsport') ? 172800000 : DAY_MS;
+              if (!(pre.isReplay && pCand.isReplay) && pre.date && pCand.date && Math.abs(pre.date - pCand.date) > maxDateDelta) continue;
               if (this._sameEventPre(pCand, pre)) {
-                idx = cIdx;
-                break;
+                if (acceptCandidate(cIdx)) break;
               }
             }
           }
@@ -1082,25 +1463,35 @@ class MatchAggregator {
         // 4. Narrow Category Bucket Fallback
         // Handles unindexed edge-cases (single generic word titles or motorsport races without teams).
         // 24/7 continuous TV channels are indexed strictly in O(1) channelNormIndex and NEVER fall through to linear scans.
-        if (idx === -1 && !pre.isChannel) {
+        if (idx === -1 && !pre.isChannel && !ambiguousReplay) {
           const c2 = this._normalizeCategory(pre.category);
           const rawCat2 = (pre.category || '').toLowerCase();
-          const isCollegeFootball2 = rawCat2 === 'college' || c2 === 'american_football' || c2 === 'football';
+          const isCollege2 = rawCat2 === 'college' || c2 === 'college';
+          const isCollegeParent2 = ['american_football', 'football', 'basketball', 'baseball', 'hockey'].includes(c2);
 
           if (c2 === 'other' || !c2) {
             // 'other' cross-matches with date window guard
             for (let i = finalMatches.length - 1; i >= 0; i--) {
               const pCand = finalPres[i];
               if (pCand.isChannel) continue;
-              const maxDateDiff = (pre.isReplay && pCand.isReplay) ? 345600000 : 86400000;
-              if (pre.date && pCand.date && Math.abs(pre.date - pCand.date) > maxDateDiff) continue;
-              if (this._sameEventPre(pCand, pre)) { idx = i; break; }
+              const maxDateDelta = (pre.category === 'motorsport' || pCand.category === 'motorsport') ? 172800000 : DAY_MS;
+              if (!(pre.isReplay && pCand.isReplay) && pre.date && pCand.date && Math.abs(pre.date - pCand.date) > maxDateDelta) continue;
+              if (this._sameEventPre(pCand, pre) && acceptCandidate(i)) break;
             }
           } else {
             const checkedIndices = new Set();
             const bucketsToCheck = [categoryBuckets.get(c2), categoryBuckets.get('other')];
-            if (isCollegeFootball2) {
-              bucketsToCheck.push(categoryBuckets.get('college'), categoryBuckets.get('american_football'), categoryBuckets.get('football'));
+            if (isCollege2) {
+              bucketsToCheck.push(
+                categoryBuckets.get('college'),
+                categoryBuckets.get('american_football'),
+                categoryBuckets.get('football'),
+                categoryBuckets.get('basketball'),
+                categoryBuckets.get('baseball'),
+                categoryBuckets.get('hockey')
+              );
+            } else if (isCollegeParent2) {
+              bucketsToCheck.push(categoryBuckets.get('college'));
             }
 
             for (let bIdx = 0; bIdx < bucketsToCheck.length; bIdx++) {
@@ -1112,19 +1503,19 @@ class MatchAggregator {
                 checkedIndices.add(i);
                 const pCand = finalPres[i];
                 if (pCand.isChannel) continue;
-                const maxDateDiff = (pre.isReplay && pCand.isReplay) ? 345600000 : 86400000;
-                if (pre.date && pCand.date && Math.abs(pre.date - pCand.date) > maxDateDiff) continue;
+                const maxDateDelta = (pre.category === 'motorsport' || pCand.category === 'motorsport') ? 172800000 : DAY_MS;
+                if (!(pre.isReplay && pCand.isReplay) && pre.date && pCand.date && Math.abs(pre.date - pCand.date) > maxDateDelta) continue;
                 if (this._sameEventPre(pCand, pre)) {
-                  idx = i;
-                  break;
+                  if (acceptCandidate(i)) break;
                 }
               }
-              if (idx !== -1) break;
+              if (ambiguousReplay || (!uniqueReplay && idx !== -1)) break;
             }
           }
         }
 
         if (idx === -1) {
+          if (pre.replayClaims.length) match._replayIdentityClaims = _serializeReplayClaims(pre.replayClaims);
           // If a standalone replay match has no date, give it today's date (YYYY-MM-DD)
           // so it sorts at the top of replays and is accessible via date filters/hubs
           if (!match.date && pre.isReplay) {
@@ -1154,7 +1545,7 @@ class MatchAggregator {
 
           // Register in Multi-Token Inverted Index
           if (!pre.isChannel) {
-            for (const tok of pre.tokens) {
+            for (const tok of pre.indexTokens) {
               if (STOP_WORDS.has(tok) || tok.length < 3) continue;
               if (!tokenIndex.has(tok)) tokenIndex.set(tok, new Set());
               tokenIndex.get(tok).add(newIdx);
@@ -1174,6 +1565,8 @@ class MatchAggregator {
         }
 
         const existing = finalMatches[idx];
+        const replayClaims = uniqueReplay
+          ? _mergeReplayClaims(finalPres[idx].replayClaims, pre.replayClaims) : null;
         if (!existing.aliasIds) existing.aliasIds = [];
         const aliasSet = finalAliasSets[idx] || (finalAliasSets[idx] = new Set(existing.aliasIds));
         if (match.id && !aliasSet.has(match.id)) {
@@ -1201,17 +1594,19 @@ class MatchAggregator {
           }
         }
         if (match.popular === '1') existing.popular = '1';
-        if (match.isCustomAi) existing.isCustomAi = true;
-        if (match.customAiSource && !existing.customAiSource) existing.customAiSource = match.customAiSource;
-        if (!existing.poster && match.poster && !match.poster.includes('ppvservices.st') && !match.poster.includes('unique-tournament') && !match.poster.includes('ondemand.st')) existing.poster = match.poster;
+        const isPitSportNonMotorsport = (url) => url && /pitsport/i.test(url) && existing.category !== 'motorsport';
+        if (!existing.poster && match.poster && !match.poster.includes('ppvservices.st') && !match.poster.includes('unique-tournament') && !match.poster.includes('ondemand.st') && !isPitSportNonMotorsport(match.poster)) existing.poster = match.poster;
         if (!existing.logo && match.logo && !match.logo.includes('ppvservices.st') && !match.logo.includes('unique-tournament') && !match.logo.includes('ondemand.st')) existing.logo = match.logo;
-        if (!existing.thumbnail_url && match.thumbnail_url && !match.thumbnail_url.includes('ppvservices.st') && !match.thumbnail_url.includes('unique-tournament') && !match.thumbnail_url.includes('ondemand.st')) existing.thumbnail_url = match.thumbnail_url;
+        if (!existing.thumbnail_url && match.thumbnail_url && !match.thumbnail_url.includes('ppvservices.st') && !match.thumbnail_url.includes('unique-tournament') && !match.thumbnail_url.includes('ondemand.st') && !isPitSportNonMotorsport(match.thumbnail_url)) existing.thumbnail_url = match.thumbnail_url;
         if (existing.category === 'networks' || match.category === 'networks') existing.poster = '';
+        if (existing.category !== 'motorsport' && existing.poster && /pitsport/i.test(existing.poster)) existing.poster = '';
+        if (existing.category !== 'motorsport' && existing.thumbnail_url && /pitsport/i.test(existing.thumbnail_url)) existing.thumbnail_url = '';
+        if (existing.category !== 'motorsport' && existing.background && /pitsport/i.test(existing.background)) existing.background = '';
         // Carry a live score across the merge the same way artwork is carried.
         // A later provider that reports a score wins over an earlier blank.
         if (!existing.score && match.score) existing.score = match.score;
         if (!existing.date && match.date) existing.date = match.date;
-        if (!existing.background && match.background) existing.background = match.background;
+        if (!existing.background && match.background && !isPitSportNonMotorsport(match.background)) existing.background = match.background;
         if (!existing.league && match.league) existing.league = match.league;
         if (!existing.team1 && match.team1) existing.team1 = match.team1;
         else if (existing.team1 && !existing.team1.logo && match.team1 && match.team1.logo) existing.team1.logo = match.team1.logo;
@@ -1268,6 +1663,13 @@ class MatchAggregator {
             channelNormIndex.set(pre.norm, idx);
           }
         }
+        if (replayClaims) {
+          // Title preference must preserve the canonical date and all accepted
+          // replay constraints, including across the 12-hour cache reuse path.
+          finalPres[idx] = { ...finalPres[idx], id: existing.id,
+            date: _parseEventDate(existing.date), replayClaims };
+          existing._replayIdentityClaims = _serializeReplayClaims(replayClaims);
+        }
         }
         if (end < providerMatches.length) await yieldToLoop();
       }
@@ -1282,7 +1684,7 @@ class MatchAggregator {
     // Re-scraping mirrors and archive pages on every server restart
     // or sync burns significant CPU, network, and RAM. Reuse cached replays if they
     // were synced within the last 12 hours.
-    const REPLAY_PROVIDERS = new Set(['replayzone', 'livetv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive']);
+    const REPLAY_PROVIDERS = new Set(['replayzone', 'livetv', 'soccerfull', 'basketballvideo', 'nflvideo', 'fullraces', 'hockeyreplays', 'mlblive', 'leaf_recap']);
     const REPLAY_SYNC_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours
 
     const previousRO = (this.cacheService && typeof this.cacheService.getMatchesReadOnly === 'function')
@@ -1374,7 +1776,34 @@ class MatchAggregator {
       }
     } else {
       // Fast parallel fetching (Render / Local)
-      const results = await Promise.allSettled(providersToQuery.map(p => this._fetchProviderMatches(p)));
+      // A provider that never settles used to hang the whole sync: allSettled waits
+      // forever, CronService.syncing is only cleared in finally, and every later
+      // sync (4-hourly cron and stale-while-revalidate) returns immediately at the
+      // top of runSync(). Observed on production 2026-10-27: sktech never settled,
+      // the sync sat in "running" for 16 h and the catalogue stayed frozen. Bound
+      // each provider so one hang costs that provider's data, not the refresh.
+      const configuredTimeout = Number(process.env.PROVIDER_SYNC_TIMEOUT_MS || 180000);
+      const PROVIDER_SYNC_TIMEOUT_MS = Number.isFinite(configuredTimeout) ? Math.min(2147483647, Math.max(5000, configuredTimeout)) : 180000;
+      const withProviderTimeout = (provider) => {
+        let timer = null;
+        let current = true;
+        const startedAt = Date.now();
+        const limit = new Promise((resolve) => {
+          timer = setTimeout(() => {
+            current = false;
+            const name = (provider && (provider.sourceName || provider.name || provider.id)) || 'unknown';
+            const error = new Error('provider sync timeout');
+            console.warn('[MatchAggregator] provider ' + name + ' exceeded ' + PROVIDER_SYNC_TIMEOUT_MS + 'ms during sync; continuing without it');
+            try { this.providerHealthService?.recordResult(provider, { matches: [], durationMs: Date.now() - startedAt, error }); } catch (_) {}
+            resolve({ status: 'rejected', reason: error });
+          }, PROVIDER_SYNC_TIMEOUT_MS);
+          if (timer && typeof timer.unref === 'function') timer.unref();
+        });
+        const work = this._fetchProviderMatches(provider, () => current).finally(() => { if (timer) clearTimeout(timer); });
+        return Promise.race([work, limit]);
+      };
+
+      const results = await Promise.allSettled(providersToQuery.map(withProviderTimeout));
       for (let index = 0; index < results.length; index++) {
         const promiseResult = results[index];
         if (promiseResult.status === 'fulfilled') {
@@ -1434,7 +1863,7 @@ class MatchAggregator {
       // retention window instead of an open-ended exemption.
       const expiryWindowMs = 24 * 3600 * 1000;
       const replayExpiryWindowMs = REPLAY_RETENTION_DAYS * 24 * 3600 * 1000;
-      const isReplayZone = match.sources && match.sources.some(s => s.source === 'replayzone' || s.source === 'livetv' || s.source === 'soccerfull' || s.source === 'basketballvideo' || s.source === 'nflvideo' || s.source === 'fullraces');
+      const isReplayZone = match.sources && match.sources.some(s => s && (REPLAY_PROVIDERS.has(s.source) || s.source === 'replayzone' || s.source === 'livetv' || s.source === 'soccerfull' || s.source === 'basketballvideo' || s.source === 'nflvideo' || s.source === 'fullraces' || s.source === 'hockeyreplays' || s.source === 'mlblive' || s.source === 'leaf_recap'));
       const windowMs = isReplayZone ? replayExpiryWindowMs : expiryWindowMs;
       return now <= kickoff + windowMs;
     });
@@ -1466,19 +1895,38 @@ class MatchAggregator {
     //   3 past-in-retention kickoff already passed but still inside 24h window
     // Entries within each priority tier retain their original relative order (stable sort).
     try {
-      const CARRY_FORWARD_PROVIDERS = ['daddylive'];
-      const CARRY_FORWARD_MAX = Number(process.env.CARRY_FORWARD_MAX || 600);
+      const CARRY_FORWARD_PROVIDERS = ['daddylive', 'leaf', 'pitsport'];
+      const configuredCarryMax = Number(process.env.CARRY_FORWARD_MAX || 600);
+      const CARRY_FORWARD_MAX = Number.isFinite(configuredCarryMax) ? Math.max(0, Math.trunc(configuredCarryMax)) : 0;
       const nowForCarry = Date.now();
       const retentionMs = 24 * 3600 * 1000;
 
       const usedProvider = (provider) => finalMatches.some((m) =>
         Array.isArray(m.sources) && m.sources.some((s) => s && s.source === provider));
 
-        let previous = [];
-        try {
-          previous = (this.cacheService.getMatchesReadOnly ? this.cacheService.getMatchesReadOnly() : this.cacheService.getMatches()) || [];
-        } catch (_) { previous = []; }
-        const presentIds = new Set(activeMatches.map((m) => m && m.id).filter(Boolean));
+      let previous = [];
+      try {
+        previous = (this.cacheService.getMatchesReadOnly ? this.cacheService.getMatchesReadOnly() : this.cacheService.getMatches()) || [];
+      } catch (_) { previous = []; }
+      // Keep canonical identities separate from aliases. A shared legacy alias
+      // must never overwrite a current canonical ID or select an arbitrary row.
+      const identityKeys = (m) => [...new Set([m && m.id, ...(Array.isArray(m && m.aliasIds) ? m.aliasIds : [])]
+        .filter((id) => id !== null && id !== undefined && String(id).trim() !== '').map(String))];
+      const indexIdentities = (rows) => {
+        const canonical = new Map();
+        const all = new Map();
+        const add = (map, key, row) => {
+          if (!map.has(key)) map.set(key, new Set());
+          map.get(key).add(row);
+        };
+        for (const row of rows) {
+          if (!row || !row.id) continue;
+          add(canonical, String(row.id), row);
+          for (const key of identityKeys(row)) add(all, key, row);
+        }
+        return { canonical, all };
+      };
+      const previousIdentities = indexIdentities(previous);
 
       for (const provider of CARRY_FORWARD_PROVIDERS) {
         // 'Provider answered' is not enough to decide health: a provider can
@@ -1493,10 +1941,24 @@ class MatchAggregator {
         const scheduleBrokeFor = (srcName) => this.providers.some((p) =>
           p && p.sourceName === srcName && p.lastScheduleOk === false);
 
-        if (usedProvider(provider) && !scheduleBrokeFor(provider)) continue; // provider answered fully; nothing to carry
+        // PitSport can legitimately have no active home events. Unlike the
+        // older DaddyLive/Leaf policy, only a confirmed failed PitSport fetch
+        // may resurrect a prior fixture from the bounded 24h snapshot.
+        if (provider === 'pitsport' && !scheduleBrokeFor(provider)) continue;
+
+        // Leaf's live catalog is authoritative even when it is empty. Only a
+        // failed/unverified fetch may retain its previous sources.
+        const leafCatalogOk = provider === 'leaf'
+          ? this.providers.find((p) => p && p.sourceName === 'leaf')?.lastCatalogOk
+          : undefined;
+        if (leafCatalogOk === true) continue;
+
+        if (usedProvider(provider) && !scheduleBrokeFor(provider) && leafCatalogOk !== false) continue; // provider answered fully; nothing to carry
 
         if (scheduleBrokeFor(provider)) {
           console.warn(`[MatchAggregator] ${provider} schedule fetch failed this sync; carrying forward its previous entries.`);
+        } else if (leafCatalogOk === false) {
+          console.warn('[MatchAggregator] leaf catalog fetch failed this sync; carrying forward its previous entries.');
         }
 
         // Priority is pure per-entry data: decorate once (Schwartzian transform)
@@ -1504,7 +1966,7 @@ class MatchAggregator {
         // the O(N log N) comparator calls.
         const _priority = (m) => {
           const rawDate = m.date;
-          const isChannelOrNetwork = m.category === 'networks' || Boolean(m.isChannel) || Boolean(m.is247) || (typeof m.id === 'string' && (m.id.startsWith('cdn_ch_') || m.id.startsWith('dlv_ch_') || m.id.startsWith('sktech_ch_') || m.id.startsWith('vavoo_ch_')));
+          const isChannelOrNetwork = m.category === 'networks' || Boolean(m.isChannel) || Boolean(m.is247) || (typeof m.id === 'string' && (m.id.startsWith('cdn_ch_') || m.id.startsWith('dlv_ch_') || m.id.startsWith('sktech_ch_') || m.id.startsWith('vavoo_ch_') || m.id.startsWith('scorezone_ch_')));
           const isEvergreen = isChannelOrNetwork && (rawDate == null || rawDate === '' || /^0+$/.test(String(rawDate).trim()));
           if (isEvergreen) return { bucket: 2, kickoff: 0 };
           const kickoff = _parseEventDate(rawDate);
@@ -1515,8 +1977,8 @@ class MatchAggregator {
           return { bucket: 3, kickoff };
         };
 
-        const carried = previous.filter((m) => {
-          if (!m || !m.id || presentIds.has(m.id)) return false;
+        const eligiblePrevious = previous.filter((m) => {
+          if (!m || !m.id) return false;
           if (!Array.isArray(m.sources) || !m.sources.some((s) => s && s.source === provider)) return false;
           // Date-less rows are 24/7 channels: evergreen, always keep.
           //
@@ -1526,7 +1988,7 @@ class MatchAggregator {
           // the sentinel explicitly, exactly as catalog.getKickoff does, and only
           // then consult the parser.
           const rawDate = m.date;
-          const isChannelOrNetwork = m.category === 'networks' || Boolean(m.isChannel) || Boolean(m.is247) || (typeof m.id === 'string' && (m.id.startsWith('cdn_ch_') || m.id.startsWith('dlv_ch_') || m.id.startsWith('sktech_ch_') || m.id.startsWith('vavoo_ch_')));
+          const isChannelOrNetwork = m.category === 'networks' || Boolean(m.isChannel) || Boolean(m.is247) || (typeof m.id === 'string' && (m.id.startsWith('cdn_ch_') || m.id.startsWith('dlv_ch_') || m.id.startsWith('sktech_ch_') || m.id.startsWith('vavoo_ch_') || m.id.startsWith('scorezone_ch_')));
           const isEvergreen = isChannelOrNetwork && (rawDate == null || rawDate === '' || /^0+$/.test(String(rawDate).trim()));
           if (isEvergreen) return true;
           const kickoff = _parseEventDate(rawDate);
@@ -1538,17 +2000,69 @@ class MatchAggregator {
           // fixtures survive the cap; other buckets keep insertion order (0).
           if (a.p.bucket === 1) return a.p.kickoff - b.p.kickoff;
           return 0;
-        }).map((d) => d.m).slice(0, CARRY_FORWARD_MAX);
+        }).map((d) => d.m);
+
+        // Resolve against the fresh rows before admitting standalone carry-over
+        // rows. Otherwise an old legacy ID becomes its own canonical match and
+        // hides the fresh (possibly ambiguous) fixtures sharing that ID.
+        const activeIdentities = indexIdentities(activeMatches);
+        const findCarryTarget = (prev) => {
+          const exact = activeIdentities.canonical.get(String(prev.id));
+          let target;
+          if (exact) {
+            if (exact.size !== 1 || previousIdentities.canonical.get(String(prev.id)).size !== 1) return { overlaps: true };
+            [target] = exact;
+          } else {
+            const candidates = new Set();
+            let overlaps = false;
+            for (const key of identityKeys(prev)) {
+              const matches = activeIdentities.all.get(key);
+              if (!matches) continue;
+              overlaps = true;
+              if (matches.size !== 1 || previousIdentities.all.get(key).size !== 1) return { overlaps: true };
+              for (const match of matches) candidates.add(match);
+            }
+            if (candidates.size !== 1) return { overlaps };
+            [target] = candidates;
+          }
+          // The old exact-ID shortcut predates stronger fixture IDs. Carrying a
+          // source must still satisfy event/date/session/channel identity even
+          // when a stale ID has been reused for a different meeting.
+          const before = this._precompute({ ...prev });
+          const current = this._precompute({ ...target });
+          if (!this._sameEventPre({ ...before, id: '' }, { ...current, id: '' })) return { overlaps: true };
+          return { overlaps: true, target };
+        };
+
+        const carried = [];
+        let sourcesCarried = 0;
+        for (const prev of eligiblePrevious) {
+          if (carried.length + sourcesCarried >= CARRY_FORWARD_MAX) break;
+          const { overlaps, target } = findCarryTarget(prev);
+          if (target) {
+            if (Array.isArray(target.sources) && !target.sources.some((s) => s && s.source === provider)) {
+              target.sources.push(...prev.sources.filter((s) => s && s.source === provider).map((s) => ({ ...s })));
+              sourcesCarried++;
+            }
+          } else if (!overlaps && previousIdentities.canonical.get(String(prev.id)).size === 1) {
+            carried.push(prev);
+          }
+        }
 
         if (carried.length > 0) {
           // Clone-on-admit: carried rows are live cache objects, and the
           // backfill/enrichment passes below mutate rows in activeMatches.
           activeMatches.push(...carried.map(cloneRowForSync));
           console.warn(`[MatchAggregator] ${provider} returned nothing this sync; carried forward ${carried.length} entry(ies) from the previous cache.`);
-        } else {
+        } else if (sourcesCarried === 0) {
           console.warn(`[MatchAggregator] ${provider} returned nothing this sync and no valid entries were available to carry forward.`);
         }
-        if (this.providerHealthService) this.providerHealthService.recordCarryForward(provider, carried.length);
+
+        if (sourcesCarried > 0) {
+          console.warn(`[MatchAggregator] ${provider} source backfilled onto ${sourcesCarried} existing active match(es).`);
+        }
+
+        if (this.providerHealthService) this.providerHealthService.recordCarryForward(provider, carried.length + sourcesCarried);
       }
     } catch (carryErr) {
       console.error('[MatchAggregator] Provider carry-forward failed:', carryErr.message);

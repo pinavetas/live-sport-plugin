@@ -14,8 +14,7 @@
     /* ============================================================
        Nuvio Live Sports | Setup console
        Design notes
-       - One accent (brand red). Third-party brands (Discord, Ko-fi)
-         may use their own mark colour only on their own link.
+       - One accent (brand red).
        - Surfaces are separated by 1px hairlines, not drop shadows.
        - One radius family: 12px panels, 8px controls, 10px buttons.
        - No emoji as interface icons; all glyphs are inline SVG.
@@ -46,9 +45,7 @@
       --danger: #ef4444;
 
       /* Third-party brand marks, used only on their own link. */
-      --discord: #5865f2;
-      --kofi: #ff5e5b;
-
+  
       --r-panel: 12px;
       --r-control: 8px;
       --r-btn: 10px;
@@ -380,84 +377,7 @@
       font-weight: 600;
     }
 
-    /* ---------- Collections ---------- */
-
-    .steps {
-      margin: 0;
-      padding: 0 0 0 20px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.75;
-    }
-
-    .steps li { padding-left: 2px; }
-
-    .steps strong { color: var(--text); font-weight: 600; }
-
-    /* ---------- Footer / community ---------- */
-
-    .footer {
-      margin-top: 24px;
-      padding-top: 24px;
-      border-top: 1px solid var(--line);
-    }
-
-    .footer h2 {
-      font-family: var(--font-display);
-      font-weight: 600;
-      font-size: 17px;
-      letter-spacing: -0.01em;
-      margin: 0 0 4px;
-    }
-
-    .footer p {
-      margin: 0 0 16px;
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .link-row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-      margin-bottom: 12px;
-    }
-
-    .link-btn {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 9px;
-      min-height: 46px;
-      padding: 11px 16px;
-      border: 1px solid var(--line);
-      border-radius: var(--r-btn);
-      background: var(--surface);
-      color: var(--text);
-      font-size: 14px;
-      font-weight: 600;
-      text-decoration: none;
-      transition: background-color 160ms ease, border-color 160ms ease;
-    }
-
-    .link-btn:hover { background: var(--surface-2); border-color: var(--line-strong); }
-
-    .link-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-    .link-btn svg { flex: none; }
-
-    .link-discord { background: rgba(88, 101, 242, 0.14); border-color: rgba(88, 101, 242, 0.45); }
-    .link-discord:hover { background: rgba(88, 101, 242, 0.22); border-color: var(--discord); }
-    .link-discord svg { color: var(--discord); }
-
-    .support-link {
-      background: rgba(255, 94, 91, 0.1);
-      border-color: rgba(255, 94, 91, 0.4);
-    }
-
-    .support-link:hover { background: rgba(255, 94, 91, 0.18); border-color: rgba(255, 94, 91, 0.65); }
-
-    /* Sports covered by the replay connection. */
+    /* Pill list (preferred languages). */
     .sport-list {
       display: flex;
       flex-wrap: wrap;
@@ -477,7 +397,7 @@
       font-weight: 500;
     }
 
-    /* QR codes stay collapsed so the panel does not dominate the page. */
+    /* Collapsible <details> blocks (language / replay notes). */
     .crypto-details {
       margin-top: 12px;
       border-top: 1px solid var(--line);
@@ -519,58 +439,6 @@
       opacity: 0.85;
     }
 
-    .crypto-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
-      gap: 8px;
-      margin-top: 12px;
-    }
-
-    .crypto {
-      border: 1px solid var(--line);
-      border-radius: var(--r-control);
-      background: #0d0d11;
-      padding: 9px;
-      min-width: 0;
-      text-align: center;
-    }
-
-    .crypto img {
-      display: block;
-      width: 100%;
-      max-width: 88px;
-      height: auto;
-      margin: 0 auto 7px;
-      border-radius: 5px;
-      border: 1px solid var(--line-strong);
-      aspect-ratio: 1 / 1;
-      object-fit: contain;
-    }
-
-    .crypto .crypto-name {
-      font-size: 10px;
-      font-weight: 400;
-      color: var(--muted);
-      margin-bottom: 4px;
-      line-height: 1.3;
-    }
-
-    .crypto .crypto-short {
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--text);
-      margin-bottom: 6px;
-    }
-
-    .crypto .crypto-addr {
-      font-family: var(--font-mono);
-      font-size: 9.5px;
-      line-height: 1.45;
-      color: var(--muted);
-      overflow-wrap: anywhere;
-      user-select: all;
-    }
-
     .status {
       margin: 10px 0 0;
       font-size: 12.5px;
@@ -590,7 +458,6 @@
       .masthead h1 { font-size: 21px; }
       .panel { padding: 16px; }
       .chip-grid { grid-template-columns: 1fr 1fr; }
-      .link-row { grid-template-columns: 1fr; }
     }
 
     @media (max-width: 360px) {
@@ -621,63 +488,16 @@
 
     <main>
 
-      <!-- 1 · Support -->
-      <section class="panel" aria-labelledby="support-h">
-        <div class="panel-head">
-          <h2 id="support-h">Keep the server running</h2>
-          <p>Support covers the public server and the scrapers behind it.</p>
-        </div>
-
-        <a class="link-btn support-link" href="https://ko-fi.com/rajodedara" target="_blank" rel="noopener noreferrer">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="color: var(--kofi);" aria-hidden="true">
-            <path d="M23.881 8.948c-.773-4.085-4.859-4.593-4.859-4.593H.723c-.604 0-.679.798-.679.798s-.082 7.324-.022 11.822c.164 2.424 2.586 2.672 2.586 2.672s8.267-.023 11.966-.049c2.438-.426 2.683-2.566 2.658-3.734 4.352.24 7.422-2.831 6.649-6.916zm-11.062 3.511c-1.246 1.453-4.011 3.976-4.011 3.976s-.121.119-.31.023c-.076-.057-.108-.09-.108-.09-.443-.441-3.368-3.049-4.034-3.954-.709-.966-1.041-2.7-.091-3.71.951-1.01 3.005-1.086 4.363.407 0 0 1.565-1.782 3.468-.966 1.909.822 1.838 3.197.723 4.314z" />
-          </svg>
-          Support on Ko-fi
-        </a>
-
-        <details class="crypto-details">
-          <summary>Pay with crypto instead</summary>
-          <p class="hint">Tap an address to select it, or scan the QR code from a wallet app.</p>
-          <div class="crypto-grid">
-            <div class="crypto">
-              <img src="/Ethereum.png" alt="Ethereum address QR code">
-              <div class="crypto-short">ETH</div>
-              <div class="crypto-name">Polygon, Arbitrum, Base</div>
-              <div class="crypto-addr" title="Click to select">0x619eA99F0D725BEE8e0CFe9552d5F4099d15724c</div>
-              <button type="button" onclick="copyCryptoAddr('0x619eA99F0D725BEE8e0CFe9552d5F4099d15724c', this)" style="margin-top:6px; background:rgba(255,255,255,0.08); border:1px solid var(--line); color:var(--text); border-radius:12px; padding:3px 8px; font-size:10px; cursor:pointer; font-weight:600; display:inline-flex; align-items:center; gap:4px;">
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                <span>Copy</span>
-              </button>
-            </div>
-            <div class="crypto">
-              <img src="/solana.png" alt="Solana address QR code">
-              <div class="crypto-short">SOL</div>
-              <div class="crypto-name">Solana</div>
-              <div class="crypto-addr" title="Click to select">CmuehW4PQn4yyQeXqguEpR3DjXwPPdS9Qqo4W5aWN8UU</div>
-              <button type="button" onclick="copyCryptoAddr('CmuehW4PQn4yyQeXqguEpR3DjXwPPdS9Qqo4W5aWN8UU', this)" style="margin-top:6px; background:rgba(255,255,255,0.08); border:1px solid var(--line); color:var(--text); border-radius:12px; padding:3px 8px; font-size:10px; cursor:pointer; font-weight:600; display:inline-flex; align-items:center; gap:4px;">
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                <span>Copy</span>
-              </button>
-            </div>
-            <div class="crypto">
-              <img src="/bitcoin.png" alt="Bitcoin address QR code">
-              <div class="crypto-short">BTC</div>
-              <div class="crypto-name">Bitcoin</div>
-              <div class="crypto-addr" title="Click to select">bc1q9dd4nflxx8ja0vzy2phzsf8h9tr6590txgd07u</div>
-              <button type="button" onclick="copyCryptoAddr('bc1q9dd4nflxx8ja0vzy2phzsf8h9tr6590txgd07u', this)" style="margin-top:6px; background:rgba(255,255,255,0.08); border:1px solid var(--line); color:var(--text); border-radius:12px; padding:3px 8px; font-size:10px; cursor:pointer; font-weight:600; display:inline-flex; align-items:center; gap:4px;">
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                <span>Copy</span>
-              </button>
-            </div>
-          </div>
-        </details>
-      </section>
-
       <!-- 2 · Sports -->
       <section class="panel" aria-labelledby="sports-h">
         <div class="panel-head">
           <h2 id="sports-h">Sports</h2>
           <p>All enabled by default. Turn off anything you do not follow.</p>
+        </div>
+        <div style="display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;">
+          <button type="button" class="action-link" id="selectAllSports" style="background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0;">All</button>
+          <span style="color: var(--line-strong);">·</span>
+          <button type="button" class="action-link" id="selectNoneSports" style="background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0;">None</button>
         </div>
         <div class="chip-grid" id="sportsGrid">
           <label class="checkbox-label active"><input type="checkbox" value="football" checked> Football</label>
@@ -852,59 +672,7 @@
         </div>
       </section>
 
-\r
-      <!-- 5 · Nuvio Sports Replay Connection -->
-      <section class="panel" aria-labelledby="collections-h">
-        <div class="panel-head">
-          <h2 id="collections-h">Nuvio Sports Replay Connection</h2>
-          <p>Adds a landscape <strong>Sports Replays</strong> row to your Nuvio home screen, with organised replay rows for eight sports. Nothing else to install.</p>
-        </div>
-
-        <ul class="sport-list">
-          <li>Football</li>
-          <li>Motorsport</li>
-          <li>Basketball</li>
-          <li>American Football</li>
-          <li>Baseball</li>
-          <li>Hockey</li>
-          <li>Rugby</li>
-          <li>Tennis</li>
-        </ul>
-
-        <button id="copyCollectionsBtn" class="btn btn-primary">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="9" y="9" width="11" height="11" rx="2" />
-            <path d="M5 15V6a2 2 0 0 1 2-2h9" />
-          </svg>
-          <span id="collectionsBtnLabel">Copy JSON</span>
-        </button>
-
-        <a id="downloadCollectionsBtn" class="btn btn-ghost" href="#" download="nuvio-sports-collections.json">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 3v12" />
-            <path d="m7.5 10.5 4.5 4.5 4.5-4.5" />
-            <path d="M4 20h16" />
-          </svg>
-          <span>Download JSON file</span>
-        </a>
-
-        <p class="hint" style="margin-top:12px">Nuvio imports collections as <strong>JSON text</strong>, not a URL. Use <strong>Copy JSON</strong> and paste it into the app, or <strong>Download JSON file</strong> and open it if you prefer. The URL below is only a fetch link &mdash; open it to copy the raw JSON.</p>
-
-        <ol class="steps">
-          <li>Choose <strong>Copy JSON</strong> (or download the file).</li>
-          <li>In the Nuvio app open <strong>Settings</strong>, then <strong>Collections</strong>, then <strong>Import Collection</strong>.</li>
-          <li>Paste the JSON.</li>
-        </ol>
-
-        <div class="field">
-          <label for="collectionsUrlInput">Fetch URL (for manual copy)</label>
-          <input type="text" id="collectionsUrlInput" class="mono-field" readonly spellcheck="false" autocomplete="off"
-                 title="Click to select the whole link" onclick="this.select()" onfocus="this.select()">
-          <p class="hint">Open this in a browser to copy the raw JSON if the buttons are blocked.</p>
-        </div>
-      </section>
-
-      <!-- 6 · Install (primary action, always last) -->
+      <!-- 5 · Install (primary action, always last) -->
       <section class="panel panel-primary" aria-labelledby="install-h">
         <div class="panel-head">
           <h2 id="install-h">Install add-on</h2>
@@ -940,32 +708,7 @@
         <p class="status" id="installStatus" role="status" aria-live="polite"></p>
       </section>
 
-
-
     </main>
-
-    <!-- Community -->
-    <footer class="footer">
-      <h2>Community</h2>
-      <p>Get setup help, report a broken stream, or follow releases.</p>
-
-      <div class="link-row">
-        <a class="link-btn link-discord" href="https://discord.gg/24BAkjSfSe" target="_blank" rel="noopener noreferrer">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z" />
-          </svg>
-          Discord
-        </a>
-
-        <a class="link-btn" href="https://github.com/rajhodedara/live-sport-plugin" target="_blank" rel="noopener noreferrer">
-          <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-            <path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
-          </svg>
-          GitHub
-        </a>
-      </div>
-    </footer>
-
 
   </div>
 
@@ -973,10 +716,6 @@
     const btn = document.getElementById('installBtn');
     const copyBtn = document.getElementById('copyBtn');
     const manualUrl = document.getElementById('manualUrl');
-    const copyCollectionsBtn = document.getElementById('copyCollectionsBtn');
-    const collectionsUrlInput = document.getElementById('collectionsUrlInput');
-    const downloadCollectionsBtn = document.getElementById('downloadCollectionsBtn');
-    const collectionsBtnLabel = document.getElementById('collectionsBtnLabel');
     const copyBtnLabel = document.getElementById('copyBtnLabel');
     const COPY_LINK_LABEL = 'Copy link for Nuvio app';
     const input = document.getElementById('teams');
@@ -1014,34 +753,35 @@
       console.warn("Could not parse existing config from URL", e);
     }
 
-    // Populate timezones
+    // Store IANA zones so each event uses its own seasonal rules. Labels avoid
+    // fixed offsets, which can differ by event date or browser timezone.
     try {
       const popularTimezones = [
-        { value: 'Pacific/Midway', label: 'Midway Island (GMT-11:00)' },
-        { value: 'Pacific/Honolulu', label: 'Hawaii (GMT-10:00)' },
-        { value: 'America/Anchorage', label: 'Alaska (GMT-09:00)' },
-        { value: 'America/Los_Angeles', label: 'Pacific Time (GMT-08:00)' },
-        { value: 'America/Denver', label: 'Mountain Time (GMT-07:00)' },
-        { value: 'America/Chicago', label: 'Central Time (GMT-06:00)' },
-        { value: 'America/New_York', label: 'Eastern Time (GMT-05:00)' },
-        { value: 'America/Halifax', label: 'Atlantic Time (GMT-04:00)' },
-        { value: 'America/Sao_Paulo', label: 'Brazil (GMT-03:00)' },
-        { value: 'Atlantic/South_Georgia', label: 'Mid-Atlantic (GMT-02:00)' },
-        { value: 'Atlantic/Azores', label: 'Azores (GMT-01:00)' },
-        { value: 'Europe/London', label: 'UK & Ireland (GMT+00:00)' },
-        { value: 'Europe/Paris', label: 'Western Europe (GMT+01:00)' },
-        { value: 'Europe/Athens', label: 'Eastern Europe (GMT+02:00)' },
-        { value: 'Europe/Moscow', label: 'Russia - Moscow (GMT+03:00)' },
-        { value: 'Asia/Dubai', label: 'UAE (GMT+04:00)' },
-        { value: 'Asia/Karachi', label: 'Pakistan (GMT+05:00)' },
-        { value: 'Asia/Kolkata', label: 'India (GMT+05:30)' },
-        { value: 'Asia/Dhaka', label: 'Bangladesh (GMT+06:00)' },
-        { value: 'Asia/Bangkok', label: 'Thailand & Vietnam (GMT+07:00)' },
-        { value: 'Asia/Singapore', label: 'Singapore & Malaysia (GMT+08:00)' },
-        { value: 'Asia/Tokyo', label: 'Japan (GMT+09:00)' },
-        { value: 'Australia/Sydney', label: 'Eastern Australia (GMT+10:00)' },
-        { value: 'Pacific/Noumea', label: 'New Caledonia (GMT+11:00)' },
-        { value: 'Pacific/Auckland', label: 'New Zealand (GMT+12:00)' }
+        { value: 'Pacific/Midway', label: 'Midway Island (Pacific/Midway)' },
+        { value: 'Pacific/Honolulu', label: 'Hawaii (Pacific/Honolulu)' },
+        { value: 'America/Anchorage', label: 'Alaska (America/Anchorage)' },
+        { value: 'America/Los_Angeles', label: 'Pacific Time (America/Los_Angeles)' },
+        { value: 'America/Denver', label: 'Mountain Time (America/Denver)' },
+        { value: 'America/Chicago', label: 'Central Time (America/Chicago)' },
+        { value: 'America/New_York', label: 'Eastern Time (America/New_York)' },
+        { value: 'America/Halifax', label: 'Atlantic Time (America/Halifax)' },
+        { value: 'America/Sao_Paulo', label: 'Brazil (America/Sao_Paulo)' },
+        { value: 'Atlantic/South_Georgia', label: 'Mid-Atlantic (Atlantic/South_Georgia)' },
+        { value: 'Atlantic/Azores', label: 'Azores (Atlantic/Azores)' },
+        { value: 'Europe/London', label: 'UK & Ireland (Europe/London)' },
+        { value: 'Europe/Paris', label: 'Western Europe (Europe/Paris)' },
+        { value: 'Europe/Athens', label: 'Eastern Europe (Europe/Athens)' },
+        { value: 'Europe/Moscow', label: 'Russia - Moscow (Europe/Moscow)' },
+        { value: 'Asia/Dubai', label: 'UAE (Asia/Dubai)' },
+        { value: 'Asia/Karachi', label: 'Pakistan (Asia/Karachi)' },
+        { value: 'Asia/Kolkata', label: 'India (Asia/Kolkata)' },
+        { value: 'Asia/Dhaka', label: 'Bangladesh (Asia/Dhaka)' },
+        { value: 'Asia/Bangkok', label: 'Thailand & Vietnam (Asia/Bangkok)' },
+        { value: 'Asia/Singapore', label: 'Singapore & Malaysia (Asia/Singapore)' },
+        { value: 'Asia/Tokyo', label: 'Japan (Asia/Tokyo)' },
+        { value: 'Australia/Sydney', label: 'Eastern Australia (Australia/Sydney)' },
+        { value: 'Pacific/Noumea', label: 'New Caledonia (Pacific/Noumea)' },
+        { value: 'Pacific/Auckland', label: 'New Zealand (Pacific/Auckland)' }
       ];
 
       const localTz = existingConfig.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -1061,13 +801,8 @@
       if (!matchedLocal && localTz) {
         const option = document.createElement('option');
         option.value = localTz;
-        const date = new Date();
-        const offset = -date.getTimezoneOffset();
-        const sign = offset >= 0 ? '+' : '-';
-        const hours = Math.floor(Math.abs(offset) / 60).toString().padStart(2, '0');
-        const mins = (Math.abs(offset) % 60).toString().padStart(2, '0');
         const loc = localTz.split('/').pop().replace(/_/g, ' ');
-        option.textContent = `${loc} (GMT${sign}${hours}:${mins})`;
+        option.textContent = `${loc} (${localTz})`;
         option.selected = true;
         timezoneSelect.insertBefore(option, timezoneSelect.firstChild);
       }
@@ -1147,7 +882,6 @@
     }
 
     let currentManifestUrl = '';
-    let currentCollectionsUrl = '';
     let effectiveOrigin = window.location.origin;
 
     // Renders the live summary chips from the current selections.
@@ -1190,8 +924,6 @@
       }
 
       let manifestUrl = effectiveOrigin + '/manifest.json';
-      let collectionsUrl = effectiveOrigin + '/collections.json';
-      let downloadUrl = effectiveOrigin + '/api/collections/download';
 
       const config = {};
       if (teams) config.teams = teams;
@@ -1226,32 +958,12 @@
         const base64Str = btoa(unescape(encodeURIComponent(JSON.stringify(config))));
         const encoded = base64Str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         manifestUrl = window.location.origin + '/' + encoded + '/manifest.json';
-        collectionsUrl = window.location.origin + '/' + encoded + '/collections.json';
-        downloadUrl = window.location.origin + '/' + encoded + '/api/collections/download';
-      }
-
-      // Pin the replay scope (and languages) onto the Collections import URL as
-      // well. Every collection row queries its own manifestUrl, so without this
-      // an imported collection would ignore the filter when the URL carries no
-      // config segment.
-      {
-        const colParams = new URLSearchParams();
-        if (config.languages) colParams.set('languages', config.languages);
-        if (config.replayFilter) colParams.set('replayFilter', config.replayFilter);
-        if (config.webStreams) colParams.set('webStreams', config.webStreams);
-        const colQuery = colParams.toString();
-        if (colQuery) collectionsUrl += (collectionsUrl.includes('?') ? '&' : '?') + colQuery;
       }
 
       currentManifestUrl = manifestUrl;
-      currentCollectionsUrl = collectionsUrl;
-      // Keep the download button on the current config too (it carries the
-      // same replay filter / languages as the JSON the Copy button fetches).
-      if (downloadCollectionsBtn) downloadCollectionsBtn.href = downloadUrl;
       // Keep the manual field in sync. It is the guaranteed path on
       // plain-HTTP self-hosted instances where the Clipboard API is unavailable.
       if (manualUrl) manualUrl.value = manifestUrl;
-      if (collectionsUrlInput) collectionsUrlInput.value = collectionsUrl;
 
       renderSummary(selectedSports, selectedLive, selectedReplay, tz, languages, replayFilter, webStreams);
 
@@ -1295,7 +1007,6 @@
     // context (HTTPS or localhost); plain-HTTP LAN instances fall back to the
     // legacy textarea path, where the manual field is the reliable route.
     const hasModernClipboard = !!(navigator.clipboard && window.isSecureContext);
-    if (collectionsBtnLabel && !hasModernClipboard) collectionsBtnLabel.textContent = 'Copy JSON (or select the URL)';
 
     // Restores a button label after a temporary status message.
     function flashLabel(el, message, restore) {
@@ -1324,34 +1035,6 @@
       flashLabel(copyBtnLabel, ok ? 'Copied to clipboard' : 'Copy failed', COPY_LINK_LABEL);
     });
 
-    if (copyCollectionsBtn) {
-      copyCollectionsBtn.addEventListener('click', async (e) => {
-        e.preventDefault();
-        const restoreLabel = collectionsBtnLabel ? collectionsBtnLabel.textContent : 'Copy JSON';
-        if (collectionsBtnLabel) collectionsBtnLabel.textContent = 'Fetching JSON';
-        try {
-          const fetchUrl = currentCollectionsUrl + (currentCollectionsUrl.includes('?') ? '&' : '?') + 't=' + Date.now();
-          const res = await fetch(fetchUrl, { cache: 'no-store' });
-          const jsonText = await res.text();
-          let ok = false;
-          if (hasModernClipboard) {
-            await navigator.clipboard.writeText(jsonText);
-            ok = true;
-          } else {
-            ok = legacyCopy(jsonText);
-          }
-          if (collectionsBtnLabel) collectionsBtnLabel.textContent = ok ? 'Copied to clipboard' : 'Copy failed';
-          setStatus(ok ? 'Collections JSON copied to clipboard.' : 'Copy blocked here. Select the import URL below and copy it manually.', ok ? 'ok' : 'err');
-          setTimeout(() => { if (collectionsBtnLabel) collectionsBtnLabel.textContent = restoreLabel; }, 2200);
-        } catch (_) {
-          const ok = legacyCopy(currentCollectionsUrl);
-          if (collectionsBtnLabel) collectionsBtnLabel.textContent = ok ? 'Copied to clipboard' : 'Copy failed';
-          setStatus(ok ? 'Copied the collections URL instead.' : 'Copy blocked here. Select the import URL below and copy it manually.', ok ? 'ok' : 'err');
-          setTimeout(() => { if (collectionsBtnLabel) collectionsBtnLabel.textContent = restoreLabel; }, 2200);
-        }
-      });
-    }
-
     input.addEventListener('input', updateLink);
     if (madplayUrlInput) madplayUrlInput.addEventListener('input', updateLink);
     timezoneSelect.addEventListener('change', updateLink);
@@ -1369,6 +1052,10 @@
       });
       updateLink();
     }
+    const selectAllSportsBtn = document.getElementById('selectAllSports');
+    if (selectAllSportsBtn) selectAllSportsBtn.addEventListener('click', () => setCheckboxes(checkboxes, true));
+    const selectNoneSportsBtn = document.getElementById('selectNoneSports');
+    if (selectNoneSportsBtn) selectNoneSportsBtn.addEventListener('click', () => setCheckboxes(checkboxes, false));
     const selectAllLiveBtn = document.getElementById('selectAllLive');
     if (selectAllLiveBtn) selectAllLiveBtn.addEventListener('click', () => setCheckboxes(liveSourceCheckboxes, true));
     const selectNoneLiveBtn = document.getElementById('selectNoneLive');
@@ -1439,227 +1126,7 @@
         .catch(() => {});
     }
 
-    // ─── AI Replay Parser Studio ──────────────────────────────────────────────
-    const aiTargetUrl = document.getElementById('aiTargetUrl');
-    const aiGenerateBtn = document.getElementById('aiGenerateBtn');
-    const aiGenerateBtnText = document.getElementById('aiGenerateBtnText');
-    const aiBaseUrl = document.getElementById('aiBaseUrl');
-    const aiApiKey = document.getElementById('aiApiKey');
-    const aiModel = document.getElementById('aiModel');
-    const aiPreviewBox = document.getElementById('aiPreviewBox');
-    const aiPreviewTitle = document.getElementById('aiPreviewTitle');
-    const aiPreviewDetails = document.getElementById('aiPreviewDetails');
-    const aiPreviewList = document.getElementById('aiPreviewList');
-    const aiSaveBtn = document.getElementById('aiSaveBtn');
-    const aiStatusMsg = document.getElementById('aiStatusMsg');
-    const activeParsersList = document.getElementById('activeParsersList');
 
-    let currentGeneratedConfig = null;
-
-    // /api/parser/* only answers direct local requests or callers presenting
-    // PARSER_STUDIO_TOKEN. The token is kept in this browser only.
-    const PARSER_STUDIO_TOKEN_KEY = 'parserStudioToken';
-    function getParserStudioToken() {
-      try { return localStorage.getItem(PARSER_STUDIO_TOKEN_KEY) || ''; } catch (_) { return ''; }
-    }
-    function setParserStudioToken(token) {
-      try {
-        if (token) localStorage.setItem(PARSER_STUDIO_TOKEN_KEY, token);
-        else localStorage.removeItem(PARSER_STUDIO_TOKEN_KEY);
-      } catch (_) {}
-    }
-    // interactive: on 401, ask once for the token and retry (user-initiated actions only).
-    async function studioFetch(url, opts = {}, interactive = false) {
-      const send = () => {
-        const headers = Object.assign({}, opts.headers || {});
-        const token = getParserStudioToken();
-        if (token) headers['x-parser-studio-token'] = token;
-        return fetch(url, Object.assign({}, opts, { headers }));
-      };
-      let res = await send();
-      if (res.status === 401 && interactive) {
-        const token = window.prompt('Parser Studio token (PARSER_STUDIO_TOKEN):', '');
-        if (token && token.trim()) {
-          setParserStudioToken(token.trim());
-          res = await send();
-        }
-      }
-      return res;
-    }
-
-    async function loadActiveParsers() {
-      if (!activeParsersList) return;
-      try {
-        const res = await studioFetch('/api/parser/list');
-        const data = await res.json();
-        if (data.success && Array.isArray(data.parsers) && data.parsers.length > 0) {
-          activeParsersList.innerHTML = data.parsers.map(p => `
-            <div style="display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: rgba(255,255,255,0.03); border-radius: 6px; margin-bottom: 6px;">
-              <div>
-                <strong>${p.displayName || p.name}</strong> 
-                <span style="color: var(--muted); font-size: 11px;">(${p.category} · ${p.baseUrl})</span>
-              </div>
-              <button type="button" class="action-link" onclick="deleteCustomParser('${p.name}')" style="background: none; border: none; color: #f87171; cursor: pointer; font-size: 12px;">Eliminar 🗑️</button>
-            </div>
-          `).join('');
-        } else {
-          activeParsersList.innerHTML = '<span style="color: var(--muted);">No hay parsers personalizados creados aún.</span>';
-        }
-      } catch (_) {
-        activeParsersList.innerHTML = '<span style="color: var(--muted);">No se pudieron cargar los parsers.</span>';
-      }
-    }
-
-    window.deleteCustomParser = async function(name) {
-      if (!confirm(`¿Eliminar parser '${name}'?`)) return;
-      try {
-        const res = await studioFetch(`/api/parser/${encodeURIComponent(name)}`, { method: 'DELETE' }, true);
-        const data = await res.json();
-        if (data.success) {
-          loadActiveParsers();
-        } else {
-          alert('Error: ' + data.error);
-        }
-      } catch (e) {
-        alert('Error: ' + e.message);
-      }
-    };
-
-    if (aiGenerateBtn) {
-      aiGenerateBtn.addEventListener('click', async () => {
-        const url = (aiTargetUrl ? aiTargetUrl.value : '').trim();
-        if (!url || !url.startsWith('http')) {
-          alert('Por favor introduce una URL válida que empiece por http:// o https://');
-          return;
-        }
-
-        aiGenerateBtn.disabled = true;
-        if (aiGenerateBtnText) aiGenerateBtnText.textContent = '⏳ Analizando con IA...';
-        if (aiStatusMsg) {
-          aiStatusMsg.style.display = 'block';
-          aiStatusMsg.style.color = 'var(--muted)';
-          aiStatusMsg.textContent = 'Descargando HTML, podando árbol DOM y deduciendo selectores CSS con IA...';
-        }
-        if (aiPreviewBox) aiPreviewBox.style.display = 'none';
-
-        try {
-          const aiConfig = {};
-          if (aiBaseUrl && aiBaseUrl.value.trim()) aiConfig.baseUrl = aiBaseUrl.value.trim();
-          if (aiApiKey && aiApiKey.value.trim()) aiConfig.apiKey = aiApiKey.value.trim();
-          if (aiModel && aiModel.value.trim()) aiConfig.model = aiModel.value.trim();
-
-          const res = await studioFetch('/api/parser/generate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, aiConfig })
-          }, true);
-
-          const data = await res.json();
-          if (!data.success) {
-            throw new Error(data.error || 'La generación falló');
-          }
-
-          currentGeneratedConfig = data.providerConfig;
-          if (aiPreviewBox) aiPreviewBox.style.display = 'block';
-          if (aiStatusMsg) aiStatusMsg.style.display = 'none';
-
-          if (aiPreviewTitle) {
-            aiPreviewTitle.textContent = `✓ Parser Validado: ${currentGeneratedConfig.displayName || currentGeneratedConfig.name}`;
-          }
-          if (aiPreviewDetails) {
-            aiPreviewDetails.innerHTML = `<strong>Categoría:</strong> ${currentGeneratedConfig.category} · <strong>Tarjeta:</strong> <code>${currentGeneratedConfig.selectors.matches}</code> · <strong>Partidos encontrados:</strong> ${data.preview.totalFound}`;
-          }
-          if (aiPreviewList && Array.isArray(data.preview.sample)) {
-            aiPreviewList.innerHTML = data.preview.sample.map(m => `
-              <li style="margin-bottom: 4px;"><strong>${m.title}</strong> <a href="${m.link}" target="_blank" style="color: var(--brand); font-size: 11px;">[Enlace]</a></li>
-            `).join('');
-          }
-        } catch (err) {
-          if (aiStatusMsg) {
-            aiStatusMsg.style.display = 'block';
-            aiStatusMsg.style.color = '#f87171';
-            aiStatusMsg.textContent = `Error: ${err.message}`;
-          }
-        } finally {
-          aiGenerateBtn.disabled = false;
-          if (aiGenerateBtnText) aiGenerateBtnText.textContent = '✨ Generar con IA';
-        }
-      });
-    }
-
-    if (aiSaveBtn) {
-      aiSaveBtn.addEventListener('click', async () => {
-        if (!currentGeneratedConfig) return;
-        aiSaveBtn.disabled = true;
-        aiSaveBtn.textContent = 'Guardando...';
-
-        try {
-          const res = await studioFetch('/api/parser/save', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ config: currentGeneratedConfig })
-          }, true);
-
-          const data = await res.json();
-          if (!data.success) throw new Error(data.error || 'Error al guardar');
-
-          aiSaveBtn.textContent = '✓ Guardado y Activo';
-          aiSaveBtn.style.background = '#10b981';
-          loadActiveParsers();
-
-          // Dynamically add a source chip to replaySourcesGrid if not present
-          const grid = document.getElementById('replaySourcesGrid');
-          const sourceSlug = (currentGeneratedConfig.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-          if (grid && !grid.querySelector(`input[value="${sourceSlug}"]`)) {
-            const label = document.createElement('label');
-            label.className = 'checkbox-label active';
-            label.innerHTML = `<input type="checkbox" value="${sourceSlug}" checked> ${currentGeneratedConfig.displayName || currentGeneratedConfig.name}`;
-            grid.appendChild(label);
-            label.querySelector('input').addEventListener('change', (e) => {
-              if (e.target.checked) label.classList.add('active');
-              else label.classList.remove('active');
-              updateLink();
-            });
-            updateLink();
-          }
-
-          setTimeout(() => {
-            aiSaveBtn.disabled = false;
-            aiSaveBtn.textContent = '💾 Activar en Stremio';
-            aiSaveBtn.style.background = '';
-          }, 2500);
-        } catch (err) {
-          alert('Error: ' + err.message);
-          aiSaveBtn.disabled = false;
-          aiSaveBtn.textContent = '💾 Activar en Stremio';
-        }
-      });
-    }
-
-    loadActiveParsers();
-
-    window.copyCryptoAddr = function(text, btn) {
-      const orig = btn.innerHTML;
-      const showSuccess = () => {
-        btn.innerHTML = '<span>✓ Copied!</span>';
-        btn.style.background = '#10b981';
-        btn.style.borderColor = '#10b981';
-        setTimeout(() => {
-          btn.innerHTML = orig;
-          btn.style.background = 'rgba(255,255,255,0.08)';
-          btn.style.borderColor = 'var(--line)';
-        }, 2000);
-      };
-      if (navigator.clipboard && window.isSecureContext) {
-        navigator.clipboard.writeText(text).then(showSuccess).catch(() => {
-          legacyCopy(text);
-          showSuccess();
-        });
-      } else {
-        legacyCopy(text);
-        showSuccess();
-      }
-    };
   </script>
 </body>
 

@@ -1,7 +1,8 @@
 const fs = require('fs');
 const zlib = require('zlib');
 
-jest.mock('undici', () => ({ request: jest.fn() }));
+// ImageService fetches through the guarded transport; stub it to stay offline.
+jest.mock('../src/services/GuardedOutbound', () => ({ guardedRequest: jest.fn() }));
 
 // ImageService runs every fetch target through the SSRF guard, which resolves
 // the hostname. img.test does not resolve, so let the guard pass here and keep
@@ -70,15 +71,15 @@ function mockResponse(buffer, contentType = 'image/png') {
 function loadImageService(env = {}) {
   const saved = {};
   for (const k of Object.keys(env)) { saved[k] = process.env[k]; process.env[k] = env[k]; }
-  let svc, undici;
+  let svc, outbound;
   jest.isolateModules(() => {
-    undici = require('undici');
+    outbound = require('../src/services/GuardedOutbound');
     svc = require('../src/services/ImageService');
   });
   for (const k of Object.keys(env)) {
     if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
   }
-  return { svc, request: undici.request };
+  return { svc, request: outbound.guardedRequest };
 }
 
 const MB = 1024 * 1024;
