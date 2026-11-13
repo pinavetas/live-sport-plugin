@@ -16,7 +16,8 @@ require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
 const { getRouter } = require('stremio-addon-sdk');
-const { createProxyMiddleware } = require('http-proxy-middleware');
+// ESM-only library, imported on first use (see src/lazyProxyMiddleware.js).
+const { createProxyMiddleware } = require('./lazyProxyMiddleware');
 const resolverProxyEvents = require('./services/ResolverProxyEvents');
 const { resolverTransport } = require('./services/ResolverTransportRuntime');
 const child_process = require('child_process');
