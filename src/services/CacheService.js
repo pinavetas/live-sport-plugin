@@ -283,6 +283,18 @@ class CacheService {
     }
   }
 
+  /**
+   * Re-reads the cache file now, bypassing the 1s stat throttle. Used when the
+   * file was replaced from outside this process (the serverless catalog
+   * snapshot restore in src/serverless.js). Keeps the file's own timestamp as
+   * lastFetchTime, so staleness is judged from the original sync.
+   * @returns {boolean} true when a newer snapshot was loaded
+   */
+  reloadFromDisk() {
+    this.lastStatCheck = Date.now();
+    return this._loadDiskCache();
+  }
+
   getMatches() {
     this._ensureLoaded();
     return this._clone(this.cachedMatches);

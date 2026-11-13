@@ -34,7 +34,9 @@ const https = require('https');
 const http = require('http');
 const fs = require('fs');
 const { RESOLVER_PORT, workerOffset } = require('./resolverManager');
-const { IS_SERVERLESS, createColdStartGate } = require('./serverless');
+const {
+  IS_SERVERLESS, createColdStartGate, createCdnCachePolicy, createCatalogSnapshot, installSnapshotOnSync
+} = require('./serverless');
 
 // Removed global User-Agent fix because it causes ECONNRESET on Streamed.pk
 
@@ -57,14 +59,18 @@ app.set('container', container);
 app.set('trust proxy', true);
 app.use(cors());
 
-// Vercel Functions: on a cold start, wait for the first catalog sync before
-// answering catalog/meta/stream, and keep a running sync alive past the
-// response (see src/serverless.js). Long-running servers skip this.
+// Vercel Functions (see src/serverless.js); long-running servers skip this:
+// - CDN stale-while-revalidate for catalog/meta/manifest responses;
+// - a cold instance restores the last catalog snapshot from Vercel Blob, or
+//   waits for the first sync, before answering catalog/meta/stream;
+// - every sync uploads a fresh snapshot and stays alive past the response.
 if (IS_SERVERLESS) {
-  app.use(createColdStartGate({
-    cronService: container.resolve('cronService'),
-    cacheService: container.resolve('cacheService')
-  }));
+  const cronService = container.resolve('cronService');
+  const cacheService = container.resolve('cacheService');
+  const snapshot = createCatalogSnapshot({ cacheService });
+  installSnapshotOnSync({ cronService, cacheService, snapshot });
+  app.use(createCdnCachePolicy());
+  app.use(createColdStartGate({ cronService, cacheService, snapshot }));
 }
 
 // Opt-in access log (LOG_REQUESTS=1): one line per request with client IP,
