@@ -21,11 +21,12 @@ describe('Donation Modal & Pinned Stream Wiring', () => {
     container.resolve('cacheService').setMatches(sampleMatches);
   });
 
-  test('public/index.html contains auto-open logic for #donate and ?donate', () => {
-    const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
-    expect(html).toContain("window.location.hash === '#donate'");
-    expect(html).toContain("document.getElementById('donate-modal')");
-    expect(html).toContain('checkDonateParam');
+  test('the web pages ship no donation modal (donations only via DONATION_URL)', () => {
+    for (const page of ['configure.html', 'live.html', 'status.html']) {
+      const html = fs.readFileSync(path.join(__dirname, '..', 'public', page), 'utf8');
+      expect(html).not.toContain('donate-modal');
+      expect(html).not.toContain('checkDonateParam');
+    }
   });
 
   test('handleStream does not pin a donation link when DONATION_URL is unset', async () => {

@@ -81,7 +81,7 @@ describe('ProviderHealthService', () => {
 describe('provider health dashboard wiring', () => {
   const fs = require('fs');
   const path = require('path');
-  const home = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  const live = fs.readFileSync(path.join(__dirname, '..', 'public', 'live.html'), 'utf8');
   const configure = fs.readFileSync(path.join(__dirname, '..', 'public', 'configure.html'), 'utf8');
   const index = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.js'), 'utf8');
 
@@ -97,8 +97,12 @@ describe('provider health dashboard wiring', () => {
     expect(index).toMatch(/app\.get\('\/status'[\s\S]*?status\.html/);
   });
 
-  test('dashboard is no longer rendered by the home or configure pages', () => {
-    for (const page of [home, configure]) {
+  test('live page is served at /live', () => {
+    expect(index).toMatch(/app\.get\('\/live'[\s\S]*?live\.html/);
+  });
+
+  test('dashboard is not rendered by the live or configure pages', () => {
+    for (const page of [live, configure]) {
       expect(page).not.toContain('providerHealthPanel');
       expect(page).not.toContain("fetch('/api/provider-health'");
     }

@@ -1556,7 +1556,7 @@ async function handleStream(type, id, config) {
     return /youtube\.com|youtu\.be/i.test(external);
   };
   const isDirectRow = (row) => isYoutubeRow(row) ||
-    (typeof row.url === 'string' && row.url.length > 0 && !row.externalUrl && row.name !== 'Nuvio Web Player');
+    (typeof row.url === 'string' && row.url.length > 0 && !row.externalUrl && row.name !== 'Web Player');
   const publicationRows = () => {
     const current = inFlight.flatMap(f => f.settled && Array.isArray(f.value) ? f.value : []);
     const prematch = suppressPreMatchTeamChannels(current, match);
@@ -1749,7 +1749,7 @@ async function handleStream(type, id, config) {
       }
     }
 
-    const isWeb = !isYouTube && (!!s.externalUrl || s.name === 'Nuvio Web Player');
+    const isWeb = !isYouTube && (!!s.externalUrl || s.name === 'Web Player');
     // Fold the title once: the provider-name chain below used to re-lowercase
     // the same title up to ~16 times per stream.
     const sTitleLower = (typeof s.title === 'string' && s.title) ? s.title.toLowerCase() : '';

@@ -5,719 +5,371 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="dark">
-  <meta name="theme-color" content="#0a0a0c">
-  <title>Nuvio Live Sports | Setup</title>
+  <meta name="theme-color" content="#0a0c0f">
+  <title>Live Sports | Setup</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/ui.css">
   <style>
-    /* ============================================================
-       Nuvio Live Sports | Setup console
-       Design notes
-       - One accent (brand red).
-       - Surfaces are separated by 1px hairlines, not drop shadows.
-       - One radius family: 12px panels, 8px controls, 10px buttons.
-       - No emoji as interface icons; all glyphs are inline SVG.
-       ============================================================ */
-
-    :root {
-      --bg: #0a0a0c;
-      --surface: #131318;
-      --surface-2: #191920;
-      --line: rgba(255, 255, 255, 0.08);
-      --line-strong: rgba(255, 255, 255, 0.18);
-
-      --text: #f4f4f5;
-      --muted: #a1a1aa;
-      /* Raised from #767680: the old value measured 4.12:1 on the panel
-         surface, under the 4.5:1 floor for small text. */
-      --faint: #8e8e99;
-
-      --accent: #ef4444;
-      /* Darker accent step for filled surfaces. White on #ef4444 measures
-         3.76:1; on this step it measures 4.83:1, clearing AA for 15px text. */
-      --accent-strong: #dc2626;
-      --accent-soft: rgba(239, 68, 68, 0.12);
-      --accent-line: rgba(239, 68, 68, 0.45);
-
-      --ok: #22c55e;
-      --warn: #f59e0b;
-      --danger: #ef4444;
-
-      /* Third-party brand marks, used only on their own link. */
-  
-      --r-panel: 12px;
-      --r-control: 8px;
-      --r-btn: 10px;
-
-      --font-body: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      --font-display: "Outfit", var(--font-body);
-      --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-
-      --shadow-panel: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+    .setup {
+      display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: var(--space-6);
+      max-width: 1320px; margin: 0 auto; padding: var(--space-6);
+      align-items: start;
     }
+    .setup-main { display: grid; gap: var(--space-5); min-width: 0; }
+    .setup-rail { position: sticky; top: calc(var(--topbar-h) + var(--space-6)); display: grid; gap: var(--space-4); }
 
-    * { box-sizing: border-box; }
+    .prefs-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5) var(--space-6); }
+    .prefs-grid .span-2 { grid-column: 1 / -1; }
+    .replay-block { display: grid; gap: var(--space-4); }
+    .replay-sources-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
+    .replay-sources-head .field-label { color: var(--muted); }
+    .advanced { margin-top: var(--space-5); }
 
-    html { -webkit-text-size-adjust: 100%; }
-
-    body {
-      margin: 0;
-      padding: 32px 20px 64px;
-      background-color: var(--bg);
-      background-image: radial-gradient(120% 60% at 50% -10%, rgba(239, 68, 68, 0.09), transparent 60%);
-      background-repeat: no-repeat;
-      color: var(--text);
-      font-family: var(--font-body);
-      font-size: 15px;
-      line-height: 1.55;
-      -webkit-font-smoothing: antialiased;
-      display: flex;
-      justify-content: center;
-      min-height: 100vh;
-    }
-
-    .shell {
-      width: 100%;
-      max-width: 620px;
-    }
-
-    /* ---------- Masthead ---------- */
-
-    .masthead {
-      display: flex;
-      align-items: center;
-      gap: 16px;
-      padding-bottom: 24px;
-      margin-bottom: 24px;
-      border-bottom: 1px solid var(--line);
-    }
-
-    .masthead img {
-      width: 56px;
-      height: 56px;
-      border-radius: 14px;
-      border: 1px solid var(--line-strong);
-      object-fit: cover;
-      flex: none;
-    }
-
-    .masthead h1 {
-      font-family: var(--font-display);
-      font-weight: 700;
-      font-size: 26px;
-      line-height: 1.15;
-      letter-spacing: -0.02em;
-      margin: 0 0 4px;
-    }
-
-    .masthead .lede {
-      margin: 0;
-      color: var(--muted);
-      font-size: 14px;
-    }
-
-    /* Scoped to .masthead so it cannot be overridden by .masthead p rules. */
-    .masthead .brandline {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      font-family: var(--font-mono);
-      font-size: 11px;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--faint);
-      margin: 0 0 6px;
-    }
-
-    .brandline .pip {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
+    /* Install card: a scoreboard of the current choices plus the actions. */
+    .install-card { position: relative; overflow: hidden; padding: 0; }
+    .install-card::before {
+      content: ""; position: absolute; inset: 0 0 auto 0; height: 4px;
       background: var(--accent);
-      flex: none;
     }
-    /* ---------- Panels ---------- */
-
-    .panel {
-      background: var(--surface);
-      border: 1px solid var(--line);
-      border-radius: var(--r-panel);
-      padding: 20px;
-      margin-bottom: 16px;
-      box-shadow: var(--shadow-panel);
+    .install-head { padding: var(--space-6) var(--space-6) var(--space-4); }
+    .install-head .eyebrow { margin-bottom: var(--space-2); }
+    .install-head h2 { font: 800 30px/1 var(--font-display); text-transform: uppercase; letter-spacing: 0.02em; }
+    .summary { list-style: none; margin: 0; padding: 0 var(--space-6); }
+    .summary li {
+      display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-4);
+      padding: 9px 0; border-top: 1px solid var(--line);
     }
-
-    .panel-primary {
-      border-color: var(--accent-line);
-      background: linear-gradient(180deg, var(--accent-soft), transparent 120px), var(--surface);
-    }
-
-    .panel-head { margin-bottom: 16px; }
-
-    .panel-head h2 {
-      font-family: var(--font-display);
-      font-weight: 600;
-      font-size: 17px;
-      letter-spacing: -0.01em;
-      margin: 0 0 4px;
-    }
-
-    .panel-head p {
-      margin: 0;
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    /* ---------- Chip grid (sports / sources) ---------- */
-
-    .chip-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
-      gap: 8px;
-    }
-
-    .checkbox-label {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      min-height: 46px;
-      padding: 10px 12px;
-      border: 1px solid var(--line);
-      border-radius: var(--r-control);
-      background: var(--surface-2);
-      color: var(--muted);
-      font-size: 14px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
-      user-select: none;
-    }
-
-    .checkbox-label:hover {
-      background: #1f1f27;
-      border-color: var(--line-strong);
-      color: var(--text);
-    }
-
-    .checkbox-label.active {
-      background: var(--accent-soft);
-      border-color: var(--accent-line);
-      color: var(--text);
-    }
-
-    .checkbox-label:focus-within {
-      outline: 2px solid var(--accent);
-      outline-offset: 2px;
-    }
-
-    input[type="checkbox"] {
-      appearance: none;
-      -webkit-appearance: none;
-      width: 18px;
-      height: 18px;
-      flex: none;
-      margin: 0;
-      border: 1.5px solid var(--line-strong);
-      border-radius: 5px;
-      background: transparent;
-      cursor: pointer;
-      position: relative;
-      transition: background-color 140ms ease, border-color 140ms ease;
-    }
-
-    input[type="checkbox"]:hover { border-color: var(--muted); }
-
-    input[type="checkbox"]:checked {
-      background: var(--accent);
-      border-color: var(--accent);
-    }
-
-    input[type="checkbox"]:checked::after {
-      content: "";
-      position: absolute;
-      left: 5px;
-      top: 1.5px;
-      width: 4px;
-      height: 8px;
-      border: solid #fff;
-      border-width: 0 2px 2px 0;
-      transform: rotate(45deg);
-    }
-
-    /* ---------- Fields ---------- */
-
-    .field { margin-top: 16px; }
-
-    .field:first-of-type { margin-top: 0; }
-
-    .field > label {
-      display: block;
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--text);
-      margin-bottom: 7px;
-    }
-
-    .hint {
-      margin: 7px 0 0;
-      font-size: 12px;
-      color: var(--faint);
-    }
-
-    input[type="text"],
-    select {
-      width: 100%;
-      min-height: 46px;
-      padding: 11px 13px;
-      background: #0d0d11;
-      border: 1px solid var(--line);
-      border-radius: var(--r-control);
-      color: var(--text);
-      font-size: 15px;
-      font-family: var(--font-body);
-      transition: border-color 160ms ease, box-shadow 160ms ease;
-    }
-
-    input[type="text"]::placeholder { color: var(--faint); }
-
-    input[type="text"]:focus,
-    select:focus {
-      outline: none;
-      border-color: var(--accent);
-      box-shadow: 0 0 0 3px var(--accent-soft);
-    }
-
-    select {
-      cursor: pointer;
-      appearance: none;
-      -webkit-appearance: none;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5l5-5' fill='none' stroke='%23a1a1aa' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-      background-repeat: no-repeat;
-      background-position: right 14px center;
-      padding-right: 38px;
-    }
-
-    select option { background: #16161c; color: var(--text); }
-
-    .mono-field {
-      font-family: var(--font-mono);
-      font-size: 12.5px;
-      letter-spacing: 0.01em;
-    }
-
-    /* ---------- Buttons ---------- */
-
-    .btn {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 9px;
-      width: 100%;
-      min-height: 50px;
-      padding: 13px 18px;
-      border: 1px solid transparent;
-      border-radius: var(--r-btn);
-      font-family: var(--font-display);
-      font-size: 15px;
-      font-weight: 600;
-      letter-spacing: 0.01em;
-      text-align: center;
-      text-decoration: none;
-      cursor: pointer;
-      transition: background-color 160ms ease, border-color 160ms ease, transform 120ms ease;
-    }
-
-    .btn:active { transform: translateY(1px); }
-
-    .btn:focus-visible {
-      outline: 2px solid var(--accent);
-      outline-offset: 2px;
-    }
-
-    .btn svg { flex: none; }
-
-    .btn-primary {
-      background: var(--accent-strong);
-      color: #fff;
-    }
-
-    .btn-primary:hover { background: #b91c1c; }
-
-    .btn-ghost {
-      background: var(--surface-2);
-      border-color: var(--line-strong);
-      color: var(--text);
-    }
-
-    .btn-ghost:hover { background: #1f1f27; border-color: var(--muted); }
-
-    .btn + .btn { margin-top: 10px; }
-
-    /* ---------- Config summary ---------- */
-
-    .summary {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px 14px;
-      margin: 0 0 16px;
-      padding: 0;
-      list-style: none;
-      font-family: var(--font-mono);
-      font-size: 11.5px;
-      letter-spacing: 0.04em;
-      color: var(--muted);
-      text-transform: uppercase;
-    }
-
-    .summary li { display: inline-flex; align-items: center; gap: 7px; }
-
-    .summary b {
-      color: var(--text);
-      font-weight: 600;
-    }
-
-    /* Pill list (preferred languages). */
-    .sport-list {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin: 0 0 16px;
-      padding: 0;
-      list-style: none;
-    }
-
-    .sport-list li {
-      padding: 5px 11px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: var(--surface-2);
-      color: var(--muted);
-      font-size: 12.5px;
-      font-weight: 500;
-    }
-
-    /* Collapsible <details> blocks (language / replay notes). */
-    .crypto-details {
-      margin-top: 12px;
-      border-top: 1px solid var(--line);
-      padding-top: 12px;
-    }
-
-    .crypto-details > summary {
-      cursor: pointer;
-      font-size: 15px;
-      font-weight: 600;
-      color: #ffffff;
-      list-style: none;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      padding: 8px 0;
-      transition: opacity 160ms ease;
-    }
-
-    .crypto-details > summary::-webkit-details-marker { display: none; }
-
-    .crypto-details > summary::after {
-      content: "";
-      width: 8px;
-      height: 8px;
-      border-right: 1.8px solid currentColor;
-      border-bottom: 1.8px solid currentColor;
-      transform: rotate(45deg);
-      transition: transform 160ms ease;
-      flex: none;
-      margin-top: -3px;
-    }
-
-    .crypto-details[open] > summary::after { transform: rotate(225deg); margin-top: 3px; }
-
-    .crypto-details > summary:hover {
-      color: #ffffff;
-      opacity: 0.85;
-    }
-
-    .status {
-      margin: 10px 0 0;
-      font-size: 12.5px;
-      min-height: 18px;
-      color: var(--muted);
-    }
-
+    .summary li span { color: var(--faint); font: 700 12px/1.2 var(--font-display); letter-spacing: 0.14em; text-transform: uppercase; white-space: nowrap; }
+    .summary li b { min-width: 0; overflow: hidden; color: var(--text); font: 600 17px/1.2 var(--font-display); letter-spacing: 0.03em; text-align: right; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .summary li b.is-accent { color: var(--accent); }
+    .install-actions { display: grid; gap: var(--space-3); padding: var(--space-5) var(--space-6) var(--space-6); border-top: 1px solid var(--line); background: var(--bg-raise); }
+    .install-actions .field { margin-top: var(--space-2); }
+    .install-actions .hint { color: var(--faint); font-size: 12.5px; line-height: 1.5; }
+    .status { color: var(--muted); font-size: 13px; }
+    .status:empty { display: none; }
     .status.is-ok { color: var(--ok); }
-    .status.is-err { color: var(--danger); }
+    .status.is-err { color: var(--bad); }
 
-    /* ---------- Responsive ---------- */
-
-    @media (max-width: 560px) {
-      body { padding: 20px 14px 48px; font-size: 14.5px; }
-      .masthead { gap: 13px; }
-      .masthead img { width: 48px; height: 48px; border-radius: 12px; }
-      .masthead h1 { font-size: 21px; }
-      .panel { padding: 16px; }
-      .chip-grid { grid-template-columns: 1fr 1fr; }
+    .rail-link {
+      display: flex; align-items: center; gap: var(--space-3);
+      padding: var(--space-4) var(--space-5);
+      border: 1px solid var(--line); border-radius: var(--radius-lg);
+      background: var(--surface); color: var(--text); text-decoration: none;
+      transition: border-color .15s ease;
     }
+    .rail-link:hover { border-color: var(--line-strong); }
+    .rail-link .t { display: grid; gap: 2px; flex: 1; }
+    .rail-link strong { font: 700 17px/1.1 var(--font-display); letter-spacing: 0.06em; text-transform: uppercase; }
+    .rail-link small { color: var(--muted); font-size: 13px; }
+    .rail-link .arrow { color: var(--accent); width: 20px; height: 20px; }
 
+    /* Mobile install dock: appears when the install card is off screen. */
+    .install-dock {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 70;
+      display: none; align-items: center; gap: var(--space-3);
+      padding: 10px var(--space-4) calc(10px + env(safe-area-inset-bottom));
+      background: rgba(14, 17, 21, 0.94);
+      -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+      border-top: 1px solid var(--line);
+      transform: translateY(110%); transition: transform .25s ease;
+    }
+    .install-dock.is-shown { transform: none; }
+    .install-dock .dock-text { flex: 1; min-width: 0; color: var(--muted); font: 600 14px/1.2 var(--font-display); letter-spacing: 0.08em; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .install-dock .dock-text b { color: var(--text); font-weight: 700; }
+    .install-dock .btn-primary { min-height: 44px; padding: 0 18px; }
+
+    @media (max-width: 1099px) {
+      .setup { grid-template-columns: minmax(0, 1fr); }
+      .setup-rail { position: static; }
+      .install-dock { display: flex; }
+      body { padding-bottom: 76px; }
+    }
+    @media (max-width: 760px) {
+      .setup { padding: var(--space-4); gap: var(--space-4); }
+      .setup-main { gap: var(--space-4); }
+      .prefs-grid { grid-template-columns: minmax(0, 1fr); }
+      .tile-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .install-head { padding: var(--space-5) var(--space-4) var(--space-3); }
+      .summary { padding: 0 var(--space-4); }
+      .install-actions { padding: var(--space-4); }
+    }
     @media (max-width: 360px) {
-      .chip-grid { grid-template-columns: 1fr; }
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      * {
-        animation-duration: 0.001ms !important;
-        animation-iteration-count: 1 !important;
-        transition-duration: 0.001ms !important;
-      }
+      .tile-grid { grid-template-columns: minmax(0, 1fr); }
     }
   </style>
 </head>
 
 <body>
-  <div class="shell">
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Live Sports setup">
+      <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.2v13.6a.8.8 0 0 0 1.2.7l10.6-6.8a.8.8 0 0 0 0-1.4L9.2 4.5A.8.8 0 0 0 8 5.2z"/></svg></span>
+      <span class="brand-word">Live<b>Sports</b></span>
+    </a>
+    <nav class="topnav" aria-label="Site">
+      <a href="/" aria-current="page"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg>Setup</a>
+      <a href="/live"><span class="live-dot" aria-hidden="true"></span>Live</a>
+      <a href="/status"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Status</a>
+    </nav>
+    <span class="spacer"></span>
+    <span class="topbar-meta">Stremio add-on</span>
+  </header>
 
-    <header class="masthead">
-      <img src="/logo.png" alt="Nuvio Live Sports">
-      <div>
-        <p class="brandline"><span class="pip" aria-hidden="true"></span>Nuvio Live Sports</p>
-        <h1>Set up your sports dashboard</h1>
-        <p class="lede">Pick the sports and stream sources you want, then install the add-on.</p>
-      </div>
-    </header>
+  <section class="hero pitch-bg">
+    <div class="hero-inner">
+      <p class="eyebrow">Add-on setup</p>
+      <h1>Build your <em>matchday</em></h1>
+      <p class="lede">Pick the sports and stream sources you follow. Your install link updates as you go.</p>
+    </div>
+  </section>
 
-    <main>
+  <div class="setup">
+    <main class="setup-main">
 
-      <!-- 2 · Sports -->
+      <!-- 01 · Sports -->
       <section class="panel" aria-labelledby="sports-h">
-        <div class="panel-head">
-          <h2 id="sports-h">Sports</h2>
-          <p>All enabled by default. Turn off anything you do not follow.</p>
-        </div>
-        <div style="display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 10px;">
-          <button type="button" class="action-link" id="selectAllSports" style="background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0;">All</button>
-          <span style="color: var(--line-strong);">·</span>
-          <button type="button" class="action-link" id="selectNoneSports" style="background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0;">None</button>
-        </div>
-        <div class="chip-grid" id="sportsGrid">
-          <label class="checkbox-label active"><input type="checkbox" value="football" checked> Football</label>
-          <label class="checkbox-label active"><input type="checkbox" value="basketball" checked> Basketball</label>
-          <label class="checkbox-label active"><input type="checkbox" value="cricket" checked> Cricket</label>
-          <label class="checkbox-label active"><input type="checkbox" value="american_football" checked> NFL</label>
-          <label class="checkbox-label active"><input type="checkbox" value="motorsport" checked> Racing</label>
-          <label class="checkbox-label active"><input type="checkbox" value="hockey" checked> Hockey</label>
-          <label class="checkbox-label active"><input type="checkbox" value="baseball" checked> Baseball</label>
-          <label class="checkbox-label active"><input type="checkbox" value="rugby" checked> Rugby</label>
-          <label class="checkbox-label active"><input type="checkbox" value="college" checked> College</label>
-          <label class="checkbox-label active"><input type="checkbox" value="mma" checked> MMA</label>
-          <label class="checkbox-label active"><input type="checkbox" value="golf" checked> Golf</label>
-          <label class="checkbox-label active"><input type="checkbox" value="tennis" checked> Tennis</label>
-          <label class="checkbox-label active"><input type="checkbox" value="darts" checked> Darts</label>
-          <label class="checkbox-label active"><input type="checkbox" value="other" checked> Other Sports</label>
-        </div>
-      </section>
-
-      <!-- 3 · Stream sources -->
-      <section class="panel" aria-labelledby="sources-h">
-        <div class="panel-head">
-          <h2 id="sources-h">Live stream sources</h2>
-          <p>Fewer sources means faster, more predictable live results.</p>
-        </div>
-        <div id="sourcesGrid">
-          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
-            <span style="font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent);">🔴 Live & 24/7 TV Sources</span>
-            <div style="display: flex; gap: 8px;">
-              <button type="button" class="action-link" id="selectAllLive" style="background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0;">All</button>
-              <span style="color: var(--line-strong);">·</span>
-              <button type="button" class="action-link" id="selectNoneLive" style="background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0;">None</button>
+        <div class="section-head">
+          <div>
+            <div class="section-title"><span class="section-index">01</span><h2 id="sports-h">Sports</h2></div>
+            <p class="section-sub">All on by default. Turn off anything you do not follow.</p>
+          </div>
+          <div class="section-tools">
+            <span class="counter" id="sportsCount" aria-label="Sports selected"></span>
+            <div class="mini-actions" role="group" aria-label="Select sports">
+              <button type="button" id="selectAllSports">All</button>
+              <button type="button" id="selectNoneSports">None</button>
             </div>
           </div>
-          <div class="chip-grid" id="liveSourcesGrid">
-            <label class="checkbox-label active"><input type="checkbox" value="streamedpk" checked> Streamed.pk</label>
-            <label class="checkbox-label active"><input type="checkbox" value="daddylive" checked> DaddyLive</label>
-            <label class="checkbox-label active"><input type="checkbox" value="watchfooty" checked> WatchFooty</label>
-            <label class="checkbox-label active"><input type="checkbox" value="cdnlive" checked> CDNLiveTV</label>
-            <label class="checkbox-label active"><input type="checkbox" value="streamsports99" checked> StreamSports99</label>
-            <label class="checkbox-label active"><input type="checkbox" value="timstreams" checked> TimStreams</label>
-            <label class="checkbox-label active"><input type="checkbox" value="damitv" checked> DamiTV</label>
-            <label class="checkbox-label active"><input type="checkbox" value="ppvst" checked> PPV.st</label>
-            <label class="checkbox-label active"><input type="checkbox" value="sktech" checked> SkTech</label>
-            <label class="checkbox-label active"><input type="checkbox" value="madplay" checked> MadPlay (RBTV+)</label>
-            <label class="checkbox-label active"><input type="checkbox" value="bintv" checked> BINTV</label>
-            <label class="checkbox-label active"><input type="checkbox" value="angulismo" checked> AngulismoTV (ES)</label>
-            <label class="checkbox-label active"><input type="checkbox" value="tdtchannels" checked> TDTChannels (ES)</label>
-            <label class="checkbox-label active"><input type="checkbox" value="nbamonster" checked> NBAMonster</label>
-            <label class="checkbox-label active"><input type="checkbox" value="vipleague" checked> VIPLeague</label>
-            <label class="checkbox-label active"><input type="checkbox" value="strumyk" checked> Strumyk</label>
-          </div>
-
-          <div class="field" style="margin-top: 16px;">
-            <label for="madplayUrl">MadPlay Domain / URL (Dynamic)</label>
-            <input type="text" id="madplayUrl" placeholder="https://jack27eo.mpanrc4imind.my/" autocomplete="off" spellcheck="false">
-            <p class="hint">Host base configurable para MadPlay / RBTV+. Si la web cambia de dominio o rota, actualízalo aquí.</p>
-          </div>
+        </div>
+        <div class="tile-grid" id="sportsGrid">
+          <label class="tile is-on"><input type="checkbox" value="football" checked><span class="tile-ico" data-sport="football"></span><span class="tile-text"><span class="tile-label">Football</span></span><span class="tile-check" aria-hidden="true"></span></label>
+          <label class="tile is-on"><input type="checkbox" value="basketball" checked><span class="tile-ico" data-sport="basketball"></span><span class="tile-text"><span class="tile-label">Basketball</span></span><span class="tile-check" aria-hidden="true"></span></label>
+          <label class="tile is-on"><input type="checkbox" value="cricket" checked><span class="tile-ico" data-sport="cricket"></span><span class="tile-text"><span class="tile-label">Cricket</span></span><span class="tile-check" aria-hidden="true"></span></label>
+          <label class="tile is-on"><input type="checkbox" value="american_football" checked><span class="tile-ico" data-sport="american"></span><span class="tile-text"><span class="tile-label">NFL</span></span><span class="tile-check" aria-hidden="true"></span></label>
+          <label class="tile is-on"><input type="checkbox" value="motorsport" checked><span class="tile-ico" data-sport="motorsport"></span><span class="tile-text"><span class="tile-label">Racing</span></span><span class="tile-check" aria-hidden="true"></span></label>
+          <label class="tile is-on"><input type="checkbox" value="hockey" checked><span class="tile-ico" data-sport="hockey"></span><span class="tile-text"><span class="tile-label">Hockey</span></span><span class="tile-check" aria-hidden="true"></span></label>
+          <label class="tile is-on"><input type="checkbox" value="baseball" checked><span class="tile-ico" data-sport="baseball"></span><span class="tile-text"><span class="tile-label">Baseball</span></span><span class="tile-check" aria-hidden="true"></span></label>
+          <label class="tile is-on"><input type="checkbox" value="rugby" checked><span class="tile-ico" data-sport="rugby"></span><span class="tile-text"><span class="tile-label">Rugby</span></span><span class="tile-check" aria-hidden="true"></span></label>
+          <label class="tile is-on"><input type="checkbox" value="college" checked><span class="tile-ico" data-sport="college"></span><span class="tile-text"><span class="tile-label">College</span></span><span class="tile-check" aria-hidden="true"></span></label>
+          <label class="tile is-on"><input type="checkbox" value="mma" checked><span class="tile-ico" data-sport="mma"></span><span class="tile-text"><span class="tile-label">MMA</span></span><span class="tile-check" aria-hidden="true"></span></label>
+          <label class="tile is-on"><input type="checkbox" value="golf" checked><span class="tile-ico" data-sport="golf"></span><span class="tile-text"><span class="tile-label">Golf</span></span><span class="tile-check" aria-hidden="true"></span></label>
+          <label class="tile is-on"><input type="checkbox" value="tennis" checked><span class="tile-ico" data-sport="tennis"></span><span class="tile-text"><span class="tile-label">Tennis</span></span><span class="tile-check" aria-hidden="true"></span></label>
+          <label class="tile is-on"><input type="checkbox" value="darts" checked><span class="tile-ico" data-sport="darts"></span><span class="tile-text"><span class="tile-label">Darts</span></span><span class="tile-check" aria-hidden="true"></span></label>
+          <label class="tile is-on"><input type="checkbox" value="other" checked><span class="tile-ico" data-sport="other"></span><span class="tile-text"><span class="tile-label">Other sports</span></span><span class="tile-check" aria-hidden="true"></span></label>
         </div>
       </section>
 
-      <!-- 4 · Personalization -->
+      <!-- 02 · Live sources -->
+      <section class="panel" aria-labelledby="sources-h">
+        <div class="section-head">
+          <div>
+            <div class="section-title"><span class="section-index">02</span><h2 id="sources-h">Live sources</h2></div>
+            <p class="section-sub">Live events and 24/7 channels. Fewer sources means faster, more predictable results.</p>
+          </div>
+          <div class="section-tools">
+            <span class="counter" id="liveCount" aria-label="Live sources selected"></span>
+            <div class="mini-actions" role="group" aria-label="Select live sources">
+              <button type="button" id="selectAllLive">All</button>
+              <button type="button" id="selectNoneLive">None</button>
+            </div>
+          </div>
+        </div>
+        <div id="sourcesGrid">
+          <div class="tile-grid" id="liveSourcesGrid">
+            <label class="tile is-on"><input type="checkbox" value="streamedpk" checked><span class="tile-ico" data-provider="streamedpk"></span><span class="tile-text"><span class="tile-label">Streamed.pk</span></span><span class="tile-check" aria-hidden="true"></span></label>
+            <label class="tile is-on"><input type="checkbox" value="daddylive" checked><span class="tile-ico" data-provider="daddylive"></span><span class="tile-text"><span class="tile-label">DaddyLive</span></span><span class="tile-check" aria-hidden="true"></span></label>
+            <label class="tile is-on"><input type="checkbox" value="watchfooty" checked><span class="tile-ico" data-provider="watchfooty"></span><span class="tile-text"><span class="tile-label">WatchFooty</span></span><span class="tile-check" aria-hidden="true"></span></label>
+            <label class="tile is-on"><input type="checkbox" value="cdnlive" checked><span class="tile-ico" data-provider="cdnlive"></span><span class="tile-text"><span class="tile-label">CDNLiveTV</span><span class="tile-sub">24/7 TV</span></span><span class="tile-check" aria-hidden="true"></span></label>
+            <label class="tile is-on"><input type="checkbox" value="streamsports99" checked><span class="tile-ico" data-provider="streamsports99"></span><span class="tile-text"><span class="tile-label">StreamSports99</span></span><span class="tile-check" aria-hidden="true"></span></label>
+            <label class="tile is-on"><input type="checkbox" value="timstreams" checked><span class="tile-ico" data-provider="timstreams"></span><span class="tile-text"><span class="tile-label">TimStreams</span></span><span class="tile-check" aria-hidden="true"></span></label>
+            <label class="tile is-on"><input type="checkbox" value="damitv" checked><span class="tile-ico" data-provider="damitv"></span><span class="tile-text"><span class="tile-label">DamiTV</span></span><span class="tile-check" aria-hidden="true"></span></label>
+            <label class="tile is-on"><input type="checkbox" value="ppvst" checked><span class="tile-ico" data-provider="ppvst"></span><span class="tile-text"><span class="tile-label">PPV.st</span></span><span class="tile-check" aria-hidden="true"></span></label>
+            <label class="tile is-on"><input type="checkbox" value="sktech" checked><span class="tile-ico" data-provider="sktech"></span><span class="tile-text"><span class="tile-label">SkTech</span></span><span class="tile-check" aria-hidden="true"></span></label>
+            <label class="tile is-on"><input type="checkbox" value="madplay" checked><span class="tile-ico" data-provider="madplay" data-label="MadPlay"></span><span class="tile-text"><span class="tile-label">MadPlay</span><span class="tile-sub">RBTV+</span></span><span class="tile-check" aria-hidden="true"></span></label>
+            <label class="tile is-on"><input type="checkbox" value="bintv" checked><span class="tile-ico" data-provider="bintv" data-label="BIN TV"></span><span class="tile-text"><span class="tile-label">BINTV</span></span><span class="tile-check" aria-hidden="true"></span></label>
+            <label class="tile is-on"><input type="checkbox" value="angulismo" checked><span class="tile-ico" data-provider="angulismo" data-label="AngulismoTV"></span><span class="tile-text"><span class="tile-label">AngulismoTV</span><span class="tile-sub">Spain</span></span><span class="tile-check" aria-hidden="true"></span></label>
+            <label class="tile is-on"><input type="checkbox" value="tdtchannels" checked><span class="tile-ico" data-provider="tdtchannels"></span><span class="tile-text"><span class="tile-label">TDTChannels</span><span class="tile-sub">Spain · Free TV</span></span><span class="tile-check" aria-hidden="true"></span></label>
+            <label class="tile is-on"><input type="checkbox" value="nbamonster" checked><span class="tile-ico" data-provider="nbamonster"></span><span class="tile-text"><span class="tile-label">NBAMonster</span></span><span class="tile-check" aria-hidden="true"></span></label>
+            <label class="tile is-on"><input type="checkbox" value="vipleague" checked><span class="tile-ico" data-provider="vipleague" data-label="VIP League"></span><span class="tile-text"><span class="tile-label">VIPLeague</span></span><span class="tile-check" aria-hidden="true"></span></label>
+            <label class="tile is-on"><input type="checkbox" value="strumyk" checked><span class="tile-ico" data-provider="strumyk"></span><span class="tile-text"><span class="tile-label">Strumyk</span></span><span class="tile-check" aria-hidden="true"></span></label>
+          </div>
+
+          <details class="disclosure advanced">
+            <summary>Advanced: MadPlay domain</summary>
+            <div class="disclosure-body">
+              <div class="field">
+                <label for="madplayUrl">MadPlay domain / URL</label>
+                <input type="text" id="madplayUrl" placeholder="https://jack27eo.mpanrc4imind.my/" autocomplete="off" spellcheck="false">
+                <p class="hint">Base host for MadPlay / RBTV+. Update it here if the site moves to a new domain.</p>
+              </div>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <!-- 03 · Preferences -->
       <section class="panel" aria-labelledby="prefs-h">
-        <div class="panel-head">
-          <h2 id="prefs-h">Personalization</h2>
-          <p>Used to order fixtures and label kick-off times for you.</p>
+        <div class="section-head">
+          <div>
+            <div class="section-title"><span class="section-index">03</span><h2 id="prefs-h">Preferences</h2></div>
+            <p class="section-sub">Used to order fixtures, label kick-off times and pick commentary.</p>
+          </div>
         </div>
 
-        <div class="field">
-          <label for="timezone">Match time timezone</label>
-          <select id="timezone"></select>
-          <p class="hint">Kick-off times are displayed in this timezone.</p>
-        </div>
+        <div class="prefs-grid">
+          <div class="field">
+            <label for="timezone">Timezone</label>
+            <select id="timezone"></select>
+            <p class="hint">Kick-off times are shown in this timezone.</p>
+          </div>
 
-        <div class="field">
-          <label for="teams">Favorite teams</label>
-          <input type="text" id="teams" placeholder="Arsenal, Lakers, Ferrari" autocomplete="off" spellcheck="false">
-          <p class="hint">Comma separated. These fixtures are surfaced first.</p>
-        </div>
+          <div class="field">
+            <label for="teams">Favorite teams</label>
+            <input type="text" id="teams" placeholder="Arsenal, Lakers, Ferrari" autocomplete="off" spellcheck="false">
+            <p class="hint">Comma separated. These fixtures are surfaced first.</p>
+          </div>
 
+          <div class="field">
+            <label for="languages">Commentary languages</label>
+            <input type="text" id="languages" placeholder="Spanish, Arabic, Hindi" list="languageOptions" autocomplete="off" spellcheck="false">
+            <datalist id="languageOptions"></datalist>
+            <p class="hint">Comma separated. Names or ISO codes both work (Spanish or es). English is always shown first.</p>
+          </div>
 
-        <div class="field">
-          <label for="languages">Preferred languages</label>
-          <input type="text" id="languages" placeholder="Spanish, Arabic, Hindi" list="languageOptions" autocomplete="off" spellcheck="false">
-          <datalist id="languageOptions"></datalist>
-          <p class="hint">Comma separated. Names or ISO codes both work, for example Spanish or es. English is always shown first.</p>
+          <div class="field">
+            <label for="webStreams">Web streams</label>
+            <select id="webStreams">
+              <option value="enabled">Include web streams</option>
+              <option value="disabled">Hide web streams</option>
+            </select>
+            <p class="hint">Web streams open in an external browser. Hide them to only see native streams.</p>
+          </div>
 
-          <details class="crypto-details" style="margin-top:12px">
+          <details class="disclosure span-2">
             <summary>Which languages appear on streams?</summary>
-            <div style="font-size:12.5px; color: var(--faint); line-height:1.6; margin-top:10px">
-              <p>These are the commentary languages the providers actually serve. English is not listed because it is always shown first.</p>
-              <ul class="sport-list" id="languageList" style="margin:10px 0 4px">
-                <li>Loading&hellip;</li>
-              </ul>
+            <div class="disclosure-body">
+              <p>The commentary languages the providers actually serve. English is not listed because it is always shown first.</p>
+              <ul class="tag-list" id="languageList"><li>Loading&hellip;</li></ul>
               <p>Other languages can still be typed and will be matched, but they are unlikely to appear on any stream.</p>
             </div>
           </details>
         </div>
 
-        <div class="field">
-          <label for="replayFilter">Replay catalog</label>
-          <select id="replayFilter">
-            <option value="all">All replays</option>
-            <option value="mainstream">Mainstream only</option>
-            <option value="disabled">Hide replays</option>
-          </select>
-          <p class="hint">All replays keeps every fixture the providers list. Mainstream only hides the ones nobody outside the local region follows.</p>
-
-          <details class="crypto-details" style="margin-top:12px">
-            <summary>What counts as mainstream?</summary>
-            <div style="font-size:12.5px; color: var(--faint); line-height:1.6; margin-top:10px">
-              <p><strong style="color:var(--text)">Shown (mainstream)</strong></p>
-              <ul class="sport-list" style="margin:8px 0 14px">
-                <li>Premier League</li>
-                <li>La Liga</li>
-                <li>Serie A</li>
-                <li>Bundesliga</li>
-                <li>Champions League</li>
-                <li>NBA</li>
-                <li>NFL</li>
-                <li>MLB</li>
-                <li>NHL</li>
-                <li>Formula 1</li>
-                <li>UFC</li>
-                <li>Wimbledon</li>
-              </ul>
-              <p><strong style="color:var(--text)">Hidden (not mainstream)</strong></p>
-              <ul class="sport-list" style="margin:8px 0 14px">
-                <li>La Liga 2</li>
-                <li>Serie B</li>
-                <li>2. Bundesliga</li>
-                <li>League One / Two</li>
-                <li>Regional &amp; county leagues</li>
-                <li>U-20 / U-21 / youth</li>
-                <li>Reserve &amp; B teams</li>
-                <li>Minor league (AHL, G League)</li>
-              </ul>
-              <p>Judged from the match name and competition, not from a fixed list. Famous clubs and the major US leagues are always kept, and a lower-division or youth fixture is hidden even when a big club is named in it (e.g. a reserve side like &ldquo;Real Madrid Castilla&rdquo;).</p>
+        <p class="group-label">Replays</p>
+        <div class="replay-block">
+          <div class="prefs-grid">
+            <div class="field">
+              <label for="replayFilter">Replay catalog</label>
+              <select id="replayFilter">
+                <option value="all">All replays</option>
+                <option value="mainstream">Mainstream only</option>
+                <option value="disabled">Hide replays</option>
+              </select>
+              <p class="hint">Mainstream only hides the fixtures nobody outside the local region follows.</p>
             </div>
-          </details>
+            <details class="disclosure" style="align-self: start; margin-top: 21px;">
+              <summary>What counts as mainstream?</summary>
+              <div class="disclosure-body">
+                <p><strong style="color: var(--text)">Shown</strong></p>
+                <ul class="tag-list">
+                  <li>Premier League</li><li>La Liga</li><li>Serie A</li><li>Bundesliga</li><li>Champions League</li><li>NBA</li><li>NFL</li><li>MLB</li><li>NHL</li><li>Formula 1</li><li>UFC</li><li>Wimbledon</li>
+                </ul>
+                <p><strong style="color: var(--text)">Hidden</strong></p>
+                <ul class="tag-list is-muted">
+                  <li>La Liga 2</li><li>Serie B</li><li>2. Bundesliga</li><li>League One / Two</li><li>Regional &amp; county leagues</li><li>U-20 / U-21 / youth</li><li>Reserve &amp; B teams</li><li>Minor league (AHL, G League)</li>
+                </ul>
+                <p>Judged from the match name and competition, not from a fixed list. Famous clubs and the major US leagues are always kept, and a lower-division or youth fixture is hidden even when a big club is named in it (e.g. &ldquo;Real Madrid Castilla&rdquo;).</p>
+              </div>
+            </details>
+          </div>
 
-          <!-- Replay & VOD Sources: collapsed if replayFilter is disabled -->
-          <div id="replaySourcesContainer" style="margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line);">
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
-              <span style="font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text);">⏪ Replay & VOD Sources</span>
-              <div style="display: flex; gap: 8px;">
-                <button type="button" class="action-link" id="selectAllReplays" style="background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0;">All</button>
-                <span style="color: var(--line-strong);">·</span>
-                <button type="button" class="action-link" id="selectNoneReplays" style="background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0;">None</button>
+          <!-- Replay & VOD sources: hidden while replays are disabled -->
+          <div id="replaySourcesContainer">
+            <div class="replay-sources-head">
+              <span class="field-label">Replay &amp; VOD sources</span>
+              <div class="section-tools">
+                <span class="counter" id="replayCount" aria-label="Replay sources selected"></span>
+                <div class="mini-actions" role="group" aria-label="Select replay sources">
+                  <button type="button" id="selectAllReplays">All</button>
+                  <button type="button" id="selectNoneReplays">None</button>
+                </div>
               </div>
             </div>
-            <div class="chip-grid" id="replaySourcesGrid">
-              <label class="checkbox-label active"><input type="checkbox" value="replayzone" checked> ReplayZone</label>
-              <label class="checkbox-label active"><input type="checkbox" value="soccerfull" checked> SoccerFull</label>
-              <label class="checkbox-label active"><input type="checkbox" value="fullraces" checked> FullRaces</label>
-              <label class="checkbox-label active"><input type="checkbox" value="basketballvideo" checked> BasketballVideo</label>
-              <label class="checkbox-label active"><input type="checkbox" value="nflvideo" checked> NFLVideo</label>
-              <label class="checkbox-label active"><input type="checkbox" value="hockeyreplays" checked> HockeyReplays</label>
-              <label class="checkbox-label active"><input type="checkbox" value="mlblive" checked> MLBLive</label>
-              <label class="checkbox-label active"><input type="checkbox" value="livetv" checked> LiveTV</label>
+            <div class="tile-grid" id="replaySourcesGrid" style="margin-top: var(--space-3);">
+              <label class="tile is-on"><input type="checkbox" value="replayzone" checked><span class="tile-ico" data-provider="replayzone"></span><span class="tile-text"><span class="tile-label">ReplayZone</span></span><span class="tile-check" aria-hidden="true"></span></label>
+              <label class="tile is-on"><input type="checkbox" value="soccerfull" checked><span class="tile-ico" data-provider="soccerfull"></span><span class="tile-text"><span class="tile-label">SoccerFull</span></span><span class="tile-check" aria-hidden="true"></span></label>
+              <label class="tile is-on"><input type="checkbox" value="fullraces" checked><span class="tile-ico" data-provider="fullraces"></span><span class="tile-text"><span class="tile-label">FullRaces</span></span><span class="tile-check" aria-hidden="true"></span></label>
+              <label class="tile is-on"><input type="checkbox" value="basketballvideo" checked><span class="tile-ico" data-provider="basketballvideo"></span><span class="tile-text"><span class="tile-label">BasketballVideo</span></span><span class="tile-check" aria-hidden="true"></span></label>
+              <label class="tile is-on"><input type="checkbox" value="nflvideo" checked><span class="tile-ico" data-provider="nflvideo"></span><span class="tile-text"><span class="tile-label">NFLVideo</span></span><span class="tile-check" aria-hidden="true"></span></label>
+              <label class="tile is-on"><input type="checkbox" value="hockeyreplays" checked><span class="tile-ico" data-provider="hockeyreplays"></span><span class="tile-text"><span class="tile-label">HockeyReplays</span></span><span class="tile-check" aria-hidden="true"></span></label>
+              <label class="tile is-on"><input type="checkbox" value="mlblive" checked><span class="tile-ico" data-provider="mlblive"></span><span class="tile-text"><span class="tile-label">MLBLive</span></span><span class="tile-check" aria-hidden="true"></span></label>
+              <label class="tile is-on"><input type="checkbox" value="livetv" checked><span class="tile-ico" data-provider="livetv"></span><span class="tile-text"><span class="tile-label">LiveTV</span></span><span class="tile-check" aria-hidden="true"></span></label>
             </div>
           </div>
         </div>
-
-        <div class="field">
-          <label for="webStreams">Web Streams</label>
-          <select id="webStreams">
-            <option value="enabled">Include web streams</option>
-            <option value="disabled">Hide web streams</option>
-          </select>
-          <p class="hint">Web streams open an external browser window. Hide them to only see native streams.</p>
-        </div>
-      </section>
-
-      <!-- 5 · Install (primary action, always last) -->
-      <section class="panel panel-primary" aria-labelledby="install-h">
-        <div class="panel-head">
-          <h2 id="install-h">Install add-on</h2>
-          <p>Your link updates automatically as you change the options above.</p>
-        </div>
-
-        <ul class="summary" id="configSummary"></ul>
-
-        <a href="#" id="installBtn" class="btn btn-primary">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 3v12" />
-            <path d="m7.5 10.5 4.5 4.5 4.5-4.5" />
-            <path d="M4 20h16" />
-          </svg>
-          Install add-on
-        </a>
-
-        <button id="copyBtn" class="btn btn-ghost">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="9" y="9" width="11" height="11" rx="2" />
-            <path d="M5 15V6a2 2 0 0 1 2-2h9" />
-          </svg>
-          <span id="copyBtnLabel">Copy link for Nuvio app</span>
-        </button>
-
-        <div class="field">
-          <label for="manualUrl">Add-on link</label>
-          <input type="text" id="manualUrl" class="mono-field" readonly spellcheck="false" autocomplete="off"
-                 title="Click to select the whole link" onclick="this.select()" onfocus="this.select()">
-          <p class="hint">Select and copy this manually if the button does nothing.</p>
-        </div>
-
-        <p class="status" id="installStatus" role="status" aria-live="polite"></p>
       </section>
 
     </main>
 
+    <aside class="setup-rail">
+      <!-- Install (primary action) -->
+      <section class="panel install-card" aria-labelledby="install-h" id="installPanel">
+        <div class="install-head">
+          <p class="eyebrow">Ready to install</p>
+          <h2 id="install-h">Your add-on</h2>
+        </div>
+
+        <ul class="summary" id="configSummary"></ul>
+
+        <div class="install-actions">
+          <a href="#" id="installBtn" class="btn btn-primary btn-lg btn-block">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7.5 10.5 4.5 4.5 4.5-4.5"/><path d="M4 20h16"/></svg>
+            Install in Stremio
+          </a>
+
+          <button id="copyBtn" class="btn btn-block" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>
+            <span id="copyBtnLabel">Copy manifest link</span>
+          </button>
+
+          <p class="status" id="installStatus" role="status" aria-live="polite"></p>
+
+          <div class="field">
+            <label for="manualUrl">Manifest link</label>
+            <input type="text" id="manualUrl" class="mono-field" readonly spellcheck="false" autocomplete="off"
+                   title="Click to select the whole link" onclick="this.select()" onfocus="this.select()">
+            <p class="hint">Install opens the Stremio app. For other apps, paste this link into their add-on search box.</p>
+          </div>
+        </div>
+      </section>
+
+      <a class="rail-link" href="/live">
+        <span class="live-badge"><span class="live-dot"></span>Live</span>
+        <span class="t"><strong>Watch in the browser</strong><small>Browse what is on now and play it here.</small></span>
+        <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </a>
+    </aside>
   </div>
 
+  <div class="install-dock" id="installDock" aria-hidden="true">
+    <span class="dock-text" id="dockText"></span>
+    <a href="#" id="dockInstall" class="btn btn-primary" tabindex="-1">Install</a>
+  </div>
+
+  <footer class="site-foot">
+    <span>Live Sports &middot; Stremio add-on</span>
+    <span><a href="/live">Live</a> &nbsp;&middot;&nbsp; <a href="/status">Provider status</a></span>
+  </footer>
+
+  <script src="/provider-icons.js"></script>
   <script>
     const btn = document.getElementById('installBtn');
     const copyBtn = document.getElementById('copyBtn');
     const manualUrl = document.getElementById('manualUrl');
     const copyBtnLabel = document.getElementById('copyBtnLabel');
-    const COPY_LINK_LABEL = 'Copy link for Nuvio app';
+    const COPY_LINK_LABEL = 'Copy manifest link';
     const input = document.getElementById('teams');
     const madplayUrlInput = document.getElementById('madplayUrl');
     const checkboxes = document.querySelectorAll('#sportsGrid input[type="checkbox"]');
@@ -728,6 +380,8 @@
     const languagesInput = document.getElementById('languages');
     const replayFilterSelect = document.getElementById('replayFilter');
     const replaySourcesContainer = document.getElementById('replaySourcesContainer');
+    const dockInstall = document.getElementById('dockInstall');
+    const dockText = document.getElementById('dockText');
 
     function syncReplayVisibility() {
       if (!replaySourcesContainer || !replayFilterSelect) return;
@@ -738,6 +392,21 @@
 
     const configSummary = document.getElementById('configSummary');
     const installStatus = document.getElementById('installStatus');
+
+    // Tile state mirrors its checkbox.
+    function paintTile(cb) {
+      const tile = cb.closest('.tile');
+      if (tile) tile.classList.toggle('is-on', cb.checked);
+    }
+
+    // Icons for the tiles (decorative; the page works without them).
+    document.querySelectorAll('.tile-ico[data-sport]').forEach((el) => {
+      if (window.SportIcon) el.innerHTML = window.SportIcon(el.dataset.sport);
+    });
+    document.querySelectorAll('.tile-ico[data-provider]').forEach((el) => {
+      const label = el.dataset.label || (el.closest('.tile').querySelector('.tile-label') || {}).textContent;
+      if (window.ProviderGlyph) el.innerHTML = window.ProviderGlyph(el.dataset.provider, label);
+    });
 
     // Attempt to load existing config from URL
     let existingConfig = {};
@@ -814,6 +483,9 @@
     if (existingConfig.teams) {
       input.value = existingConfig.teams;
     }
+    if (madplayUrlInput && typeof existingConfig.madplayUrl === 'string') {
+      madplayUrlInput.value = existingConfig.madplayUrl;
+    }
 
     // Preferred commentary languages, and the replay-catalog scope. Both are
     // optional; blanks fall back to the defaults (English-first, all replays).
@@ -829,62 +501,32 @@
       webStreamsSelect.value = existingConfig.webStreams === 'disabled' ? 'disabled' : 'enabled';
     }
 
-    if (existingConfig.sports) {
-      if (existingConfig.sports === 'none') {
-        checkboxes.forEach(cb => { cb.checked = false; cb.closest('.checkbox-label').classList.remove('active'); });
-      } else if (existingConfig.sports !== 'all') {
-        const sports = existingConfig.sports.split(',');
-        checkboxes.forEach(cb => {
-          cb.checked = sports.includes(cb.value);
-          if (cb.checked) cb.closest('.checkbox-label').classList.add('active');
-          else cb.closest('.checkbox-label').classList.remove('active');
-        });
-      }
+    // Restores a checkbox group from a saved "all" / "none" / comma list value.
+    function restoreGroup(cbs, saved) {
+      if (!saved || saved === 'all') return;
+      const allowed = saved === 'none' ? [] : saved.split(',');
+      cbs.forEach(cb => { cb.checked = allowed.includes(cb.value); paintTile(cb); });
     }
-
-    if (existingConfig.liveSources) {
-      if (existingConfig.liveSources === 'none') {
-        liveSourceCheckboxes.forEach(cb => { cb.checked = false; cb.closest('.checkbox-label').classList.remove('active'); });
-      } else if (existingConfig.liveSources !== 'all') {
-        const allowed = existingConfig.liveSources.split(',');
-        liveSourceCheckboxes.forEach(cb => {
-          cb.checked = allowed.includes(cb.value);
-          if (cb.checked) cb.closest('.checkbox-label').classList.add('active');
-          else cb.closest('.checkbox-label').classList.remove('active');
-        });
-      }
-    }
-
-    if (existingConfig.replaySources) {
-      if (existingConfig.replaySources === 'none') {
-        replaySourceCheckboxes.forEach(cb => { cb.checked = false; cb.closest('.checkbox-label').classList.remove('active'); });
-      } else if (existingConfig.replaySources !== 'all') {
-        const allowed = existingConfig.replaySources.split(',');
-        replaySourceCheckboxes.forEach(cb => {
-          cb.checked = allowed.includes(cb.value);
-          if (cb.checked) cb.closest('.checkbox-label').classList.add('active');
-          else cb.closest('.checkbox-label').classList.remove('active');
-        });
-      }
-    }
-
+    restoreGroup(checkboxes, existingConfig.sports);
+    restoreGroup(liveSourceCheckboxes, existingConfig.liveSources);
+    restoreGroup(replaySourceCheckboxes, existingConfig.replaySources);
     if (existingConfig.sources && !existingConfig.liveSources && !existingConfig.replaySources) {
-      if (existingConfig.sources === 'none') {
-        sourceCheckboxes.forEach(cb => { cb.checked = false; cb.closest('.checkbox-label').classList.remove('active'); });
-      } else if (existingConfig.sources !== 'all') {
-        const sources = existingConfig.sources.split(',');
-        sourceCheckboxes.forEach(cb => {
-          cb.checked = sources.includes(cb.value);
-          if (cb.checked) cb.closest('.checkbox-label').classList.add('active');
-          else cb.closest('.checkbox-label').classList.remove('active');
-        });
-      }
+      restoreGroup(sourceCheckboxes, existingConfig.sources);
     }
 
     let currentManifestUrl = '';
     let effectiveOrigin = window.location.origin;
 
-    // Renders the live summary chips from the current selections.
+    function paintCounter(id, on, total) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.innerHTML = on + '<span class="of">/' + total + '</span>';
+      el.classList.toggle('is-full', on === total);
+      el.classList.toggle('is-empty', on === 0);
+      el.setAttribute('aria-label', on + ' of ' + total + ' selected');
+    }
+
+    // Renders the scoreboard summary from the current selections.
     function renderSummary(selectedSports, selectedLive, selectedReplay, tz, languages, replayFilter, webStreams) {
       if (!configSummary) return;
       // Values come straight from user input, so escape before interpolating
@@ -892,18 +534,24 @@
       const esc = (s) => String(s == null ? '' : s)
         .replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
       const isReplayDisabled = replayFilter === 'disabled';
+      const count = (on, total) => on === total ? 'All ' + total : on + ' of ' + total;
       const items = [
-        { k: 'Sports', v: selectedSports.length === checkboxes.length ? 'All' : String(selectedSports.length) },
-        { k: 'Live Sources', v: selectedLive.length === liveSourceCheckboxes.length ? 'All' : String(selectedLive.length) },
-        ...(isReplayDisabled ? [] : [{ k: 'Replay Sources', v: selectedReplay.length === replaySourceCheckboxes.length ? 'All' : String(selectedReplay.length) }]),
+        { k: 'Sports', v: count(selectedSports.length, checkboxes.length), hot: selectedSports.length > 0 },
+        { k: 'Live sources', v: count(selectedLive.length, liveSourceCheckboxes.length), hot: selectedLive.length > 0 },
+        { k: 'Replays', v: isReplayDisabled ? 'Hidden' : (replayFilter === 'mainstream' ? 'Mainstream' : 'All') },
+        ...(isReplayDisabled ? [] : [{ k: 'Replay sources', v: count(selectedReplay.length, replaySourceCheckboxes.length) }]),
         { k: 'Timezone', v: tz || 'n/a' },
         { k: 'Languages', v: languages || 'English only' },
-        { k: 'Replays', v: isReplayDisabled ? 'Hidden' : (replayFilter === 'mainstream' ? 'Mainstream' : 'All') },
-        { k: 'Web Streams', v: webStreams === 'disabled' ? 'Hidden' : 'Included' }
+        { k: 'Web streams', v: webStreams === 'disabled' ? 'Hidden' : 'Included' }
       ];
       configSummary.innerHTML = items
-        .map(i => '<li><span>' + esc(i.k) + '</span> <b>' + esc(i.v) + '</b></li>')
+        .map(i => '<li><span>' + esc(i.k) + '</span> <b' + (i.hot ? ' class="is-accent"' : '') + ' title="' + esc(i.v) + '">' + esc(i.v) + '</b></li>')
         .join('');
+
+      paintCounter('sportsCount', selectedSports.length, checkboxes.length);
+      paintCounter('liveCount', selectedLive.length, liveSourceCheckboxes.length);
+      paintCounter('replayCount', selectedReplay.length, replaySourceCheckboxes.length);
+      if (dockText) dockText.innerHTML = '<b>' + selectedSports.length + '</b> sports &middot; <b>' + selectedLive.length + '</b> sources';
     }
 
     function updateLink() {
@@ -915,7 +563,6 @@
       const selectedSports = Array.from(checkboxes).filter(cb => cb.checked).map(cb => cb.value);
       const selectedLive = Array.from(liveSourceCheckboxes).filter(cb => cb.checked).map(cb => cb.value);
       const selectedReplay = Array.from(replaySourceCheckboxes).filter(cb => cb.checked).map(cb => cb.value);
-      const selectedSources = Array.from(sourceCheckboxes).filter(cb => cb.checked).map(cb => cb.value);
       let tz = timezoneSelect.value || Intl.DateTimeFormat().resolvedOptions().timeZone;
       try {
         new Intl.DateTimeFormat('en-US', { timeZone: tz });
@@ -938,7 +585,6 @@
       if (replayFilter && replayFilter !== 'all') config.replayFilter = replayFilter;
       if (webStreams === 'disabled') config.webStreams = 'disabled';
 
-
       if (selectedSports.length < checkboxes.length) {
         config.sports = selectedSports.join(',');
         if (config.sports === '') config.sports = 'none';
@@ -957,7 +603,7 @@
       if (Object.keys(config).length > 0) {
         const base64Str = btoa(unescape(encodeURIComponent(JSON.stringify(config))));
         const encoded = base64Str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-        manifestUrl = window.location.origin + '/' + encoded + '/manifest.json';
+        manifestUrl = effectiveOrigin + '/' + encoded + '/manifest.json';
       }
 
       currentManifestUrl = manifestUrl;
@@ -969,6 +615,7 @@
 
       const installUrl = manifestUrl.replace(/^https?:\/\//, 'stremio://');
       btn.href = installUrl;
+      if (dockInstall) dockInstall.href = installUrl;
     }
 
     // navigator.clipboard only exists in a secure context (HTTPS or http://localhost).
@@ -1002,10 +649,9 @@
       installStatus.className = 'status' + (tone ? ' is-' + tone : '');
     }
 
-    // Pick the copy label that matches this browser's capability, so the button
-    // copy is accurate even before any click. The clipboard API needs a secure
-    // context (HTTPS or localhost); plain-HTTP LAN instances fall back to the
-    // legacy textarea path, where the manual field is the reliable route.
+    // The clipboard API needs a secure context (HTTPS or localhost); plain-HTTP
+    // LAN instances fall back to the legacy textarea path, where the manual
+    // field is the reliable route.
     const hasModernClipboard = !!(navigator.clipboard && window.isSecureContext);
 
     // Restores a button label after a temporary status message.
@@ -1032,24 +678,15 @@
         try { manualUrl.focus(); manualUrl.select(); } catch (err) {}
       }
       setStatus(ok ? 'Link copied to clipboard.' : 'Copy blocked. Select the link below and copy it manually.', ok ? 'ok' : 'err');
-      flashLabel(copyBtnLabel, ok ? 'Copied to clipboard' : 'Copy failed', COPY_LINK_LABEL);
+      flashLabel(copyBtnLabel, ok ? 'Copied' : 'Copy failed', COPY_LINK_LABEL);
     });
 
     input.addEventListener('input', updateLink);
     if (madplayUrlInput) madplayUrlInput.addEventListener('input', updateLink);
     timezoneSelect.addEventListener('change', updateLink);
-    // The two personalization controls must re-derive the addon URL the same
-    // way teams/timezone do; without these listeners typing a language or
-    // changing the replay scope left the copied link on its previous config.
+
     function setCheckboxes(cbs, checked) {
-      cbs.forEach(cb => {
-        cb.checked = checked;
-        const label = cb.closest('.checkbox-label');
-        if (label) {
-          if (checked) label.classList.add('active');
-          else label.classList.remove('active');
-        }
-      });
+      cbs.forEach(cb => { cb.checked = checked; paintTile(cb); });
       updateLink();
     }
     const selectAllSportsBtn = document.getElementById('selectAllSports');
@@ -1065,20 +702,34 @@
     const selectNoneReplaysBtn = document.getElementById('selectNoneReplays');
     if (selectNoneReplaysBtn) selectNoneReplaysBtn.addEventListener('click', () => setCheckboxes(replaySourceCheckboxes, false));
 
+    // The personalization controls must re-derive the addon URL the same way
+    // teams/timezone do; without these listeners the copied link would keep
+    // its previous config.
     if (languagesInput) languagesInput.addEventListener('input', updateLink);
     if (replayFilterSelect) replayFilterSelect.addEventListener('change', updateLink);
     if (webStreamsSelect) webStreamsSelect.addEventListener('change', updateLink);
 
     [...checkboxes, ...sourceCheckboxes].forEach(cb => {
       cb.addEventListener('change', (e) => {
-        const label = e.target.closest('.checkbox-label');
-        if (e.target.checked) label.classList.add('active');
-        else label.classList.remove('active');
+        paintTile(e.target);
         updateLink();
       });
     });
 
     updateLink();
+
+    // Mobile: show the install dock only while the install card is off screen.
+    (function () {
+      const dock = document.getElementById('installDock');
+      const panel = document.getElementById('installPanel');
+      if (!dock || !panel || !('IntersectionObserver' in window)) return;
+      new IntersectionObserver((entries) => {
+        const visible = entries.some((e) => e.isIntersecting);
+        dock.classList.toggle('is-shown', !visible);
+        dock.setAttribute('aria-hidden', String(visible));
+        if (dockInstall) dockInstall.tabIndex = visible ? -1 : 0;
+      }).observe(panel);
+    })();
 
     // Surface the languages the providers actually serve. /api/options derives
     // them from ChannelCountryService server-side, so this list cannot drift
@@ -1094,20 +745,12 @@
 
         const dl = document.getElementById('languageOptions');
         if (dl) {
-          dl.innerHTML = langs.map(l => {
-            const o = document.createElement('option');
-            o.value = l;
-            return o.outerHTML;
-          }).join('');
+          dl.replaceChildren(...langs.map(l => { const o = document.createElement('option'); o.value = l; return o; }));
         }
 
         const list = document.getElementById('languageList');
         if (list) {
-          list.innerHTML = langs.map(l => {
-            const li = document.createElement('li');
-            li.textContent = l;
-            return li.outerHTML;
-          }).join('');
+          list.replaceChildren(...langs.map(l => { const li = document.createElement('li'); li.textContent = l; return li; }));
         }
       } catch (_) {
         /* autocomplete is a nicety; never let it break the page */
@@ -1125,8 +768,6 @@
         })
         .catch(() => {});
     }
-
-
   </script>
 </body>
 

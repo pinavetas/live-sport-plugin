@@ -354,7 +354,7 @@ class TimStreamsProvider extends BaseProvider {
 
     // Always add web fallback
     rows.push(new StreamEntity({
-      name: `Nuvio Web Player`,
+      name: `Web Player`,
       title: `TimStreams (${channel || embed.name}) (Web)`,
       externalUrl: `/watch?url=${encodeURIComponent(embed.url)}&title=${encodeURIComponent(matchTitle || 'Live Event')}`,
       channelName: channel || undefined,

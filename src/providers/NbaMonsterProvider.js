@@ -247,7 +247,7 @@ class NbaMonsterProvider extends BaseProvider {
     }
 
     streams.push(new StreamEntity({
-      name: 'Nuvio Web Player',
+      name: 'Web Player',
       title: `NBAMonster (${label}) (Web)`,
       externalUrl: `/watch?url=${encodeURIComponent(wrapperUrl)}&title=${encodeURIComponent(matchTitle || 'Live Event')}`,
     }));

@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0a0c0f">
+  <title>Live Sports | Live</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/ui.css">
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.7.4/dist/hls.min.js"></script>
+  <style>
+    .live-layout { display: grid; grid-template-columns: 236px minmax(0, 1fr); gap: var(--space-8); max-width: 1480px; margin: 0 auto; padding: var(--space-6); align-items: start; }
+
+    /* ---------- Catalog navigation ---------- */
+    .catnav { position: sticky; top: calc(var(--topbar-h) + var(--space-6)); display: grid; gap: var(--space-5); max-height: calc(100vh - var(--topbar-h) - 48px); overflow-y: auto; padding-right: 4px; scrollbar-width: thin; }
+    .cat-group { display: grid; gap: 2px; }
+    .cat-group-title { margin: 0 0 6px 12px; color: var(--faint); font: 700 12px/1 var(--font-display); letter-spacing: 0.18em; text-transform: uppercase; }
+    .cat-item {
+      position: relative; display: flex; align-items: center; gap: 10px;
+      width: 100%; min-height: 38px; padding: 0 12px;
+      border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--muted);
+      font: 500 14px/1.2 var(--font-sans); text-align: left; cursor: pointer;
+    }
+    .cat-item svg { width: 17px; height: 17px; flex: none; color: var(--faint); }
+    .cat-item:hover { background: var(--surface); color: var(--text); }
+    .cat-item.active { background: var(--surface-2); color: var(--text); font-weight: 600; }
+    .cat-item.active svg { color: var(--accent); }
+    .cat-item.active::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 2px; background: var(--accent); }
+    .cat-item .cat-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cat-item .live-dot { margin: 0 4px 0 auto; }
+
+    .cat-strip { display: none; }
+
+    /* ---------- Board head ---------- */
+    .board-head { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; margin-bottom: var(--space-5); }
+    .board-head h1 { font: 800 clamp(34px, 4.4vw, 54px)/0.95 var(--font-display); text-transform: uppercase; letter-spacing: 0.01em; }
+    .board-head .count { margin-top: 8px; color: var(--muted); font: 600 15px/1 var(--font-display); letter-spacing: 0.12em; text-transform: uppercase; }
+    .board-head .count b { color: var(--text); }
+    .board-tools { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+    .search { position: relative; }
+    .search svg { position: absolute; left: 13px; top: 50%; width: 17px; height: 17px; margin-top: -8.5px; color: var(--faint); pointer-events: none; }
+    .search input {
+      width: 260px; min-height: 42px; padding: 0 14px 0 38px;
+      border: 1px solid var(--line-strong); border-radius: var(--radius-md); background: var(--bg); color: var(--text);
+    }
+    .search input::placeholder { color: var(--faint); }
+    .search input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .seg { display: inline-flex; padding: 3px; gap: 2px; border: 1px solid var(--line-strong); border-radius: var(--radius-md); background: var(--bg); }
+    .seg button { display: inline-grid; place-items: center; width: 36px; height: 34px; border: 0; border-radius: 7px; background: transparent; color: var(--faint); cursor: pointer; }
+    .seg button svg { width: 18px; height: 18px; }
+    .seg button[aria-checked="true"] { background: var(--surface-3); color: var(--text); }
+
+    /* ---------- Match grid ---------- */
+    .match-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 290px), 1fr)); gap: var(--space-4); }
+    .match {
+      position: relative; display: flex; flex-direction: column; min-width: 0;
+      border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface);
+      overflow: hidden; cursor: pointer; text-align: left;
+      transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+    }
+    .match:hover, .match:focus-visible { transform: translateY(-2px); border-color: var(--accent-line); box-shadow: var(--shadow-pop); }
+    .match:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+    .match-media { position: relative; aspect-ratio: 16 / 9; background: linear-gradient(135deg, var(--surface-2), var(--surface-3)); overflow: hidden; }
+    .match-media img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    .match-media .fallback { position: absolute; inset: 0; display: grid; place-items: center; color: var(--line-strong); }
+    .match-media .fallback svg { width: 44px; height: 44px; }
+    .match-play {
+      position: absolute; right: 12px; bottom: 12px;
+      display: grid; place-items: center; width: 44px; height: 44px;
+      border-radius: 50%; background: var(--accent); color: var(--accent-ink);
+      opacity: 0; transform: translateY(6px) scale(.9); transition: opacity .18s ease, transform .18s ease;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
+    }
+    .match-play svg { width: 20px; height: 20px; margin-left: 2px; }
+    .match:hover .match-play, .match:focus-visible .match-play { opacity: 1; transform: none; }
+    .match-body { display: grid; gap: 6px; padding: 12px 14px 14px; }
+    .match-meta { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--faint); font: 700 12px/1 var(--font-display); letter-spacing: 0.12em; text-transform: uppercase; }
+    .match-meta .sport { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .match-meta .sport svg { width: 14px; height: 14px; flex: none; }
+    .match-meta .when { margin-left: auto; flex: none; color: var(--muted); }
+    .match-meta .when.is-soon { color: var(--accent); }
+    .match-title { display: -webkit-box; overflow: hidden; color: var(--text); font: 600 15.5px/1.3 var(--font-sans); -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .match-league { overflow: hidden; color: var(--muted); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+    .match.is-live { border-color: rgba(255, 59, 59, .35); }
+
+    /* List view */
+    .match-grid[data-view="list"] { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+    .match-grid[data-view="list"] .match { flex-direction: row; align-items: center; border-radius: var(--radius-md); }
+    .match-grid[data-view="list"] .match:hover { transform: none; }
+    .match-grid[data-view="list"] .match-media { width: 168px; flex: none; }
+    .match-grid[data-view="list"] .match-play { right: auto; left: 50%; top: 50%; bottom: auto; width: 36px; height: 36px; margin: -18px 0 0 -18px; }
+    .match-grid[data-view="list"] .match-body { flex: 1; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title meta" "league meta"; column-gap: var(--space-5); padding: 10px 18px; }
+    .match-grid[data-view="list"] .match-title { grid-area: title; -webkit-line-clamp: 1; }
+    .match-grid[data-view="list"] .match-league { grid-area: league; }
+    .match-grid[data-view="list"] .match-meta { grid-area: meta; flex-direction: column; align-items: flex-end; gap: 8px; }
+    .match-grid[data-view="list"] .match-meta .when { margin-left: 0; }
+
+    .load-more { grid-column: 1 / -1; justify-self: center; min-width: 220px; margin-top: var(--space-2); }
+    .empty { display: grid; justify-items: start; gap: var(--space-3); padding: var(--space-12) var(--space-8); border: 1px dashed var(--line-strong); border-radius: var(--radius-lg); color: var(--muted); }
+    .empty strong { color: var(--text); font: 700 24px/1 var(--font-display); text-transform: uppercase; letter-spacing: 0.04em; }
+    .empty.is-error strong { color: var(--bad); }
+    .skeleton { aspect-ratio: 16 / 13; border-radius: var(--radius-lg); background: linear-gradient(100deg, var(--surface) 30%, var(--surface-2) 50%, var(--surface) 70%) 0 0 / 300% 100%; animation: shimmer 1.4s linear infinite; }
+    @keyframes shimmer { to { background-position: -150% 0; } }
+
+    /* ---------- Player dialog ---------- */
+    .player-dialog {
+      width: min(1120px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 0;
+      border: 1px solid var(--line-strong); border-radius: var(--radius-lg);
+      background: var(--surface); color: var(--text); box-shadow: var(--shadow-pop);
+      overflow: hidden;
+    }
+    .player-dialog[open] { display: flex; flex-direction: column; }
+    .player-dialog::backdrop { background: rgba(5, 6, 8, .78); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
+    .player-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); padding: var(--space-5) var(--space-5) var(--space-4); border-bottom: 1px solid var(--line); }
+    .player-head .eyebrow { margin-bottom: 6px; }
+    .player-head h2 { font: 800 28px/1 var(--font-display); text-transform: uppercase; letter-spacing: 0.02em; }
+    .player-actions { display: flex; align-items: center; gap: var(--space-2); flex: none; }
+    .auto-row { display: flex; align-items: center; padding: 10px var(--space-5); border-bottom: 1px solid var(--line); background: var(--bg-raise); }
+    .sw { display: inline-flex; align-items: center; gap: 10px; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: 13.5px; cursor: pointer; }
+    .sw-track { position: relative; width: 36px; height: 20px; flex: none; border-radius: 10px; background: var(--surface-3); border: 1px solid var(--line-strong); transition: background-color .15s ease; }
+    .sw-knob { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--muted); transition: transform .15s ease, background-color .15s ease; }
+    .sw[aria-checked="true"] .sw-track { background: var(--accent-soft); border-color: var(--accent-line); }
+    .sw[aria-checked="true"] .sw-knob { transform: translateX(16px); background: var(--accent); }
+    .sw[aria-checked="true"] { color: var(--text); }
+
+    #source-selector { display: none; flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-5); }
+    .player-dialog.is-picking #source-selector { display: block; }
+    .player-dialog.is-picking .player-stage { display: none; }
+    .src-top { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-3); }
+    .src-top h3 { font: 700 20px/1 var(--font-display); text-transform: uppercase; letter-spacing: 0.06em; }
+    .src-count { color: var(--faint); font-size: 13px; }
+    .src-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: var(--space-4); }
+    .src-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: var(--radius-pill); background: transparent; color: var(--muted); font-size: 13px; font-weight: 600; cursor: pointer; }
+    .src-chip small { color: var(--faint); font: 700 12px/1 var(--font-display); }
+    .src-chip:hover { color: var(--text); }
+    .src-chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
+    .src-chip[aria-pressed="true"] small { color: var(--accent-ink); opacity: .7; }
+    .src-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+    .src-row {
+      display: flex; align-items: center; gap: var(--space-3); width: 100%;
+      min-height: 58px; padding: 8px 14px; border: 1px solid var(--line); border-radius: var(--radius-md);
+      background: var(--surface-2); color: var(--text); text-align: left; cursor: pointer;
+    }
+    .src-row:hover { border-color: var(--accent-line); background: var(--surface-3); }
+    .src-row.is-failed { opacity: .55; }
+    .src-main { display: grid; gap: 3px; flex: 1; min-width: 0; }
+    .src-title { display: flex; align-items: center; gap: 8px; min-width: 0; font-weight: 600; font-size: 14.5px; }
+    .src-title > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .src-best { flex: none; padding: 3px 7px; border-radius: 4px; background: var(--accent); color: var(--accent-ink); font: 700 11px/1 var(--font-display); letter-spacing: 0.12em; text-transform: uppercase; }
+    .src-sub { overflow: hidden; color: var(--faint); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+    .src-fail { color: var(--bad); }
+    .src-q { display: flex; align-items: center; gap: 8px; flex: none; }
+    .src-ext { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12.5px; }
+    .src-ext svg { width: 13px; height: 13px; }
+    .src-rate { color: var(--faint); font: 600 13px/1 var(--font-display); letter-spacing: 0.04em; }
+    .qbadge { display: inline-flex; color: var(--muted); }
+    .qbadge svg { width: 38px; height: 21px; }
+    .qbadge.q-4k, .qbadge.q-qhd { color: var(--accent); }
+    .qbadge.q-fhd { color: var(--text); }
+    .src-play { width: 18px; height: 18px; flex: none; color: var(--accent); }
+    .src-extra { display: flex; flex-wrap: wrap; gap: 8px; margin-top: var(--space-4); }
+    .src-extra:empty { display: none; }
+    .src-extra button { min-height: 34px; padding: 0 12px; border: 1px dashed var(--line-strong); border-radius: var(--radius-md); background: transparent; color: var(--muted); font-size: 13px; cursor: pointer; }
+
+    .player-stage { position: relative; aspect-ratio: 16 / 9; max-height: calc(100vh - 220px); background: #000; }
+    .player-stage video { display: block; width: 100%; height: 100%; background: #000; }
+    .loader { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-3); padding: var(--space-6); background: rgba(5, 6, 8, .92); text-align: center; }
+    .loader .loader-icon { display: none; width: 40px; height: 40px; color: var(--warn); }
+    .loader.is-error .spinner { display: none; }
+    .loader.is-error .loader-icon { display: block; }
+    .loader-title { font: 700 24px/1.1 var(--font-display); text-transform: uppercase; letter-spacing: 0.04em; }
+    .loader-detail { max-width: 52ch; color: var(--muted); font-size: 14px; }
+    .loader-detail:empty, .loader-tech:empty { display: none; }
+    .loader-tech { color: var(--faint); font: 12px/1.4 var(--font-mono); }
+    .loader-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-2); margin-top: var(--space-2); }
+    .loader-actions .btn-primary { font-size: 15px; }
+
+    @media (max-width: 900px) {
+      .live-layout { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); padding: var(--space-4); }
+      .catnav { display: none; }
+      .cat-strip {
+        display: flex; gap: 6px; margin: 0 calc(var(--space-4) * -1) var(--space-4); padding: 0 var(--space-4) 4px;
+        overflow-x: auto; scrollbar-width: none; scroll-snap-type: x proximity;
+      }
+      .cat-strip::-webkit-scrollbar { display: none; }
+      .cat-strip .cat-item { width: auto; flex: none; min-height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: var(--radius-pill); scroll-snap-align: start; }
+      .cat-strip .cat-item.active { border-color: var(--accent); background: var(--accent-soft); }
+      .cat-strip .cat-item.active::before { display: none; }
+      .cat-strip .sep { flex: none; width: 1px; margin: 6px 4px; background: var(--line-strong); }
+      .board-tools { width: 100%; }
+      .search { flex: 1; }
+      .search input { width: 100%; }
+    }
+    @media (max-width: 560px) {
+      .match-grid[data-view="list"] .match-media { width: 112px; }
+      .match-grid[data-view="list"] .match-body { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title" "league" "meta"; padding: 8px 12px; }
+      .match-grid[data-view="list"] .match-meta { flex-direction: row; align-items: center; }
+      .match-grid[data-view="list"] .match-meta .when { margin-left: auto; }
+      .player-dialog { width: 100vw; max-width: 100vw; max-height: 100dvh; height: 100dvh; border-radius: 0; border: 0; }
+      .player-head { padding: var(--space-4); }
+      .player-head h2 { font-size: 22px; }
+      .player-stage { max-height: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Live Sports setup">
+      <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.2v13.6a.8.8 0 0 0 1.2.7l10.6-6.8a.8.8 0 0 0 0-1.4L9.2 4.5A.8.8 0 0 0 8 5.2z"/></svg></span>
+      <span class="brand-word">Live<b>Sports</b></span>
+    </a>
+    <nav class="topnav" aria-label="Site">
+      <a href="/"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg>Setup</a>
+      <a href="/live" aria-current="page"><span class="live-dot" aria-hidden="true"></span>Live</a>
+      <a href="/status"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Status</a>
+    </nav>
+    <span class="spacer"></span>
+    <span class="topbar-meta">Watch in the browser</span>
+  </header>
+
+  <div class="live-layout">
+    <nav class="catnav" id="catalogNav" aria-label="Catalogs"><div class="state-msg">Loading catalogs...</div></nav>
+
+    <main class="board">
+      <div class="cat-strip" id="catStrip" aria-label="Catalogs"></div>
+
+      <div class="board-head">
+        <div>
+          <p class="eyebrow" id="catalogEyebrow">On air</p>
+          <h1 id="catalogTitle">Live now</h1>
+          <p class="count" id="catalogCount" aria-live="polite"></p>
+        </div>
+        <div class="board-tools">
+          <label class="search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            <span class="sr-only">Search matches</span>
+            <input type="search" id="searchInput" placeholder="Search matches" autocomplete="off">
+          </label>
+          <div class="seg" role="radiogroup" aria-label="Layout">
+            <button type="button" role="radio" aria-checked="false" data-view="grid" title="Grid"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/></svg></button>
+            <button type="button" role="radio" aria-checked="false" data-view="list" title="List"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M9 6h12M9 12h12M9 18h12"/><path d="M3.5 6h1M3.5 12h1M3.5 18h1"/></svg></button>
+          </div>
+          <button type="button" class="icon-btn" id="reloadBtn" title="Refresh" aria-label="Refresh this catalog"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></button>
+        </div>
+      </div>
+
+      <section aria-label="Matches"><div class="match-grid" id="grid" data-view="grid"></div></section>
+    </main>
+  </div>
+
+  <dialog id="player-dialog" class="player-dialog" aria-labelledby="playerTitle">
+    <div class="player-head">
+      <div>
+        <p class="eyebrow">Now playing</p>
+        <h2 id="playerTitle">Live stream</h2>
+      </div>
+      <div class="player-actions">
+        <button type="button" class="btn btn-sm" id="changeSource" hidden>Change source</button>
+        <button type="button" class="icon-btn" id="close-btn" aria-label="Close player" onclick="closePlayer()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="auto-row">
+      <button type="button" role="switch" aria-checked="false" id="autoNext" class="sw">
+        <span class="sw-track"><span class="sw-knob"></span></span>
+        <span class="sw-label">Switch to the next source automatically if one fails</span>
+      </button>
+    </div>
+    <div id="source-selector">
+      <div class="src-top"><h3>Choose a source</h3><span class="src-count" id="srcCount"></span></div>
+      <div class="src-filters" id="srcFilters" role="group" aria-label="Filter by provider"></div>
+      <ul class="src-list" id="source-buttons"></ul>
+      <div class="src-extra" id="srcExtra"></div>
+    </div>
+    <div class="player-stage" id="video-container">
+      <video id="video" controls autoplay playsinline></video>
+      <div class="loader" id="loader" role="status" aria-live="polite">
+        <div class="spinner"></div>
+        <svg class="loader-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18h.01"/></svg>
+        <div class="loader-title" id="loaderMsg">Connecting to stream...</div>
+        <p class="loader-detail" id="loaderDetail"></p>
+        <p class="loader-tech" id="loaderTech"></p>
+        <div class="loader-actions" id="loaderActions"></div>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="/provider-icons.js"></script>
+  <script>
+    let hls = null;
+    let currentMatches = [];
+    let currentCatalog = null;
+    let nextSkip = 0;
+    let hasMore = false;
+    const PAGE_SIZE = 100;
+
+    // Ask the server for this browser's timezone so kick-off times on the
+    // generated posters match the viewer's clock. Same encoding as the setup page.
+    const BROWSER_CFG = (() => {
+      try {
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        if (!tz) return '';
+        const b64 = btoa(unescape(encodeURIComponent(JSON.stringify({ timezone: tz }))));
+        return '/' + b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      } catch (e) { return ''; }
+    })();
+
+    // Catalog and match names come from the server with decorative emoji; the interface shows words only.
+    const stripEmoji = (v) => String(v || '')
+      .replace(/[\p{Extended_Pictographic}\p{Regional_Indicator}️‍\u{E0020}-\u{E007F}]/gu, '')
+      .replace(/[ \t]+/g, ' ')
+      .trim();
+    const escapeHtml = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc2 = escapeHtml;
+    const icon = (label) => (window.SportIcon ? window.SportIcon(label) : '');
+    const ON_AIR = /live now|24\/7|upcoming/i;
+
+    const catalogs = {};
+    function catalogLabel(catalog) {
+      return stripEmoji(catalog.name).replace(/^nuvio /i, '');
+    }
+    // Catalogs that need an extra value (other than paging) cannot be browsed here.
+    function extraPath(catalog, skip) {
+      const extras = catalog.extra || [];
+      const required = extras.filter((e) => e && e.isRequired);
+      if (required.some((e) => e.name !== 'skip')) return null;
+      if (!extras.some((e) => e && e.name === 'skip')) return '';
+      return (skip > 0 || required.length) ? '/skip=' + (skip || 0) : '';
+    }
+
+    function catButton(catalog) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'cat-item';
+      b.dataset.catalog = catalog.id;
+      const label = catalogLabel(catalog);
+      b.insertAdjacentHTML('beforeend', icon(label));
+      const t = document.createElement('span');
+      t.className = 'cat-text';
+      t.textContent = label;
+      b.appendChild(t);
+      if (/live now/i.test(label)) b.insertAdjacentHTML('beforeend', '<span class="live-dot" aria-hidden="true"></span>');
+      b.addEventListener('click', () => { loadCatalog(catalog.id); if (window.innerWidth > 900) window.scrollTo({ top: 0, behavior: 'smooth' }); });
+      return b;
+    }
+
+    async function loadTabs() {
+      const nav = document.getElementById('catalogNav');
+      const strip = document.getElementById('catStrip');
+      try {
+        const res = await fetch('/manifest.json');
+        const manifest = await res.json();
+        nav.textContent = '';
+        strip.textContent = '';
+
+        const list = (manifest.catalogs || []).filter((c) => (c.type === 'Sports' || c.type === 'tv') && c.id !== 'nuvio_sports_teams' && extraPath(c, 0) !== null);
+        list.forEach((c) => { catalogs[c.id] = c; });
+        const groups = [
+          { title: 'On air', items: list.filter((c) => ON_AIR.test(catalogLabel(c))) },
+          { title: 'Sports', items: list.filter((c) => !ON_AIR.test(catalogLabel(c)) && !/replay/i.test(catalogLabel(c))) },
+          { title: 'Replays', items: list.filter((c) => /replay/i.test(catalogLabel(c))) }
+        ].filter((g) => g.items.length);
+
+        groups.forEach((g, gi) => {
+          const wrap = document.createElement('div');
+          wrap.className = 'cat-group';
+          const h = document.createElement('p');
+          h.className = 'cat-group-title';
+          h.textContent = g.title;
+          wrap.appendChild(h);
+          g.items.forEach((c) => wrap.appendChild(catButton(c)));
+          nav.appendChild(wrap);
+
+          if (gi > 0) { const sep = document.createElement('span'); sep.className = 'sep'; strip.appendChild(sep); }
+          g.items.forEach((c) => strip.appendChild(catButton(c)));
+        });
+
+        const first = groups[0] && groups[0].items[0];
+        if (first) loadCatalog(first.id);
+        else renderEmpty('No catalogs', 'This server does not expose any browsable catalogs.');
+      } catch (err) {
+        console.error('Failed to load manifest', err);
+        nav.innerHTML = '<div class="state-msg is-error">Could not load catalogs.</div>';
+        renderEmpty('Server unreachable', 'Could not load the catalogs. Make sure the add-on server is running.', true);
+      }
+    }
+
+    function groupTitleFor(id) {
+      const label = catalogs[id] ? catalogLabel(catalogs[id]) : '';
+      if (ON_AIR.test(label)) return 'On air';
+      if (/replay/i.test(label)) return 'Replays';
+      return 'Sport';
+    }
+
+    function setActiveCatalog(id) {
+      document.querySelectorAll('[data-catalog]').forEach((el) => {
+        const on = el.dataset.catalog === id;
+        el.classList.toggle('active', on);
+        if (on) el.setAttribute('aria-current', 'true'); else el.removeAttribute('aria-current');
+      });
+      const chip = document.querySelector('#catStrip .cat-item.active');
+      if (chip && chip.scrollIntoView) chip.scrollIntoView({ block: 'nearest', inline: 'center' });
+      document.getElementById('catalogTitle').textContent = catalogs[id] ? catalogLabel(catalogs[id]) : 'Live now';
+      document.getElementById('catalogEyebrow').textContent = groupTitleFor(id);
+    }
+
+    function renderSkeleton() {
+      const grid = document.getElementById('grid');
+      grid.innerHTML = Array.from({ length: 8 }, () => '<div class="skeleton" aria-hidden="true"></div>').join('');
+    }
+    function renderEmpty(title, detail, isError) {
+      const grid = document.getElementById('grid');
+      grid.innerHTML = '<div class="empty' + (isError ? ' is-error' : '') + '" style="grid-column:1/-1"><strong>' + escapeHtml(title) + '</strong><span>' + escapeHtml(detail) + '</span></div>';
+    }
+
+    async function loadCatalog(catalogId, append) {
+      const catalog = catalogs[catalogId];
+      if (!catalog) return;
+      if (!append) {
+        currentCatalog = catalogId;
+        nextSkip = 0;
+        hasMore = false;
+        setActiveCatalog(catalogId);
+        document.getElementById('catalogCount').textContent = '';
+        document.getElementById('searchInput').value = '';
+        renderSkeleton();
+      }
+
+      try {
+        const url = BROWSER_CFG + '/catalog/' + encodeURIComponent(catalog.type) + '/' + encodeURIComponent(catalog.id) + extraPath(catalog, nextSkip) + '.json';
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (currentCatalog !== catalogId) return;
+        const page = (data.metas || []).filter((m) => m && m.type !== 'series');
+        hasMore = (data.metas || []).length >= PAGE_SIZE && extraPath(catalog, PAGE_SIZE) !== '';
+        nextSkip += (data.metas || []).length;
+        currentMatches = append ? currentMatches.concat(page) : page;
+        renderGrid(currentMatches);
+      } catch (err) {
+        console.error(err);
+        if (currentCatalog !== catalogId) return;
+        if (append) { hasMore = false; renderGrid(currentMatches); return; }
+        currentMatches = [];
+        renderEmpty('Could not load this catalog', 'The server did not answer. Try again in a moment.', true);
+      }
+    }
+
+    document.getElementById('reloadBtn').addEventListener('click', () => { if (currentCatalog) loadCatalog(currentCatalog); });
+    document.getElementById('searchInput').addEventListener('input', (e) => {
+      const query = e.target.value.trim().toLowerCase();
+      const filtered = !query ? currentMatches : currentMatches.filter((meta) =>
+        [meta.name, meta.description, (meta.cast || []).join(' ')].some((v) => v && String(v).toLowerCase().includes(query)));
+      renderGrid(filtered);
+    });
+
+    // ---- Views ----
+    const VIEWS = ['grid', 'list'];
+    function storedView() {
+      try { const v = localStorage.getItem('ls-live-view'); if (VIEWS.includes(v)) return v; } catch (e) {}
+      return 'grid';
+    }
+    function applyView(view, persist) {
+      document.getElementById('grid').dataset.view = view;
+      document.querySelectorAll('.seg button').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.view === view)));
+      if (persist) { try { localStorage.setItem('ls-live-view', view); } catch (e) {} }
+    }
+    document.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => applyView(b.dataset.view, true)));
+    applyView(storedView(), false);
+
+    // ---- Time labels (browser timezone) ----
+    const fmtTime = (d) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    function dayLabel(d) {
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const day = new Date(d); day.setHours(0, 0, 0, 0);
+      const diff = Math.round((day - today) / 86400000);
+      if (diff === 0) return 'Today';
+      if (diff === 1) return 'Tomorrow';
+      if (diff === -1) return 'Yesterday';
+      return d.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+    }
+    function relative(ms) {
+      const m = Math.round(ms / 60000);
+      if (m < 60) return 'in ' + Math.max(1, m) + 'm';
+      const h = Math.floor(m / 60);
+      return 'in ' + h + 'h' + (m % 60 ? ' ' + (m % 60) + 'm' : '');
+    }
+    function whenOf(meta, fields, isLive) {
+      if (isLive) return { cls: '', text: '' };
+      if (meta.type === 'tv') return { cls: '', text: '24/7' };
+      const t = meta.released ? new Date(meta.released) : null;
+      const valid = t && !isNaN(t);
+      const replay = /replay/i.test(fields.status || '') || /replay/i.test(currentCatalog || '');
+      if (replay) return { cls: '', text: valid ? dayLabel(t) : 'Replay' };
+      if (valid) {
+        const ahead = t - Date.now();
+        if (ahead > 0 && ahead < 3 * 3600000) return { cls: 'is-soon', text: fmtTime(t) + ' · ' + relative(ahead) };
+        return { cls: '', text: dayLabel(t) + ' ' + fmtTime(t) };
+      }
+      return { cls: '', text: stripEmoji(meta.releaseInfo || '') };
+    }
+
+    function renderGrid(metas) {
+      const grid = document.getElementById('grid');
+      const total = currentMatches.length;
+      const shown = metas ? metas.length : 0;
+      const noun = currentCatalog && catalogs[currentCatalog] && catalogs[currentCatalog].type === 'tv' ? ['channel', 'channels'] : ['match', 'matches'];
+      const totalText = total + (hasMore ? '+' : '');
+      document.getElementById('catalogCount').innerHTML = (shown !== total ? '<b>' + shown + '</b> of ' + totalText : '<b>' + totalText + '</b>') + ' ' + (total === 1 ? noun[0] : noun[1]);
+
+      if (!metas || metas.length === 0) {
+        if (total) renderEmpty('No results', 'Nothing in this catalog matches your search.');
+        else renderEmpty('Nothing here right now', 'This catalog is empty at the moment. Live events usually appear shortly before kick-off.');
+        return;
+      }
+
+      grid.replaceChildren();
+      metas.forEach((meta) => {
+        const isLive = String(meta.name || '').includes('\u{1F534}') || meta.releaseInfo === 'LIVE';
+        const cleanName = stripEmoji(meta.name).replace(/^\[?LIVE\]?:?\s*/i, '');
+        const fields = {};
+        String(meta.description || '').split('\n').map(stripEmoji).forEach((l) => { const m = /^([^:]+):\s*(.+)$/.exec(l); if (m) fields[m[1].trim().toLowerCase()] = m[2].trim(); });
+        const sport = (meta.genres && meta.genres[0]) || fields.category || '';
+        const sportLabel = String(sport).replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (ch) => ch.toUpperCase());
+        const league = fields.league && !/^live tv$/i.test(fields.league) ? fields.league : '';
+        const when = whenOf(meta, fields, isLive);
+
+        const card = document.createElement('div');
+        card.className = 'match' + (isLive ? ' is-live' : '');
+        card.tabIndex = 0;
+        card.setAttribute('role', 'button');
+        card.setAttribute('aria-label', 'Play ' + cleanName);
+        card.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); card.click(); } });
+        card.addEventListener('click', () => fetchAndPlay(meta, cleanName));
+
+        card.innerHTML =
+          '<div class="match-media"><span class="fallback">' + icon(sport) + '</span>' +
+            (meta.poster ? '<img src="' + escapeHtml(meta.poster) + '" alt="" loading="lazy" onerror="this.remove()">' : '') +
+            '<span class="match-play" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg></span>' +
+          '</div>' +
+          '<div class="match-body">' +
+            '<div class="match-meta">' +
+              (isLive ? '<span class="live-badge"><span class="live-dot"></span>Live</span>' : '') +
+              (sportLabel && meta.type !== 'tv' ? '<span class="sport">' + icon(sport) + escapeHtml(sportLabel) + '</span>' : '') +
+              (when.text ? '<span class="when ' + when.cls + '">' + escapeHtml(when.text) + '</span>' : '') +
+            '</div>' +
+            '<div class="match-title">' + escapeHtml(cleanName) + '</div>' +
+            (league ? '<div class="match-league">' + escapeHtml(league) + '</div>' : '') +
+          '</div>';
+        grid.appendChild(card);
+      });
+
+      if (hasMore && shown === total) {
+        const more = document.createElement('button');
+        more.type = 'button';
+        more.className = 'btn load-more';
+        more.textContent = 'Load more';
+        more.addEventListener('click', () => { more.disabled = true; more.textContent = 'Loading...'; loadCatalog(currentCatalog, true); });
+        grid.appendChild(more);
+      }
+    }
+
+    // ---- Source picker: parse the stream titles into provider, channel, region and quality ----
+    const TIERS = {
+      '4K': { rank: 5, label: '4K Ultra HD', cls: 'q-4k' },
+      'QHD': { rank: 4, label: 'Quad HD', cls: 'q-qhd' },
+      'FHD': { rank: 3, label: 'Full HD', cls: 'q-fhd' },
+      'HD': { rank: 2, label: 'HD', cls: 'q-hd' },
+      'SD': { rank: 1, label: 'Standard definition', cls: 'q-sd' }
+    };
+    function tierOf(text) {
+      const t = String(text || '').toLowerCase();
+      if (/2160|\b4k\b|uhd/.test(t)) return '4K';
+      if (/1440|qhd/.test(t)) return 'QHD';
+      if (/1080|fhd|full ?hd/.test(t)) return 'FHD';
+      if (/720|\bhd\b/.test(t)) return 'HD';
+      if (/576|480|360|\bsd\b/.test(t)) return 'SD';
+      return '';
+    }
+    function qualityBadge(tier) {
+      if (!tier) return '';
+      const t = TIERS[tier];
+      return '<span class="qbadge ' + t.cls + '" role="img" aria-label="' + esc2(t.label) + '" title="' + esc2(t.label) + '"><svg viewBox="0 0 40 22" aria-hidden="true"><rect x="1" y="1" width="38" height="20" rx="4" fill="none" stroke="currentColor" stroke-width="1.8"/><text x="20" y="15.5" text-anchor="middle" font-size="11" font-weight="700" fill="currentColor" font-family="Barlow Condensed, system-ui, sans-serif" letter-spacing=".5">' + tier + '</text></svg></span>';
+    }
+
+    function parseStream(st, index) {
+      const raw = String(st.title || st.name || '');
+      const lines = raw.split('\n').map((l) => stripEmoji(l)).filter(Boolean);
+      const head = lines[0] || '';
+      const qualityLine = lines.find((l) => /quality\s*:/i.test(l)) || '';
+      const qText = qualityLine.replace(/^.*quality\s*:\s*/i, '');
+      const qParts = qText.split('·').map((x) => x.trim());
+      const rateMatch = /([\d.]+)\s*mbps/i.exec(qText);
+      let provider = '';
+      let channel = head;
+      if (head.includes('|')) {
+        const bits = head.split('|');
+        provider = bits.shift().trim();
+        channel = bits.join('|').trim();
+      }
+      const metaMatch = /\[([^\]]+)\]/.exec(channel);
+      const meta = metaMatch ? metaMatch[1].trim() : '';
+      channel = channel.replace(/\[[^\]]*\]/g, '').replace(/\s+/g, ' ').trim();
+      const tier = tierOf(qParts[0]) || tierOf(channel);
+      const isExtra = /donation|help keep|ko-?fi/i.test(raw) && !st.url;
+      return {
+        st, index, provider: provider || 'Other', channel, meta, tier,
+        rank: tier ? TIERS[tier].rank : 0,
+        rate: rateMatch ? parseFloat(rateMatch[1]) : 0,
+        rateText: rateMatch ? rateMatch[1] + ' Mbps' : '',
+        extra: isExtra,
+        external: !st.url && !!st.externalUrl
+      };
+    }
+
+    let sourceItems = [];
+    let sourceExtras = [];
+    let activeProvider = 'all';
+
+    function sortSources(items) {
+      return items.slice().sort((a, b) => (failedKeys.has(a.index) - failedKeys.has(b.index)) || b.rank - a.rank || b.rate - a.rate || a.index - b.index);
+    }
+
+    function renderSourceList() {
+      const sorted = sortSources(sourceItems);
+      const counts = {};
+      sorted.forEach((i) => { counts[i.provider] = (counts[i.provider] || 0) + 1; });
+      // number the unnamed streams per provider
+      const seen = {};
+      sorted.forEach((i) => {
+        if (!i.channel) { seen[i.provider] = (seen[i.provider] || 0) + 1; i.label = 'Stream ' + seen[i.provider]; }
+        else i.label = i.channel;
+      });
+      const filters = document.getElementById('srcFilters');
+      const names = Object.keys(counts).sort((a, b) => counts[b] - counts[a] || a.localeCompare(b));
+      filters.innerHTML = [['all', 'All', sorted.length]].concat(names.map((n) => [n, n, counts[n]])).map((f) =>
+        '<button type="button" class="src-chip" data-provider="' + esc2(f[0]) + '" aria-pressed="' + (activeProvider === f[0]) + '">' + esc2(f[1]) + ' <small>' + f[2] + '</small></button>').join('');
+      filters.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => { activeProvider = b.dataset.provider; renderSourceList(); }));
+
+      const visible = sorted.filter((i) => activeProvider === 'all' || i.provider === activeProvider);
+      document.getElementById('srcCount').textContent = visible.length + (visible.length === 1 ? ' source' : ' sources') + ', best quality first';
+      const list = document.getElementById('source-buttons');
+      list.innerHTML = '';
+      visible.forEach((item, idx) => {
+        const li = document.createElement('li');
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'src-row';
+        const pIcon = window.ProviderIcon ? window.ProviderIcon(item.provider, item.provider) : '';
+        const failed = failedKeys.has(item.index);
+        if (failed) btn.classList.add('is-failed');
+        const sub = [item.provider, item.meta].filter(Boolean).join(' · ');
+        btn.innerHTML = pIcon +
+          '<span class="src-main"><span class="src-title"><span>' + esc2(item.label) + '</span>' + (!failed && idx === 0 && activeProvider === 'all' && item.rank > 0 ? '<span class="src-best">Best</span>' : '') + '</span><span class="src-sub">' + esc2(sub) + (failed ? ' · <span class="src-fail">Did not work</span>' : '') + '</span></span>' +
+          '<span class="src-q">' + (item.external ? '<span class="src-ext">New tab <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M9 7h8v8"/></svg></span>' : qualityBadge(item.tier) + (item.rateText ? '<span class="src-rate">' + esc2(item.rateText) + '</span>' : '')) + '</span>' +
+          '<svg class="src-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>';
+        btn.setAttribute('aria-label', 'Play ' + item.label + ' from ' + item.provider + (item.tier ? ', ' + TIERS[item.tier].label : '') + (item.external ? ', opens in a new tab' : ''));
+        btn.addEventListener('click', () => pickSource(item));
+        li.appendChild(btn);
+        list.appendChild(li);
+      });
+      const extra = document.getElementById('srcExtra');
+      extra.innerHTML = '';
+      sourceExtras.forEach((x) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = stripEmoji(String(x.st.title || '').split('\n')[0]).replace(/\s+/g, ' ') || 'More';
+        b.addEventListener('click', () => playStreamUrl(x.st.url, x.st));
+        extra.appendChild(b);
+      });
+    }
+
+    function haltVideo() {
+      const video = document.getElementById('video');
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+      if (hls) { hls.destroy(); hls = null; }
+    }
+
+    function showPicker() {
+      const dlg = document.getElementById('player-dialog');
+      haltVideo();
+      clearTimers();
+      playToken++;
+      hideState();
+      document.getElementById('changeSource').hidden = true;
+      dlg.classList.add('is-picking');
+      renderSourceList();
+    }
+
+    function pickSource(item) {
+      if (item.external) {
+        // Opened straight from the click so the browser allows it; the list stays open.
+        window.open(item.st.externalUrl, '_blank', 'noopener');
+        return;
+      }
+      const dlg = document.getElementById('player-dialog');
+      dlg.classList.remove('is-picking');
+      currentItem = item;
+      showLoading('Connecting to stream...');
+      document.getElementById('changeSource').hidden = false;
+      playStreamUrl(item.st.url, item.st);
+    }
+
+    async function fetchAndPlay(meta, title) {
+      document.getElementById('playerTitle').textContent = title || 'Live stream';
+      const dlg = document.getElementById('player-dialog');
+      if (!dlg.open) { if (typeof dlg.showModal === 'function') dlg.showModal(); else dlg.setAttribute('open', ''); }
+      dlg.classList.remove('is-picking');
+      activeProvider = 'all';
+      failedKeys.clear();
+      currentItem = null;
+      clearTimers();
+      playToken++;
+      document.getElementById('changeSource').hidden = true;
+      sourceItems = [];
+      sourceExtras = [];
+      showLoading('Finding streams...');
+      const retry = () => fetchAndPlay(meta, title);
+
+      try {
+        const res = await fetch(BROWSER_CFG + '/stream/' + encodeURIComponent(meta.type || 'Sports') + '/' + encodeURIComponent(meta.id) + '.json');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+
+        const items = (data.streams || []).map(parseStream);
+        sourceExtras = items.filter((i) => i.extra);
+        sourceItems = items.filter((i) => !i.extra);
+
+        if (sourceItems.length === 0) {
+          showProblem('No streams yet',
+            'This match has no streams right now. They usually appear shortly before kick-off, so check back a little later.',
+            '',
+            [{ label: 'Check again', primary: true, run: retry }, { label: 'Close', run: closePlayer }]);
+        } else if (sourceItems.length === 1 && sourceItems[0].external) {
+          const only = sourceItems[0];
+          showProblem('Opens in a new tab',
+            only.provider + ' can\'t play inside this window. Open it in a new tab to watch.',
+            '',
+            [{ label: 'Open in new tab', primary: true, run: () => { window.open(only.st.externalUrl, '_blank', 'noopener'); closePlayer(); } }, { label: 'Close', run: closePlayer }]);
+        } else if (sourceItems.length === 1) {
+          currentItem = sourceItems[0];
+          playStreamUrl(sourceItems[0].st.url, sourceItems[0].st);
+        } else {
+          showPicker();
+        }
+      } catch (err) {
+        console.error(err);
+        showProblem('Could not load streams',
+          'The server did not return the streams for this match. Check your connection and try again.',
+          err && err.message ? String(err.message) : '',
+          [{ label: 'Try again', primary: true, run: retry }, { label: 'Close', run: closePlayer }]);
+      }
+    }
+
+    // A message in the player stage with its own actions (no browser alerts).
+    function showProblem(title, detail, tech, actions) {
+      clearTimers();
+      const el = document.getElementById('loader');
+      el.classList.add('is-error');
+      el.style.display = 'flex';
+      document.getElementById('loaderMsg').textContent = title;
+      document.getElementById('loaderDetail').textContent = detail || '';
+      document.getElementById('loaderTech').textContent = tech || '';
+      const box = document.getElementById('loaderActions');
+      box.replaceChildren();
+      (actions || []).forEach((a) => box.appendChild(actionButton(a.label, a.primary, a.run)));
+      const first = box.querySelector('button');
+      if (first) first.focus();
+    }
+
+    // ---- Playback state: loading, slow, failed ----
+    let playToken = 0;
+    let slowTimer = null;
+    let failTimer = null;
+    let bufferTimer = null;
+    let currentItem = null;
+    let switchTimer = null;
+    let stallTimer = null;
+    let playedOnce = false;
+    const STALL_MS = 15000;
+    let autoNext = false;
+    try { autoNext = localStorage.getItem('nuvio-autonext') === '1'; } catch (e) {}
+    const failedKeys = new Set();
+    const SLOW_MS = 12000;
+    const TIMEOUT_MS = 40000;
+
+    function clearTimers() {
+      clearTimeout(slowTimer); clearTimeout(failTimer); clearTimeout(bufferTimer); clearTimeout(switchTimer); clearTimeout(stallTimer);
+      slowTimer = failTimer = bufferTimer = switchTimer = stallTimer = null;
+    }
+    function stateEl(id) { return document.getElementById(id); }
+    function showLoading(title, detail) {
+      const el = stateEl('loader');
+      el.classList.remove('is-error');
+      el.style.display = 'flex';
+      stateEl('loaderMsg').textContent = title || 'Connecting to stream...';
+      stateEl('loaderDetail').textContent = detail || '';
+      stateEl('loaderTech').textContent = '';
+      stateEl('loaderActions').replaceChildren();
+    }
+    function hideState() {
+      stateEl('loader').style.display = 'none';
+    }
+    function actionButton(label, primary, handler) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn' + (primary ? ' btn-primary' : '');
+      b.textContent = label;
+      b.addEventListener('click', handler);
+      return b;
+    }
+    function nextCandidate() {
+      return sortSources(sourceItems).find((i) => i !== currentItem && !failedKeys.has(i.index));
+    }
+    function showError(title, detail, tech) {
+      const el = stateEl('loader');
+      el.classList.add('is-error');
+      el.style.display = 'flex';
+      stateEl('loaderMsg').textContent = title;
+      stateEl('loaderDetail').textContent = detail || '';
+      stateEl('loaderTech').textContent = tech || '';
+      const actions = stateEl('loaderActions');
+      actions.replaceChildren();
+      const next = nextCandidate();
+      if (next) actions.appendChild(actionButton('Try next best source', true, () => pickSource(next)));
+      if (currentItem) actions.appendChild(actionButton('Try again', !next, () => pickSource(currentItem)));
+      if (sourceItems.length > 1) actions.appendChild(actionButton('Choose another source', false, showPicker));
+      const first = actions.querySelector('button');
+      if (first) first.focus();
+    }
+    function failPlayback(token, title, detail, tech) {
+      if (token !== playToken) return;
+      clearTimers();
+      haltVideo();
+      if (currentItem) failedKeys.add(currentItem.index);
+      const next = nextCandidate();
+      if (autoNext && next) { showSwitching(next, title, detail, tech); return; }
+      if (autoNext && sourceItems.length > 1 && !next) {
+        showError('No working source found', 'We tried every source for this match. They may all be down right now.', tech);
+        stateEl('loaderActions').appendChild(actionButton('Start over', true, () => {
+          failedKeys.clear();
+          const best = sortSources(sourceItems)[0];
+          if (best) pickSource(best);
+        }));
+        return;
+      }
+      if (autoNext && sourceItems.length <= 1) {
+        detail = (detail ? detail + ' ' : '') + 'This match has only one source, so there is nothing to switch to.';
+      }
+      showError(title, detail, tech);
+    }
+    function showSwitching(next, title, detail, tech) {
+      const el = stateEl('loader');
+      el.classList.remove('is-error');
+      el.style.display = 'flex';
+      stateEl('loaderMsg').textContent = 'Source failed. Trying the next one...';
+      stateEl('loaderDetail').textContent = (next.label || next.channel || next.provider) + ' (' + next.provider + ')';
+      stateEl('loaderTech').textContent = '';
+      const actions = stateEl('loaderActions');
+      actions.replaceChildren();
+      actions.appendChild(actionButton('Stop and choose myself', false, () => {
+        clearTimeout(switchTimer);
+        switchTimer = null;
+        showError(title, detail, tech);
+      }));
+      switchTimer = setTimeout(() => { switchTimer = null; pickSource(next); }, 1500);
+    }
+    function hlsFailure(d) {
+      const details = (d && d.details) || '';
+      const code = d && d.response && d.response.code;
+      const tech = [details, code === 0 ? 'no response' : (code ? 'HTTP ' + code : '')].filter(Boolean).join(' · ');
+      if (/manifestLoad|levelLoad|manifestParsing/.test(details)) {
+        return ['This stream is unavailable', 'The source did not respond, or it blocked this request. The provider may have taken it down or restricts where it can be played.', tech];
+      }
+      if (/fragLoad|fragParsing|bufferStall/.test(details)) {
+        return ['The stream stopped', 'The source stopped sending video. It may have ended or dropped.', tech];
+      }
+      if (d && d.type === 'mediaError') {
+        return ['Format not supported', 'Your browser could not decode this stream.', tech];
+      }
+      return ['The stream could not be played', 'Something went wrong while loading this source.', tech];
+    }
+    function onPlayRejected(err) {
+      // Autoplay can be blocked until the user presses play; that is not a failure.
+      if (err && err.name === 'NotAllowedError') { hideState(); return; }
+      console.log(err);
+    }
+
+    function playStreamUrl(url, streamObj = null) {
+      if (streamObj && streamObj.externalUrl) {
+        window.open(streamObj.externalUrl, '_blank', 'noopener');
+        closePlayer();
+        return;
+      }
+
+      const video = document.getElementById('video');
+      const token = ++playToken;
+      clearTimers();
+      playedOnce = false;
+
+      if (!url) {
+        failPlayback(token, 'Cannot play here', 'This stream needs another app or player. Try a different source.');
+        return;
+      }
+
+      showLoading('Connecting to stream...');
+      slowTimer = setTimeout(() => {
+        if (token !== playToken) return;
+        showLoading('Still connecting...', 'This source is slow or may be down. You can keep waiting or pick another one.');
+        stateEl('loaderActions').appendChild(actionButton('Choose another source', false, () => { playToken++; clearTimers(); if (sourceItems.length > 1) showPicker(); else closePlayer(); }));
+      }, SLOW_MS);
+      failTimer = setTimeout(() => failPlayback(token, 'This stream timed out', 'The source did not start playing in time.', 'no playback after ' + (TIMEOUT_MS / 1000) + 's'), TIMEOUT_MS);
+
+      if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+        if (hls) hls.destroy();
+        hls = new Hls({ maxBufferLength: 30 });
+        hls.on(Hls.Events.ERROR, (event, data) => {
+          if (token !== playToken || !data || !data.fatal) return;
+          const f = hlsFailure(data);
+          failPlayback(token, f[0], f[1], f[2]);
+        });
+        hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(onPlayRejected));
+        hls.loadSource(url);
+        hls.attachMedia(video);
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = url;
+        video.play().catch(onPlayRejected);
+      } else {
+        failPlayback(token, 'This browser cannot play this stream', 'Try another browser or open it in Stremio.');
+      }
+    }
+
+    (function () {
+      const sw = document.getElementById('autoNext');
+      const paint = () => sw.setAttribute('aria-checked', String(autoNext));
+      sw.addEventListener('click', () => {
+        autoNext = !autoNext;
+        try { localStorage.setItem('nuvio-autonext', autoNext ? '1' : '0'); } catch (e) {}
+        paint();
+      });
+      paint();
+    })();
+
+    (function () {
+      const video = document.getElementById('video');
+      video.addEventListener('playing', () => {
+        playedOnce = true;
+        clearTimers();
+        hideState();
+      });
+      video.addEventListener('waiting', () => {
+        clearTimeout(bufferTimer);
+        clearTimeout(stallTimer);
+        const token = playToken;
+        // A stall after playback had started: give up if it does not recover.
+        stallTimer = setTimeout(() => {
+          if (playedOnce && token === playToken && !video.paused && document.getElementById('player-dialog').open) {
+            failPlayback(token, 'The stream stalled', 'The source stopped sending video and did not recover.', 'stalled for ' + (STALL_MS / 1000) + 's');
+          }
+        }, STALL_MS);
+        bufferTimer = setTimeout(() => { if (!video.paused && document.getElementById('player-dialog').open) showLoading('Buffering...'); }, 1500);
+      });
+      video.addEventListener('error', () => {
+        // Clearing the source on close also raises an error event; ignore that.
+        if (!document.getElementById('player-dialog').open || (!hls && !video.getAttribute('src'))) return;
+        failPlayback(playToken, 'The video could not be played', 'The source returned something this browser cannot play.', video.error ? 'media error ' + video.error.code : '');
+      });
+    })();
+
+    function stopPlayback() {
+      clearTimers();
+      playToken++;
+      document.getElementById('player-dialog').classList.remove('is-picking');
+      document.getElementById('changeSource').hidden = true;
+      haltVideo();
+    }
+
+    function closePlayer() {
+      const dlg = document.getElementById('player-dialog');
+      if (dlg.open) dlg.close(); else stopPlayback();
+    }
+
+    (function () {
+      const dlg = document.getElementById('player-dialog');
+      // Esc, the close button and backdrop clicks all end up here.
+      dlg.addEventListener('close', stopPlayback);
+      document.getElementById('changeSource').addEventListener('click', showPicker);
+      dlg.addEventListener('click', (e) => { if (e.target === dlg) closePlayer(); });
+    })();
+
+    loadTabs();
+  </script>
+</body>
+</html>

@@ -10,7 +10,7 @@ const { SPORTS_TYPE } = require('./contentTypes');
 const manifest = {
   id: 'community.nuvio.live-sports',
   version: '3.2.0',
-  name: '🏆 Nuvio Live Sports',
+  name: '🏆 Live Sports',
   description:
     'The ultimate live sports aggregator. Stream live Football, NBA, NFL, NHL, F1, and more. ' +
     'Aggregates high-speed live streams and 24/7 sports TV networks with zero-lag playback.',

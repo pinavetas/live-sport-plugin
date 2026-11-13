@@ -77,11 +77,11 @@ class GenericYamlProvider extends BaseProvider {
   async resolveStream(sourceId, matchCategory, matchTitle) {
     // For simple YAML scrapers, we just return the link as an external player
     // Building a generic m3u8 extractor in YAML is too complex for this phase,
-    // so we fallback to Nuvio Web Player.
+    // so we fallback to Web Player.
     const watchUrl = this._resolveUrl(sourceId);
     if (!watchUrl) return [];
     return [new StreamEntity({
-      name: 'Nuvio Web Player',
+      name: 'Web Player',
       title: `${this.name} (${matchTitle})`,
       externalUrl: watchUrl
     })];

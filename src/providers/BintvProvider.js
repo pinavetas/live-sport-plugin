@@ -253,7 +253,7 @@ class BintvProvider extends BaseProvider {
 
     const webUrl = isHttpUrl(src.wrapperUrl) ? src.wrapperUrl : embedUrl;
     streams.push(new StreamEntity({
-      name: 'Nuvio Web Player',
+      name: 'Web Player',
       title: `BINTV (${label}) (Web)`,
       externalUrl: `/watch?url=${encodeURIComponent(webUrl)}&title=${encodeURIComponent(matchTitle || 'Live Event')}`,
     }));

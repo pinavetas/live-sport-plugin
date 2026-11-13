@@ -84,9 +84,9 @@ app.use('/posters', express.static(path.join(__dirname, '..', 'public', 'posters
 app.use('/posters', express.static(path.join(__dirname, 'public', 'posters'), posterStaticOptions));
 app.use('/posters', express.static(path.join(__dirname, 'posters'), posterStaticOptions));
 
-// Serve static assets from public (logos, cryptocurrency QR codes, etc.)
-// index:false — otherwise express.static answers "/" with public/index.html
-// and the configure page route below is never reached.
+// Serve static assets from public (logo, shared stylesheet and scripts).
+// index:false — "/" must reach the configure page route below, never a
+// directory index.
 const publicStaticOptions = { index: false };
 app.use(express.static(path.join(__dirname, '..', 'public'), publicStaticOptions));
 app.use(express.static(path.join(__dirname, 'public'), publicStaticOptions));
@@ -98,6 +98,10 @@ app.get(['/', '/configure', '/:config/configure'], (req, res) => {
 
 app.get('/status', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'status.html'));
+});
+
+app.get('/live', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'public', 'live.html'));
 });
 
 // ─── Local-direct gate for internal/debug endpoints ─────────────────────────
@@ -1158,12 +1162,12 @@ const BIND_HOST = process.env.HOST || process.env.IP || '0.0.0.0';
 const server = app.listen(PORT, BIND_HOST, () => {
   console.log('');
   console.log('╔══════════════════════════════════════════════════════╗');
-  console.log('║          🔴 Nuvio Live Sports Plugin                 ║');
+  console.log('║          🔴 Live Sports add-on                       ║');
   console.log('╠══════════════════════════════════════════════════════╣');
   console.log(`║  Port       : ${String(PORT).padEnd(39)}║`);
   console.log(`║  Public URL : ${BASE_URL.padEnd(39)}║`);
   console.log('║                                                      ║');
-  console.log('║  📋 Paste into Nuvio → Settings → Addons:           ║');
+  console.log('║  📋 Install in Stremio with this manifest URL:      ║');
   console.log(`║  ${(BASE_URL + '/manifest.json').padEnd(52)}║`);
   console.log('╚══════════════════════════════════════════════════════╝');
   console.log('');

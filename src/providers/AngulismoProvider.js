@@ -274,7 +274,7 @@ class AngulismoProvider extends BaseProvider {
     }
 
     streams.push(new StreamEntity({
-      name: 'Nuvio Web Player',
+      name: 'Web Player',
       title: `Angulismo (${label}) (Web)`,
       externalUrl: `/watch?url=${encodeURIComponent(url)}&title=${encodeURIComponent(matchTitle || 'Live Event')}`,
       language: src.language || 'Spanish',
