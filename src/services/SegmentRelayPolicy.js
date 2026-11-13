@@ -22,7 +22,36 @@ function originOf(value) {
   try { return new URL(String(value)).origin; } catch (_) { return ''; }
 }
 
+/**
+ * BYTE_RELAY — whether this deployment may carry media bytes at all
+ * (/api/hlschunk, /api/mp4proxy, /api/fastmp4 and the DASH media routes).
+ * "on" / "off"; by default off on Vercel, whose plans meter function egress
+ * and pause the whole project once the allowance is spent, and on elsewhere.
+ * When off, no playlist is rewritten to relay segments, whatever SEGMENT_RELAY
+ * says, and the relay routes refuse every request.
+ */
+function byteRelayEnabled(env = process.env) {
+  const value = String(env.BYTE_RELAY || '').trim().toLowerCase();
+  if (['on', 'true', '1', 'yes'].includes(value)) return true;
+  if (['off', 'false', '0', 'no'].includes(value)) return false;
+  return !env.VERCEL;
+}
+
+// Routes whose responses are media bytes fetched from upstream.
+const BYTE_RELAY_PATHS = ['/api/hlschunk', '/api/mp4proxy', '/api/fastmp4', '/api/dash/init.mp4', '/api/dash/segment.mp4'];
+
+/** Express middleware: refuses the media relay routes when BYTE_RELAY is off. */
+function byteRelayGate(env = process.env) {
+  return function byteRelayGateMiddleware(req, res, next) {
+    if (byteRelayEnabled(env)) return next();
+    const p = req.path || String(req.url || '').split('?')[0];
+    if (!BYTE_RELAY_PATHS.includes(p)) return next();
+    res.status(403).set('Cache-Control', 'no-store').type('text/plain').send('Media relay is disabled on this deployment.');
+  };
+}
+
 function relayMode(env = process.env) {
+  if (!byteRelayEnabled(env)) return 'off';
   const mode = String(env.SEGMENT_RELAY || 'auto').trim().toLowerCase();
   return mode === 'always' || mode === 'off' ? mode : 'auto';
 }
@@ -95,4 +124,12 @@ async function playlistHasIspBlockedHost(playlistBody, baseUrl, resolver = requi
   return false;
 }
 
-module.exports = { shouldRelaySegments, relayMode, playlistHasIspBlockedHost, segmentHosts };
+module.exports = {
+  shouldRelaySegments,
+  relayMode,
+  playlistHasIspBlockedHost,
+  segmentHosts,
+  byteRelayEnabled,
+  byteRelayGate,
+  BYTE_RELAY_PATHS
+};

@@ -800,6 +800,9 @@ app.get('/img', async (req, res) => {
 // ─── Shared safe HTTP client (impit + undici fallback) ───────────────────────
 // Works on Windows, Linux x64/ARM64, Alpine/musl. If impit native binary is
 // absent, all fetches silently use undici — streams continue to work.
+// Media byte relays are off on Vercel (BYTE_RELAY): its plans meter function
+// egress and pause the whole project when the allowance runs out.
+app.use(require('./services/SegmentRelayPolicy').byteRelayGate());
 app.use(require('./routes/streamProxy'));
 app.use(require('./routes/manifest'));
 app.use(require('./routes/leafManifest'));
