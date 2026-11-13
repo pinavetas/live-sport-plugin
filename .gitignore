@@ -74,3 +74,5 @@ public/*.json
 .agents/**/*.log
 .agents/**/node_modules/
 .timezone-data/
+.vercel
+.env*
