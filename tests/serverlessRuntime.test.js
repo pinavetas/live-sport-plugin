@@ -8,7 +8,7 @@ const zlib = require('zlib');
 const http = require('http');
 const {
   createColdStartGate, applyServerlessFsDefaults, DATA_ROUTE, CDN_SWR_ROUTE,
-  createCdnCachePolicy, createCatalogSnapshot, installSnapshotOnSync, SNAPSHOT_PATH
+  createCdnCachePolicy, createSharedCatalog, installSharedCatalog, SNAPSHOT_PATH, RUNTIME_KEYS
 } = require('../src/serverless');
 
 function fakeRes() {
@@ -112,19 +112,28 @@ describe('CDN stale-while-revalidate policy', () => {
   });
 });
 
-describe('catalog snapshot in Vercel Blob', () => {
+describe('shared catalog (Runtime Cache + Blob)', () => {
   const NOW = 1_800_000_000_000;
+  const MIN = 60000;
   let dir;
-  beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ls-snap-')); });
+  let clock;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ls-shared-'));
+    clock = { t: NOW };
+  });
   afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+  const now = () => clock.t;
+  const noSleep = () => Promise.resolve();
 
   // Minimal CacheService stand-in that reads the same file format.
-  function fakeCache(file) {
+  function fakeCache(name = 'm.json') {
+    const file = path.join(dir, name);
     return {
       cacheFilePath: file,
       lastFetchTime: 0,
       matches: [],
       getMatchesReadOnly() { return this.matches; },
+      isStale(ms) { return clock.t - this.lastFetchTime > ms; },
       reloadFromDisk() {
         const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
         this.matches = parsed.matches;
@@ -132,6 +141,33 @@ describe('catalog snapshot in Vercel Blob', () => {
         return true;
       }
     };
+  }
+  // A sync writes the cache file stamped with the current clock.
+  function fakeCron(cache, matches = [{ id: 'synced' }]) {
+    const cron = {
+      inflightSync: null,
+      syncBackoffUntil: 0,
+      runSync: jest.fn(async () => {
+        fs.writeFileSync(cache.cacheFilePath, JSON.stringify({ schemaVersion: 9, timestamp: clock.t, matches }));
+        cache.reloadFromDisk();
+      })
+    };
+    cron.syncNow = jest.fn(() => cron.runSync());
+    return cron;
+  }
+  // Same semantics as @vercel/functions' in-memory cache: values go through JSON.
+  function fakeRuntime() {
+    const map = new Map();
+    return {
+      map,
+      get: jest.fn(async (k) => (map.has(k) ? JSON.parse(map.get(k)) : null)),
+      set: jest.fn(async (k, v) => { map.set(k, JSON.stringify(v)); }),
+      delete: jest.fn(async (k) => { map.delete(k); })
+    };
+  }
+  // A Runtime Cache that keeps nothing (unavailable, or paused on quota).
+  function deadRuntime() {
+    return { get: jest.fn(async () => null), set: jest.fn(async () => {}), delete: jest.fn(async () => {}) };
   }
   function fakeBlob() {
     const store = { stored: null };
@@ -142,93 +178,241 @@ describe('catalog snapshot in Vercel Blob', () => {
     return store;
   }
   const gz = (obj) => zlib.gzipSync(Buffer.from(JSON.stringify(obj)));
+  const BLOB_ENV = { BLOB_READ_WRITE_TOKEN: 'x' };
 
-  test('is off without a connected Blob store', async () => {
-    const snap = createCatalogSnapshot({ cacheService: fakeCache(path.join(dir, 'm.json')), blob: fakeBlob(), env: {} });
-    expect(snap.enabled).toBe(false);
-    expect(await snap.loadOnce()).toBe(false);
-  });
+  function instance({ runtime, blob = fakeBlob(), env = BLOB_ENV, id = 'a', matches } = {}) {
+    const cache = fakeCache(`${id}.json`);
+    const cron = fakeCron(cache, matches);
+    const shared = createSharedCatalog({
+      cacheService: cache, cronService: cron, runtimeCache: runtime, blob, env, now, sleep: noSleep, instanceId: id
+    });
+    return { cache, cron, shared, blob };
+  }
 
-  test('restores a recent snapshot into the cache file and keeps its timestamp', async () => {
-    const file = path.join(dir, 'm.json');
-    const cache = fakeCache(file);
-    const blob = fakeBlob();
-    blob.stored = gz({ schemaVersion: 9, timestamp: NOW - 5 * 60000, matches: [{ id: 'a' }, { id: 'b' }] });
-    const snap = createCatalogSnapshot({ cacheService: cache, blob, env: { BLOB_READ_WRITE_TOKEN: 'x' }, now: () => NOW });
-    expect(await snap.loadOnce()).toBe(true);
+  // Publishes a catalog stamped `ts` as another instance would.
+  async function seed(runtime, ts, matches = [{ id: 'shared' }]) {
+    const data = { timestamp: ts, gz: gz({ schemaVersion: 9, timestamp: ts, matches }).toString('base64') };
+    runtime.map.set(RUNTIME_KEYS.DATA_KEY, JSON.stringify(data));
+    runtime.map.set(RUNTIME_KEYS.META_KEY, JSON.stringify({ timestamp: ts, blobSavedAt: ts, by: 'other' }));
+  }
+  const leaseOf = (runtime) => {
+    const raw = runtime.map.get(RUNTIME_KEYS.LEASE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  };
+  const setLease = (runtime, lease) => runtime.map.set(RUNTIME_KEYS.LEASE_KEY, JSON.stringify(lease));
+
+  test('a cold instance adopts the runtime-cache catalog without touching Blob', async () => {
+    const runtime = fakeRuntime();
+    await seed(runtime, NOW - 5 * MIN, [{ id: 'a' }, { id: 'b' }]);
+    const { cache, shared, blob } = instance({ runtime });
+    expect(await shared.restoreCold()).toBe(true);
     expect(cache.matches).toHaveLength(2);
-    expect(cache.lastFetchTime).toBe(NOW - 5 * 60000);
-    expect(blob.get).toHaveBeenCalledWith(SNAPSHOT_PATH, { access: 'private', useCache: false });
-    // Once per instance.
-    await snap.loadOnce();
-    expect(blob.get).toHaveBeenCalledTimes(1);
+    expect(cache.lastFetchTime).toBe(NOW - 5 * MIN);
+    expect(blob.get).not.toHaveBeenCalled();
   });
 
-  test('ignores a snapshot older than the max age', async () => {
-    const cache = fakeCache(path.join(dir, 'm.json'));
+  test('falls back to Blob once per instance and seeds the runtime cache from it', async () => {
+    const runtime = fakeRuntime();
     const blob = fakeBlob();
-    blob.stored = gz({ schemaVersion: 9, timestamp: NOW - 7 * 3600000, matches: [{ id: 'a' }] });
-    const snap = createCatalogSnapshot({ cacheService: cache, blob, env: { BLOB_READ_WRITE_TOKEN: 'x' }, now: () => NOW });
-    expect(await snap.loadOnce()).toBe(false);
+    blob.stored = gz({ schemaVersion: 9, timestamp: NOW - 30 * MIN, matches: [{ id: 'a' }] });
+    const { cache, shared } = instance({ runtime, blob });
+    expect(await shared.restoreCold()).toBe(true);
+    expect(cache.matches).toEqual([{ id: 'a' }]);
+    expect(blob.get).toHaveBeenCalledWith(SNAPSHOT_PATH, { access: 'private', useCache: false });
+    expect((await runtime.get(RUNTIME_KEYS.META_KEY)).timestamp).toBe(NOW - 30 * MIN);
+
+    const empty = instance({ runtime: fakeRuntime(), blob: fakeBlob(), id: 'b' });
+    await empty.shared.restoreCold();
+    await empty.shared.restoreCold();
+    expect(empty.blob.get).toHaveBeenCalledTimes(1);
+  });
+
+  test('ignores a shared catalog older than the max age', async () => {
+    const runtime = fakeRuntime();
+    await seed(runtime, NOW - 7 * 60 * MIN);
+    const { cache, shared } = instance({ runtime, env: {} });
+    expect(await shared.restoreCold()).toBe(false);
     expect(cache.matches).toHaveLength(0);
   });
 
-  test('uploads the gzipped cache file privately, at most once per interval', async () => {
-    const file = path.join(dir, 'm.json');
-    fs.writeFileSync(file, JSON.stringify({ schemaVersion: 9, timestamp: NOW, matches: [{ id: 'a' }] }));
-    const cache = fakeCache(file);
-    cache.matches = [{ id: 'a' }];
-    cache.lastFetchTime = NOW;
+  test('publish shares every sync but uploads to Blob at most once per interval across instances', async () => {
+    const runtime = fakeRuntime();
     const blob = fakeBlob();
-    const snap = createCatalogSnapshot({ cacheService: cache, blob, env: { BLOB_READ_WRITE_TOKEN: 'x' }, now: () => NOW });
-
-    expect(await snap.save()).toBe('saved');
+    const a = instance({ runtime, blob, id: 'a' });
+    await a.cron.runSync();
+    expect(await a.shared.publish()).toBe('shared+blob');
     const [pathname, body, opts] = blob.put.mock.calls[0];
     expect(pathname).toBe(SNAPSHOT_PATH);
-    expect(JSON.parse(zlib.gunzipSync(body)).matches).toEqual([{ id: 'a' }]);
+    expect(JSON.parse(zlib.gunzipSync(body)).matches).toEqual([{ id: 'synced' }]);
     expect(opts).toMatchObject({ access: 'private', allowOverwrite: true, addRandomSuffix: false });
 
-    cache.lastFetchTime = NOW + 10 * 60000; // a newer sync, but inside the interval
-    expect(await snap.save()).toBe('skipped');
-    cache.lastFetchTime = NOW + 31 * 60000;
-    expect(await snap.save()).toBe('saved');
+    clock.t += 25 * MIN;
+    const b = instance({ runtime, blob, id: 'b' });
+    await b.cron.runSync();
+    expect(await b.shared.publish()).toBe('shared');
+    expect(blob.put).toHaveBeenCalledTimes(1);
+    expect((await runtime.get(RUNTIME_KEYS.META_KEY)).timestamp).toBe(NOW + 25 * MIN);
+
+    clock.t += 2 * 60 * MIN;
+    await b.cron.runSync();
+    expect(await b.shared.publish()).toBe('shared+blob');
     expect(blob.put).toHaveBeenCalledTimes(2);
   });
 
-  test('installSnapshotOnSync uploads only after a sync that changed the catalog', async () => {
-    const cache = { lastFetchTime: 1 };
-    const cronService = { runSync: jest.fn(async () => { cache.lastFetchTime = 2; }) };
-    const snapshot = { enabled: true, save: jest.fn(async () => 'saved') };
-    installSnapshotOnSync({ cronService, cacheService: cache, snapshot });
-    await cronService.runSync();
-    expect(snapshot.save).toHaveBeenCalledTimes(1);
-
-    const unchanged = { runSync: jest.fn(async () => {}) };
-    installSnapshotOnSync({ cronService: unchanged, cacheService: { lastFetchTime: 5 }, snapshot });
-    await unchanged.runSync();
-    expect(snapshot.save).toHaveBeenCalledTimes(1);
+  test('without a working runtime cache, Blob uploads are still throttled per instance', async () => {
+    const blob = fakeBlob();
+    const { cron, shared } = instance({ runtime: deadRuntime(), blob });
+    await cron.runSync();
+    expect(await shared.publish()).toBe('shared+blob');
+    clock.t += 25 * MIN;
+    await cron.runSync();
+    expect(await shared.publish()).toBe('failed');
+    expect(blob.put).toHaveBeenCalledTimes(1);
   });
 
-  test('a cold request uses the snapshot and skips the sync wait', async () => {
+  test('a stale instance adopts a newer shared catalog instead of syncing', async () => {
+    const runtime = fakeRuntime();
+    const { cache, cron, shared } = instance({ runtime });
+    await cron.runSync(); // local catalog from NOW
+    cron.syncNow.mockClear();
+    clock.t += 25 * MIN;
+    await seed(runtime, clock.t - 2 * MIN);
+    expect(await shared.refresh()).toBe('pulled');
+    expect(cache.lastFetchTime).toBe(clock.t - 2 * MIN);
+    expect(cron.syncNow).not.toHaveBeenCalled();
+  });
+
+  test('when the shared catalog is stale too, only the lease holder syncs', async () => {
+    const runtime = fakeRuntime();
+    const holder = instance({ runtime, id: 'holder' });
+    const other = instance({ runtime, id: 'other' });
+    clock.t += 25 * MIN; // both catalogs are empty, hence stale
+    setLease(runtime, { holder: 'holder', until: clock.t + 60000 });
+
+    expect(await other.shared.refresh()).toBe('leased-elsewhere');
+    expect(other.cron.syncNow).not.toHaveBeenCalled();
+
+    expect(await holder.shared.refresh()).toBe('synced');
+    expect(holder.cron.syncNow).toHaveBeenCalledTimes(1);
+    expect(leaseOf(runtime)).toBeNull(); // released
+  });
+
+  test('an expired lease no longer blocks a sync', async () => {
+    const runtime = fakeRuntime();
+    const { cron, shared } = instance({ runtime, id: 'b' });
+    clock.t += 25 * MIN;
+    setLease(runtime, { holder: 'dead', until: clock.t - 1 });
+    expect(await shared.refresh()).toBe('synced');
+    expect(cron.syncNow).toHaveBeenCalledTimes(1);
+  });
+
+  test('two instances racing for the lease: exactly one wins', async () => {
+    const runtime = fakeRuntime();
+    const a = instance({ runtime, id: 'a' });
+    const b = instance({ runtime, id: 'b' });
+    const won = await Promise.all([a.shared.tryAcquireLease(), b.shared.tryAcquireLease()]);
+    expect(won.filter(Boolean)).toHaveLength(1);
+  });
+
+  test('fresh catalogs, recent checks and running syncs do not touch the shared cache', async () => {
+    const runtime = fakeRuntime();
+    const { cron, shared } = instance({ runtime });
+    await cron.runSync();
+    runtime.get.mockClear();
+    expect(await shared.refresh()).toBe('fresh');
+    expect(runtime.get).not.toHaveBeenCalled();
+
+    clock.t += 25 * MIN;
+    setLease(runtime, { holder: 'other', until: clock.t + 60000 });
+    expect(await shared.refresh()).toBe('leased-elsewhere');
+    expect(await shared.refresh()).toBe('throttled');
+
+    clock.t += 2 * MIN;
+    cron.inflightSync = Promise.resolve();
+    expect(await shared.refresh()).toBe('syncing');
+  });
+
+  test('fails open: with no working runtime cache every instance syncs on its own', async () => {
+    const { cron, shared } = instance({ runtime: deadRuntime(), env: {} });
+    clock.t += 25 * MIN;
+    expect(await shared.refresh()).toBe('synced');
+    expect(cron.syncNow).toHaveBeenCalledTimes(1);
+  });
+
+  test('installSharedCatalog publishes before the sync counts as done, and routes ensureFresh', async () => {
+    const cache = { lastFetchTime: 1 };
+    const order = [];
+    const cronService = {
+      runSync: jest.fn(async () => { cache.lastFetchTime = 2; order.push('sync'); }),
+      ensureFresh: jest.fn()
+    };
+    const shared = {
+      publish: jest.fn(async () => { order.push('publish'); return 'shared'; }),
+      refresh: jest.fn(async () => 'fresh')
+    };
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      installSharedCatalog({ cronService, cacheService: cache, shared });
+      await cronService.runSync();
+      order.push('done');
+    } finally {
+      log.mockRestore();
+    }
+    expect(order).toEqual(['sync', 'publish', 'done']);
+
+    cronService.ensureFresh();
+    expect(shared.refresh).toHaveBeenCalledTimes(1);
+
+    cache.lastFetchTime = 5;
+    const unchanged = { runSync: jest.fn(async () => {}) };
+    installSharedCatalog({ cronService: unchanged, cacheService: cache, shared });
+    await unchanged.runSync();
+    expect(shared.publish).toHaveBeenCalledTimes(1);
+  });
+
+  test('a cold request uses the shared catalog and skips the sync', async () => {
     const d = deps();
-    const snapshot = {
-      enabled: true,
-      loadOnce: jest.fn(async () => { d.cacheService.getMatchesReadOnly.mockReturnValue([{ id: 'x' }]); return true; })
+    const shared = {
+      restoreCold: jest.fn(async () => { d.cacheService.getMatchesReadOnly.mockReturnValue([{ id: 'x' }]); return true; }),
+      syncOrWait: jest.fn()
     };
     const next = jest.fn();
-    await createColdStartGate({ ...d, snapshot })({ path: '/catalog/Sports/a.json' }, fakeRes(), next);
-    expect(snapshot.loadOnce).toHaveBeenCalledTimes(1);
+    await createColdStartGate({ ...d, shared })({ path: '/catalog/Sports/a.json' }, fakeRes(), next);
+    expect(shared.restoreCold).toHaveBeenCalledTimes(1);
+    expect(shared.syncOrWait).not.toHaveBeenCalled();
     expect(d.cronService.syncNow).not.toHaveBeenCalled();
     expect(next).toHaveBeenCalledTimes(1);
   });
 
-  test('a cold request falls back to the sync when there is no snapshot', async () => {
+  test('a cold request with nothing shared syncs or waits for the lease holder', async () => {
     const d = deps();
-    const snapshot = { enabled: true, loadOnce: jest.fn(async () => false) };
+    const shared = { restoreCold: jest.fn(async () => false), syncOrWait: jest.fn(async () => 'synced') };
     const next = jest.fn();
-    await createColdStartGate({ ...d, snapshot })({ path: '/catalog/Sports/a.json' }, fakeRes(), next);
-    expect(d.cronService.syncNow).toHaveBeenCalledTimes(1);
+    await createColdStartGate({ ...d, shared })({ path: '/catalog/Sports/a.json' }, fakeRes(), next);
+    expect(shared.syncOrWait).toHaveBeenCalledTimes(1);
     expect(next).toHaveBeenCalledTimes(1);
+  });
+
+  test('syncOrWait: a cold instance waits for the holder result instead of syncing', async () => {
+    const runtime = fakeRuntime();
+    const { cache, cron, shared } = instance({ runtime, id: 'waiter' });
+    setLease(runtime, { holder: 'holder', until: NOW + 60000 });
+    let metaReads = 0;
+    // The holder publishes while the waiter polls.
+    runtime.get.mockImplementation(async (k) => {
+      if (k === RUNTIME_KEYS.META_KEY && ++metaReads === 2) await seed(runtime, NOW);
+      return runtime.map.has(k) ? JSON.parse(runtime.map.get(k)) : null;
+    });
+    expect(await shared.syncOrWait(NOW + 1)).toBe('pulled');
+    expect(cron.syncNow).not.toHaveBeenCalled();
+    expect(cache.matches).toEqual([{ id: 'shared' }]);
+  });
+
+  test('syncOrWait: the lease holder syncs', async () => {
+    const runtime = fakeRuntime();
+    const { cron, shared } = instance({ runtime, id: 'first' });
+    expect(await shared.syncOrWait(NOW + 1)).toBe('synced');
+    expect(cron.syncNow).toHaveBeenCalledTimes(1);
   });
 });
 
