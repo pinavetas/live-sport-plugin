@@ -27,6 +27,7 @@
 const { createWorkerPool, resolveBudgetFile } = require('./WorkerBudget');
 const byteRangeSigner = require('./ByteRangeSigner');
 const segmentLengthService = require('./SegmentLengthService');
+const { byteRelayEnabled } = require('./SegmentRelayPolicy');
 
 // Legacy fallback worker pool (for explicit opt-out or testing)
 const workerPool = createWorkerPool({ persistPath: resolveBudgetFile() });
@@ -183,7 +184,7 @@ function rewriteHlsUri(segmentUri, manifestUrl, opts = {}) {
         return workerChunkUrl;
       }
 
-      if (!workerPool.config.hlschunkFallback) {
+      if (!workerPool.config.hlschunkFallback || !byteRelayEnabled()) {
         return absoluteUrl;
       }
 
