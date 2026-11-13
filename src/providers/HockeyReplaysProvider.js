@@ -185,18 +185,26 @@ class HockeyReplaysProvider extends BaseProvider {
     const allMatches = [];
     const seenIds = new Set();
 
-    for (const url of endpoints) {
+    // The index pages are independent: fetch them together so an unreachable
+    // site costs one request timeout per sync instead of one per page.
+    const pages = await Promise.all(endpoints.map(async (url) => {
       try {
+        // The circuit breaker's fallback resolves to null instead of throwing.
         const html = await this.fetchPage.fire(url);
-        const parsed = this._parseMatchCards(html);
-        for (const m of parsed) {
-          if (!seenIds.has(m.id)) {
-            seenIds.add(m.id);
-            allMatches.push(m);
-          }
-        }
+        if (typeof html !== 'string' || !html) throw new Error('no page content (request failed or circuit open)');
+        return this._parseMatchCards(html);
       } catch (err) {
         console.warn(`[HockeyReplays] Warning fetching ${url}:`, err.message);
+        return [];
+      }
+    }));
+
+    for (const parsed of pages) {
+      for (const m of parsed) {
+        if (!seenIds.has(m.id)) {
+          seenIds.add(m.id);
+          allMatches.push(m);
+        }
       }
     }
 

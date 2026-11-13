@@ -55,6 +55,10 @@ function _parseEventDate(raw) {
 }
 
 const DAY_MS = 86400000;
+// Parent sports a 'college' fixture may merge with (_sameEventPre guard 1).
+const COLLEGE_PARENTS = new Set(['american_football', 'football', 'basketball', 'baseball', 'hockey']);
+// _normalizeCategory memo: raw category -> parent sport (bounded vocabulary).
+const NORMALIZED_CATEGORY_MEMO = new Map();
 // Live-overlay candidate window. An ephemeral provider only publishes fixtures
 // that are live or about to be; a catalog row dated further away than this
 // cannot be the same event, so it is dropped before the expensive
@@ -874,6 +878,16 @@ class MatchAggregator {
    */
   _normalizeCategory(c) {
     if (!c) return c;
+    // Pure function of a small vocabulary, called twice per pair comparison in
+    // the O(N^2) merge: memoize by input instead of re-running the lookups.
+    const memo = NORMALIZED_CATEGORY_MEMO.get(c);
+    if (memo !== undefined) return memo;
+    const out = this._normalizeCategoryUncached(c);
+    if (NORMALIZED_CATEGORY_MEMO.size < 1000) NORMALIZED_CATEGORY_MEMO.set(c, out);
+    return out;
+  }
+
+  _normalizeCategoryUncached(c) {
     const lc = c.toLowerCase();
     if (['college', 'ncaa', 'ncaa_basketball', 'ncaa_football', 'ncaab', 'ncaaf'].includes(lc)) return 'college';
     if (['nbl', 'nba', 'wnba', 'euroleague', 'eurocup', 'fiba'].includes(lc)) return 'basketball';
@@ -923,10 +937,8 @@ class MatchAggregator {
     // while others use the parent sport name (basketball, american_football,
     // football, rugby). Normalise both to the parent before comparing so the
     // same fixture from two different providers isn't blocked by the guard.
-    const _normalizeCategory = (c) => this._normalizeCategory(c);
-    const c1 = _normalizeCategory(p1.category);
-    const c2 = _normalizeCategory(p2.category);
-    const COLLEGE_PARENTS = new Set(['american_football', 'football', 'basketball', 'baseball', 'hockey']);
+    const c1 = this._normalizeCategory(p1.category);
+    const c2 = this._normalizeCategory(p2.category);
     const isCollegeSport = (c1 === 'college' && COLLEGE_PARENTS.has(c2)) ||
                            (c2 === 'college' && COLLEGE_PARENTS.has(c1)) ||
                            ((p1.category || '').toLowerCase() === 'college' && COLLEGE_PARENTS.has(c2)) ||
@@ -942,11 +954,23 @@ class MatchAggregator {
       return false;
     }
 
-    // Explicit squad distinctions also constrain ID/alias shortcuts. Missing
-    // labels cannot safely inherit a women's, youth or reserve team's sources.
-    if (!isMoto1 && !isMoto2 && !_squadsCompatible(p1, p2)) return false;
+    // Past the guard above, either both sides are motorsport or neither is.
+    if (!isMoto1 && !isMoto2) {
+      // 3. Date window (fixtures) / replay identity claims (replays). These
+      //    are cheap and reject most pairs, so they run before the squad check;
+      //    all three are pure predicates joined by AND, so the order does not
+      //    change the result.
+      if (p1.isReplay && p2.isReplay) {
+        if (!_replayClaimsCompatible(p1.replayClaims, p2.replayClaims)) return false;
+      } else if (p1.date && p2.date && Math.abs(p1.date - p2.date) > DAY_MS) {
+        return false;
+      }
+      // Explicit squad distinctions also constrain ID/alias shortcuts. Missing
+      // labels cannot safely inherit a women's, youth or reserve team's sources.
+      if (!_squadsCompatible(p1, p2)) return false;
+    }
 
-    // 3. Date window & motorsport identity guards
+    // 3. Motorsport identity guards
     if (isMoto1 && isMoto2) {
       // 3a. Series isolation: different series never merge
       if (p1.motorsportSeries !== p2.motorsportSeries && p1.motorsportSeries !== 'other' && p2.motorsportSeries !== 'other') {
@@ -963,10 +987,6 @@ class MatchAggregator {
         // Events > 48 hours apart never merge for motorsport
         return false;
       }
-    } else if (p1.isReplay && p2.isReplay) {
-      if (!_replayClaimsCompatible(p1.replayClaims, p2.replayClaims)) return false;
-    } else {
-      if (p1.date && p2.date && Math.abs(p1.date - p2.date) > DAY_MS) return false;
     }
 
     // IDs and aliases cannot bypass date/session or squad contradictions.
@@ -1332,6 +1352,9 @@ class MatchAggregator {
     // chunks and yield between chunks (setImmediate lets pending I/O callbacks
     // and queued request handlers run) so no single block exceeds ~20ms.
     const MERGE_CHUNK = Number(process.env.MERGE_CHUNK_SIZE || 25);
+    // Per-row visited markers for the category-bucket fallback (index -> stamp).
+    const bucketVisitStamp = [];
+    let bucketVisitGen = 0;
     const yieldToLoop = () => new Promise((resolve) => setImmediate(resolve));
 
     const processProviderMatches = async (providerMatches) => {
@@ -1479,7 +1502,9 @@ class MatchAggregator {
               if (this._sameEventPre(pCand, pre) && acceptCandidate(i)) break;
             }
           } else {
-            const checkedIndices = new Set();
+            // Dedupe across buckets with a generation stamp instead of a fresh
+            // Set per row (this loop runs for almost every row).
+            const visitGen = ++bucketVisitGen;
             const bucketsToCheck = [categoryBuckets.get(c2), categoryBuckets.get('other')];
             if (isCollege2) {
               bucketsToCheck.push(
@@ -1499,8 +1524,8 @@ class MatchAggregator {
               if (!b) continue;
               for (let j = b.length - 1; j >= 0; j--) {
                 const i = b[j];
-                if (checkedIndices.has(i)) continue;
-                checkedIndices.add(i);
+                if (bucketVisitStamp[i] === visitGen) continue;
+                bucketVisitStamp[i] = visitGen;
                 const pCand = finalPres[i];
                 if (pCand.isChannel) continue;
                 const maxDateDelta = (pre.category === 'motorsport' || pCand.category === 'motorsport') ? 172800000 : DAY_MS;
