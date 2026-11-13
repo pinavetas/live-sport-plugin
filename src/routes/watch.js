@@ -8,6 +8,43 @@ const express = require('express');
 const router = express.Router();
 const { extractYouTubeVideoId, youtubeWatchUrl } = require('../services/YouTubeRedirect');
 
+// Pinned player library (an unpinned @latest can change under a live page).
+const HLS_JS_URL = 'https://cdn.jsdelivr.net/npm/hls.js@1.7.4/dist/hls.min.js';
+const FONTS_LINK = '<link rel="icon" href="/favicon.svg" type="image/svg+xml">\n  ' +
+  '<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@700;800&family=Inter:wght@400;600&display=swap" rel="stylesheet">';
+
+// Shared look for the /watch pages, matching public/ui.css. Inlined so the
+// page still renders when a TV webview blocks extra requests.
+const WATCH_BASE_CSS = `
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0c0f; color: #eef1f5;
+      font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+    .pitch { background:
+      radial-gradient(900px 340px at 10% -20%, rgba(198, 255, 61, 0.10), transparent 60%),
+      repeating-linear-gradient(115deg, rgba(255, 255, 255, 0.022) 0 2px, transparent 2px 14px), #0e1115; }
+    .display { font-family: 'Barlow Condensed', 'Arial Narrow', 'Roboto Condensed', system-ui, sans-serif;
+      font-weight: 800; line-height: 0.98; letter-spacing: 0.02em; text-transform: uppercase; }
+    .spinner { width: 46px; height: 46px; border: 3px solid #364050; border-top-color: #c6ff3d;
+      border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .live { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px 4px 8px; border-radius: 4px;
+      background: #ff3b3b; color: #fff; font: 700 12px/1 'Barlow Condensed', 'Arial Narrow', sans-serif;
+      letter-spacing: 0.14em; text-transform: uppercase; }
+    .live i { width: 6px; height: 6px; border-radius: 50%; background: #fff; animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: 0.35; } }
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 46px;
+      padding: 0 22px; border: 0; border-radius: 10px; background: #c6ff3d; color: #0a0c0f;
+      font: 700 17px/1 'Barlow Condensed', 'Arial Narrow', sans-serif; letter-spacing: 0.08em;
+      text-transform: uppercase; text-decoration: none; cursor: pointer; }
+    .btn:hover, .btn:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
+    .hint { color: #9ba5b4; font-size: 15px; line-height: 1.5; }
+    #topbar { position: fixed; top: 0; left: 0; right: 0; z-index: 10; display: flex; align-items: center; gap: 12px;
+      padding: 14px 20px; background: linear-gradient(to bottom, rgba(0, 0, 0, 0.85), transparent);
+      font-size: 14px; font-weight: 600; pointer-events: none; animation: fadeOut 1s ease 4s forwards; }
+    @keyframes fadeOut { to { opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) { .live i, #topbar { animation: none; } }
+`;
+
 // ─── /watch — Embed Proxy Page ────────────────────────────────────────────────
 
 // When the user clicks a stream, Nuvio opens this URL in the browser.
@@ -73,50 +110,32 @@ router.get('/watch', (req, res) => {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-  <title>\uD83D\uDD34 ${safeTitle} | Extracting Stream</title>
-  <style>
-    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; background: #0a0a0a; overflow: hidden;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #fff; }
-    #stage { position: fixed; inset: 0; display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 16px; }
-    .spinner { width: 52px; height: 52px; border: 4px solid rgba(255,255,255,0.1);
-      border-top-color: #f44; border-radius: 50%; animation: spin 0.8s linear infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    #status { font-size: 15px; opacity: 0.8; text-align: center; padding: 0 24px; }
-    #title  { font-size: 19px; font-weight: 700; text-align: center; padding: 0 24px; }
-    #error  { display: none; flex-direction: column; align-items: center; gap: 12px; }
-    #error p { font-size: 14px; opacity: 0.6; text-align: center; max-width: 340px; }
-    #open-btn {
-      margin-top: 6px; padding: 10px 24px; background: #f44; color: #fff;
-      border: none; border-radius: 8px; font-size: 14px; font-weight: 600;
-      cursor: pointer; text-decoration: none;
-    }
+  <title>${safeTitle} | Extracting Stream</title>
+  ${FONTS_LINK}
+  <style>${WATCH_BASE_CSS}
+    #stage { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 18px; padding: 24px; text-align: center; }
+    #title { max-width: 900px; font-size: clamp(30px, 5vw, 54px); }
+    #status { color: #9ba5b4; font-size: 15px; }
+    #error { display: none; flex-direction: column; align-items: center; gap: 16px; }
+    #error p { max-width: 380px; color: #9ba5b4; font-size: 14px; line-height: 1.5; }
     #video-player { display: none; position: fixed; inset: 0; width: 100%; height: 100%; background: #000; }
-    #topbar {
-      position: fixed; top: 0; left: 0; right: 0; z-index: 10;
-      background: linear-gradient(to bottom, rgba(0,0,0,0.85), transparent);
-      padding: 12px 20px; color: #fff; font-size: 14px; font-weight: 600;
-      display: flex; align-items: center; gap: 10px;
-      animation: fadeOut 1s ease 4s forwards;
-    }
-    #topbar .dot { width: 10px; height: 10px; background: #f44; border-radius: 50%;
-      flex-shrink: 0; animation: pulse 1s infinite; }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-    @keyframes fadeOut { to { opacity: 0; pointer-events: none; } }
+    #topbar { display: none; }
+    #video-player[style*="block"] + #topbar { display: flex; }
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script src="${HLS_JS_URL}"></script>
 </head>
 <body>
-  <div id="topbar"><span class="dot"></span><span>${safeTitle}</span></div>
   <video id="video-player" controls autoplay playsinline></video>
-  <div id="stage">
+  <div id="topbar"><span class="live"><i></i>Live</span><span>${safeTitle}</span></div>
+  <div id="stage" class="pitch">
+    <span class="live"><i></i>Live</span>
+    <p id="title" class="display">${safeTitle}</p>
     <div class="spinner" id="spinner"></div>
-    <p id="title">\uD83D\uDD34 ${safeTitle}</p>
     <p id="status">Fetching stream&hellip;</p>
     <div id="error">
       <p>Could not extract a direct stream from this embed.<br>Try opening it in your browser instead.</p>
-      <a id="open-btn" href="${safeEmbed}" target="_blank" rel="noopener noreferrer">Open in Browser</a>
+      <a id="open-btn" class="btn" href="${safeEmbed}" target="_blank" rel="noopener noreferrer">Open in browser</a>
     </div>
   </div>
   <script>
@@ -227,13 +246,25 @@ router.get('/watch', (req, res) => {
       const target = youtubeWatchUrl(extractYouTubeVideoId(fragment));
       if (target) return res.redirect(target);
     }
-    return res.status(400).send(`
-      <!DOCTYPE html><html><body style="background:#111;color:#eee;font-family:sans-serif;text-align:center;padding-top:60px;">
-        <h2>No Stream URL Provided</h2>
-        <p>This stream link was opened without a valid ?url parameter.</p>
-        <p><a href="/" style="color:#f44;text-decoration:none;">Return to Nuvio</a></p>
-      </body></html>
-    `);
+    return res.status(400).send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>No stream | Live Sports</title>
+  ${FONTS_LINK}
+  <style>${WATCH_BASE_CSS}
+    body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px; text-align: center; }
+    h1 { font-size: clamp(30px, 5vw, 48px); }
+    .hint { max-width: 420px; }
+  </style>
+</head>
+<body class="pitch">
+  <h1 class="display">No Stream URL Provided</h1>
+  <p class="hint">This stream link was opened without a valid ?url parameter.</p>
+  <a class="btn" href="/">Back to setup</a>
+</body>
+</html>`);
   }
 
   // Validate — only allow http/https URLs
@@ -270,110 +301,52 @@ router.get('/watch', (req, res) => {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
   <meta name="referrer" content="no-referrer">
-  <title>\uD83D\uDD34 ${safeTitle} | Live Sports</title>
-  <style>
-    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; background: #000; overflow: hidden;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
-
-    #topbar {
-      position: fixed; top: 0; left: 0; right: 0; z-index: 10;
-      background: linear-gradient(to bottom, rgba(0,0,0,0.85), transparent);
-      padding: 12px 20px; color: #fff; font-size: 14px; font-weight: 600;
-      display: flex; align-items: center; gap: 10px;
-      animation: fadeOut 1s ease 4s forwards;
-      pointer-events: none;
-    }
-    #topbar .dot {
-      width: 10px; height: 10px; background: #f44;
-      border-radius: 50%; flex-shrink: 0;
-      animation: pulse 1s infinite;
-    }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50%       { opacity: 0.5; transform: scale(1.3); }
-    }
-    @keyframes fadeOut { to { opacity: 0; } }
-
+  <title>${safeTitle} | Live Sports</title>
+  ${FONTS_LINK}
+  <style>${WATCH_BASE_CSS}
     #fs-btn {
       position: fixed; top: 12px; right: 16px; z-index: 100;
-      display: flex; align-items: center; gap: 8px;
-      background: rgba(20, 20, 20, 0.85); color: #fff;
-      border: 2px solid rgba(255, 255, 255, 0.3); border-radius: 10px;
-      padding: 10px 18px; font-size: 14px; font-weight: 700;
-      cursor: pointer; backdrop-filter: blur(8px);
-      transition: all 0.25s ease, opacity 0.6s ease;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+      display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px;
+      border: 1px solid rgba(255, 255, 255, 0.22); border-radius: 10px;
+      background: rgba(14, 17, 21, 0.82); color: #eef1f5;
+      font: 700 15px/1 'Barlow Condensed', 'Arial Narrow', sans-serif; letter-spacing: 0.1em; text-transform: uppercase;
+      cursor: pointer; -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+      transition: background-color 0.2s ease, color 0.2s ease, transform 0.2s ease, opacity 0.6s ease;
       user-select: none; outline: none;
     }
-    #fs-btn:hover, #fs-btn:focus {
-      background: #f44; border-color: #fff;
-      transform: scale(1.08); box-shadow: 0 0 20px rgba(255,68,68,0.8);
-    }
+    #fs-btn:hover, #fs-btn:focus { background: #c6ff3d; border-color: #c6ff3d; color: #0a0c0f; transform: scale(1.05); }
     #fs-btn.fade-out { opacity: 0.15; }
     #fs-btn.fade-out:hover, #fs-btn.fade-out:focus { opacity: 1; }
-
-    #player {
-      position: fixed; top: 0; left: 0;
-      width: 100vw; height: 100vh;
-      border: none; display: block; background: #000;
-    }
-
-    #video-player {
-      position: fixed; top: 0; left: 0;
-      width: 100vw; height: 100vh;
-      border: none; display: none; background: #000;
-    }
+    #player { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; border: none; display: block; background: #000; }
+    #video-player { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; border: none; display: none; background: #000; }
     #loader {
-      position: fixed; inset: 0; background: #111;
-      display: flex; flex-direction: column;
-      align-items: center; justify-content: center;
-      gap: 20px; color: #fff; z-index: 5;
-      transition: opacity 0.6s ease;
+      position: fixed; inset: 0; z-index: 5;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+      padding: 24px; text-align: center; transition: opacity 0.6s ease;
     }
     #loader.hidden { opacity: 0; pointer-events: none; }
-    #loader .spinner {
-      width: 48px; height: 48px;
-      border: 4px solid rgba(255,255,255,0.15);
-      border-top-color: #f44; border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    #loader .match { font-size: 18px; font-weight: 600; text-align: center; padding: 0 24px; }
-    #loader .hint  { font-size: 13px; opacity: 0.5; }
-    
-    #p2p-status {
-      position: fixed; bottom: 20px; right: 20px; background: rgba(0,0,0,0.7); color: #0f0;
-      padding: 5px 10px; border-radius: 4px; font-size: 12px; font-family: monospace; z-index: 20;
-      display: none;
-    }
+    #loader .match { max-width: 900px; font-size: clamp(30px, 5vw, 54px); }
+    #embed-fallback { display: none; margin-top: 6px; }
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/p2p-media-loader-core@latest/build/p2p-media-loader-core.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/p2p-media-loader-hlsjs@latest/build/p2p-media-loader-hlsjs.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script src="${HLS_JS_URL}"></script>
 </head>
 <body>
-  <div id="loader">
+  <div id="loader" class="pitch">
+    <span class="live"><i></i>Live</span>
+    <p class="match display">${safeTitle}</p>
     <div class="spinner"></div>
-    <p class="match">\uD83D\uDD34 ${safeTitle}</p>
-    <p class="hint">Loading stream\u2026</p>
-    <a id="embed-fallback" href="${safeUrl}" target="_blank" rel="noopener noreferrer"
-       style="display:none; margin-top:16px; padding:10px 22px; background:#f44; color:#fff;
-              border-radius:8px; font-size:14px; font-weight:600; text-decoration:none;">
-      Stream did not start \u2014 open in browser
+    <p class="hint">Loading stream…</p>
+    <a id="embed-fallback" class="btn" href="${safeUrl}" target="_blank" rel="noopener noreferrer">
+      Stream did not start — open in browser
     </a>
   </div>
 
-  <div id="topbar">
-    <span class="dot"></span>
-    <span>${safeTitle}</span>
-  </div>
+  <div id="topbar"><span class="live"><i></i>Live</span><span>${safeTitle}</span></div>
 
   <button id="fs-btn" tabindex="0" title="Toggle Fullscreen (or Press OK on Remote)">
-    <span>\u26F6 Fullscreen</span>
+    <span>⛶ Fullscreen</span>
   </button>
-
-  <div id="p2p-status">P2P Active: 0 Peers</div>
 
   <iframe
     id="player"
@@ -423,7 +396,6 @@ router.get('/watch', (req, res) => {
     const loader = document.getElementById('loader');
     const iframe = document.getElementById('player');
     const video = document.getElementById('video-player');
-    const p2pStatus = document.getElementById('p2p-status');
     const targetUrl = "${safeUrl}";
     const isM3u8 = targetUrl.includes('.m3u8');
     
@@ -431,17 +403,16 @@ router.get('/watch', (req, res) => {
     let finalUrl = targetUrl;
 
     // >>> TV-SAFE PLAYBACK: graceful degradation
-    // TV WebViews vary widely: many block WebRTC (so P2P construction throws),
-    // lack Web Workers, or block the cross-origin CDN scripts. Previously ANY
-    // throw during P2P setup aborted this whole script, leaving a permanent
-    // spinner - reported as a "sandbox error" on TV. Each capability is now
+    // TV WebViews vary widely: many lack Web Workers or block the cross-origin
+    // CDN script. Any throw used to abort this whole script, leaving a permanent
+    // spinner - reported as a "sandbox error" on TV. Each capability is
     // feature-detected, and every failure falls through to the next strategy.
     function showFatal(msg) {
       loader.classList.remove('hidden');
       var hint = loader.querySelector('.hint');
       if (hint) hint.textContent = msg;
       var fb = document.getElementById('embed-fallback');
-      if (fb) fb.style.display = 'inline-block';
+      if (fb) fb.style.display = 'inline-flex';
     }
 
     function startHls(opts) {
@@ -467,24 +438,7 @@ router.get('/watch', (req, res) => {
       video.style.display = 'block';
       var started = false;
 
-      // 1) P2P via WebRTC - optional, and the most likely to be blocked on TV.
-      try {
-        if (window.p2pml && p2pml.hlsjs && p2pml.hlsjs.Engine && p2pml.hlsjs.Engine.isSupported()) {
-          p2pStatus.style.display = 'block';
-          var engine = new p2pml.hlsjs.Engine();
-          engine.on('peer_connect', function () { p2pStatus.innerText = 'P2P Active'; });
-          // enableWorker disabled: TV engines frequently lack Worker support.
-          startHls({ liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 3,
-                     enableWorker: false,
-                     loader: engine.createLoaderClass() });
-          started = true;
-        }
-      } catch (e) {
-        console.warn('[player] P2P unavailable, continuing without it:', e && e.message);
-        p2pStatus.style.display = 'none';
-      }
-
-      // 2) Plain hls.js, worker disabled for maximum TV compatibility.
+      // 1) hls.js, worker disabled for maximum TV compatibility.
       if (!started && window.Hls && Hls.isSupported()) {
         try {
           startHls({ liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 3,
@@ -495,7 +449,7 @@ router.get('/watch', (req, res) => {
         }
       }
 
-      // 3) Native HLS (Safari/iOS and some TV engines).
+      // 2) Native HLS (Safari/iOS and some TV engines).
       if (!started && video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = finalUrl;
         video.addEventListener('loadedmetadata', function () {
@@ -523,7 +477,7 @@ router.get('/watch', (req, res) => {
         if (iframeLoaded) return;
         loader.classList.add('hidden');
         const fallback = document.getElementById('embed-fallback');
-        if (fallback) fallback.style.display = 'inline-block';
+        if (fallback) fallback.style.display = 'inline-flex';
       }, 12000);
     }
   </script>

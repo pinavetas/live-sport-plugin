@@ -26,7 +26,7 @@ symptom follows from that one rule.
 | `/img/match` | **none** | `max-age=120, s-maxage=300` | `DYNAMIC` | extensionless |
 | `/img?url=...` | **none** | `max-age=120, s-maxage=300` | `DYNAMIC` | extensionless |
 | `/img/sport/:sport`, `/img/date` | **none** | `max-age=86400` | `DYNAMIC` | extensionless |
-| `/logo.png`, `/bitcoin.png`, `/solana.png` | yes | `max-age=14400` | `REVALIDATED` / `EXPIRED` / `MISS` | control set: extension + permissive header = cached |
+| `/logo.png`, `/ui.css`, `/favicon.svg` | yes | `max-age=14400` | `REVALIDATED` / `EXPIRED` / `MISS` | control set: extension + permissive header = cached |
 
 Measured payload sizes: replay hero JPEGs 167–289 KB; `/img/match` ~83.5 KB avg
 (100 per replay catalogue page); `/img?url=` ~35.8 KB avg (100 per sport
