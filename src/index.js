@@ -33,6 +33,7 @@ const https = require('https');
 const http = require('http');
 const fs = require('fs');
 const { RESOLVER_PORT, workerOffset } = require('./resolverManager');
+const { IS_SERVERLESS, createColdStartGate } = require('./serverless');
 
 // Removed global User-Agent fix because it causes ECONNRESET on Streamed.pk
 
@@ -54,6 +55,16 @@ const app = express();
 app.set('container', container);
 app.set('trust proxy', true);
 app.use(cors());
+
+// Vercel Functions: on a cold start, wait for the first catalog sync before
+// answering catalog/meta/stream, and keep a running sync alive past the
+// response (see src/serverless.js). Long-running servers skip this.
+if (IS_SERVERLESS) {
+  app.use(createColdStartGate({
+    cronService: container.resolve('cronService'),
+    cacheService: container.resolve('cacheService')
+  }));
+}
 
 // Opt-in access log (LOG_REQUESTS=1): one line per request with client IP,
 // path, status and duration. Off by default: config segments and stream URLs
@@ -1153,28 +1164,35 @@ app.use(require('./routes/watch'));
 app.use(require('./routes/health'));
 // ─── Start Server ─────────────────────────────────────────────────────────────
 
-// In cluster mode, only the primary worker instance runs background cron syncs
-if (workerOffset === 0) {
-  container.resolve('cronService').start();
+// Vercel invokes the exported app once per request: no listener, no cron jobs
+// (the catalog refreshes on traffic through CronService.ensureFresh()).
+if (IS_SERVERLESS) {
+  module.exports = app;
+} else {
+  startServer();
 }
 
-const BIND_HOST = process.env.HOST || process.env.IP || '0.0.0.0';
-const server = app.listen(PORT, BIND_HOST, () => {
-  console.log('');
-  console.log('╔══════════════════════════════════════════════════════╗');
-  console.log('║          🔴 Live Sports add-on                       ║');
-  console.log('╠══════════════════════════════════════════════════════╣');
-  console.log(`║  Port       : ${String(PORT).padEnd(39)}║`);
-  console.log(`║  Public URL : ${BASE_URL.padEnd(39)}║`);
-  console.log('║                                                      ║');
-  console.log('║  📋 Install in Stremio with this manifest URL:      ║');
-  console.log(`║  ${(BASE_URL + '/manifest.json').padEnd(52)}║`);
-  console.log('╚══════════════════════════════════════════════════════╝');
-  console.log('');
-});
-// Without this, EADDRINUSE leaves a process that serves nothing while cron keeps
-// scraping, and PM2 / Docker never restart it.
-attachServerErrorHandler(server, { port: PORT, host: BIND_HOST });
+function startServer() {
+  // In cluster mode, only the primary worker instance runs background cron syncs
+  if (workerOffset === 0) {
+    container.resolve('cronService').start();
+  }
 
-
-
+  const BIND_HOST = process.env.HOST || process.env.IP || '0.0.0.0';
+  const server = app.listen(PORT, BIND_HOST, () => {
+    console.log('');
+    console.log('╔══════════════════════════════════════════════════════╗');
+    console.log('║          🔴 Live Sports add-on                       ║');
+    console.log('╠══════════════════════════════════════════════════════╣');
+    console.log(`║  Port       : ${String(PORT).padEnd(39)}║`);
+    console.log(`║  Public URL : ${BASE_URL.padEnd(39)}║`);
+    console.log('║                                                      ║');
+    console.log('║  📋 Install in Stremio with this manifest URL:      ║');
+    console.log(`║  ${(BASE_URL + '/manifest.json').padEnd(52)}║`);
+    console.log('╚══════════════════════════════════════════════════════╝');
+    console.log('');
+  });
+  // Without this, EADDRINUSE leaves a process that serves nothing while cron keeps
+  // scraping, and PM2 / Docker never restart it.
+  attachServerErrorHandler(server, { port: PORT, host: BIND_HOST });
+}

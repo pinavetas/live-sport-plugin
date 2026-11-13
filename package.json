@@ -34,6 +34,7 @@
     "prebuild:local": "npm run check:timezone"
   },
   "dependencies": {
+    "@vercel/functions": "^3.10.5",
     "awilix": "^13.0.5",
     "big-integer": "^1.6.52",
     "cheerio": "^1.2.0",

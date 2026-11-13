@@ -138,6 +138,24 @@ class CronService {
    * snapshotted the provider list before the parser was mounted, so a single
    * follow-up run is queued behind it (concurrent requests share it).
    */
+  /**
+   * Joins the sync that is running, or starts one. Unlike requestSync() it
+   * never queues a follow-up run, so a burst of callers costs one sync. Used
+   * by the serverless cold-start gate (src/serverless.js).
+   * Settles (never rejects) when that run ends.
+   */
+  syncNow() {
+    if (this._syncInProgress()) return this._inflightSync || Promise.resolve();
+    return this.runSync().catch((err) => {
+      console.error('[CronService] On-demand sync failed:', err.message);
+    });
+  }
+
+  /** The promise of the sync currently running, or null when idle. */
+  get inflightSync() {
+    return this._syncInProgress() ? (this._inflightSync || null) : null;
+  }
+
   requestSync() {
     if (!this._syncInProgress()) return this.runSync();
     if (!this._followUpSync) {

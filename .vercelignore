@@ -1,0 +1,10 @@
+# Upload only what the Vercel Function needs (allowlist). Everything else in
+# the repo (tests, docs, scripts, local data, the Docker/VPS tooling, .env) stays
+# out of the deployment.
+/*
+!/api
+!/src
+!/public
+!/package.json
+!/package-lock.json
+!/vercel.json

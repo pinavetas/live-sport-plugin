@@ -93,6 +93,10 @@ const BASE_URL = (
   process.env.ADDON_URL ||                                      // Manual override for other hosts
   process.env.RENDER_EXTERNAL_URL ||                            // Render sets this automatically
   (process.env.WEBSITE_HOSTNAME ? `https://${process.env.WEBSITE_HOSTNAME}` : null) || // Azure automatically sets this
+  // Vercel: the stable production domain, not the per-deployment URL (the
+  // latter sits behind Vercel Deployment Protection, so clients get 401).
+  (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : null) ||
+  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null) ||
   `http://${getLocalIp()}:${PORT}`                              // Local dev fallback to LAN IP
 ).replace(/\/$/, '');                                           // Strip trailing slash if any
 
