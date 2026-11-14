@@ -122,6 +122,31 @@ describe('Manifest Proxy Web-Ready Stream Normalization (Issue #42)', () => {
     expect(st.behaviorHints.proxyHeaders).toBeUndefined();
   });
 
+  test('hands the player the Referer/Origin a non-whitelisted /api/manifest URL carries', async () => {
+    jest.spyOn(container.resolve('ppvStProvider'), 'resolveStream').mockResolvedValue([
+      {
+        name: 'PPV.st',
+        title: 'PPV Stream 2',
+        url: 'https://nuviosports.xyz/api/manifest?url=https%3A%2F%2Fcdn.example.com%2Fvix.m3u8' +
+          '&referer=https%3A%2F%2Fembed.example%2F&origin=https%3A%2F%2Fembed.example',
+        behaviorHints: {
+          notWebReady: true,
+          proxyHeaders: { request: { 'Referer': 'https://embed.example/', 'Cookie': 'session=secret' } }
+        },
+        _source: 'ppvst'
+      }
+    ]);
+
+    const res = await handleStream('tv', 'nuvio_sport_test_manifest_event_ppvst_ref', {});
+    const st = res.streams.find(s => s.url && s.url.includes('/api/manifest'));
+    expect(st).toBeDefined();
+    expect(st.behaviorHints.notWebReady).toBe(false);
+    // Only the URL's own bounded Referer/Origin; provider cookies never reach the player.
+    expect(st.behaviorHints.proxyHeaders).toEqual({
+      request: { 'Referer': 'https://embed.example/', 'Origin': 'https://embed.example' }
+    });
+  });
+
   test('enforces notWebReady: false and sets proxyHeaders for direct unproxied m3u8 streams', async () => {
     jest.spyOn(container.resolve('daddyLiveProvider'), 'resolveStream').mockResolvedValue([
       {

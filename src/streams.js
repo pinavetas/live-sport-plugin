@@ -782,6 +782,23 @@ function wrapIspBlockedDirectHls(stream, addonBaseUrl) {
   return proxied;
 }
 
+/**
+ * A Referer/Origin value safe to hand a player as proxyHeaders: a bounded,
+ * credential-free http(s) URL (an Origin must be a bare origin). Returns the
+ * value, or '' when it does not qualify.
+ */
+function boundedPlaybackHeader(name, value) {
+  if (typeof value !== 'string' || !value || value.length > 2048 || /[\u0000-\u0020\u007f]/.test(value)) return '';
+  try {
+    const parsed = new URL(value);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return '';
+    if (name === 'Origin' && parsed.origin !== value) return '';
+    return value;
+  } catch (_) {
+    return '';
+  }
+}
+
 function verificationHeaders(stream) {
   const canonical = new Map([
     ['referer', 'Referer'], ['origin', 'Origin'], ['user-agent', 'User-Agent'],
@@ -1942,15 +1959,23 @@ async function handleStream(type, id, config) {
           const userAgent = manifestUserAgent(headers['User-Agent']);
           if (userAgent) request['User-Agent'] = userAgent;
           for (const name of ['Referer', 'Origin']) {
-            const value = headers[name];
-            if (typeof value !== 'string' || value.length > 2048 || /[\u0000-\u0020\u007f]/.test(value)) continue;
-            try {
-              const parsed = new URL(value);
-              if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) continue;
-              if (name === 'Origin' && parsed.origin !== value) continue;
-              request[name] = value;
-            } catch (_) {}
+            const value = boundedPlaybackHeader(name, headers[name]);
+            if (value) request[name] = value;
           }
+        } else {
+          // The playlist proxy fetches upstream with the Referer/Origin in its
+          // own URL, but the segments it lists go straight to the CDN, which
+          // usually wants them too. Hand them to the player so clients that
+          // apply proxyHeaders (Nuvio; Stremio desktop through its local
+          // streaming-server /proxy) send them; otherwise those segments play
+          // only through the media relay, which is off on Vercel.
+          try {
+            const params = new URL(s.url, BASE_URL).searchParams;
+            for (const [name, param] of [['Referer', 'referer'], ['Origin', 'origin']]) {
+              const value = boundedPlaybackHeader(name, params.get(param));
+              if (value) request[name] = value;
+            }
+          } catch (_) {}
         }
         if (Object.keys(request).length) s.behaviorHints.proxyHeaders = { request };
         else delete s.behaviorHints.proxyHeaders;
