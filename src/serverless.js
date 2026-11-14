@@ -44,6 +44,10 @@ const IS_SERVERLESS = !!process.env.VERCEL;
 
 // Requests that are useless against an empty catalog.
 const DATA_ROUTE = /^\/(?:[^/]+\/)?(?:catalog|meta|stream)\//;
+// ...except Plooplayer's, which come from the install's own list, not from the
+// synced sports catalog: they must never wait for that sync.
+const { PLOO_TYPE } = require('./services/plooplayer/PlooChannels');
+const INDEPENDENT_DATA_ROUTE = new RegExp(`^/(?:[^/]+/)?(?:catalog|meta|stream)/${PLOO_TYPE}/`);
 // Responses the CDN may serve stale while revalidating.
 const CDN_SWR_ROUTE = /^\/(?:[^/]+\/)?(?:(?:catalog|meta)\/.+|manifest\.json)$/;
 
@@ -516,7 +520,8 @@ function createColdStartGate({ cronService, cacheService, shared = null, maxWait
     // Whatever sync is running when this response ends must be allowed to finish.
     res.on('finish', () => keepAlive(cronService.inflightSync));
 
-    if (!DATA_ROUTE.test(requestPath(req)) || !catalogIsEmpty(cacheService)) return next();
+    const p = requestPath(req);
+    if (!DATA_ROUTE.test(p) || INDEPENDENT_DATA_ROUTE.test(p) || !catalogIsEmpty(cacheService)) return next();
 
     const deadline = now() + maxWaitMs;
     if (shared) {
@@ -560,6 +565,7 @@ function applyServerlessFsDefaults(env = process.env) {
 module.exports = {
   IS_SERVERLESS,
   DATA_ROUTE,
+  INDEPENDENT_DATA_ROUTE,
   CDN_SWR_ROUTE,
   SNAPSHOT_PATH,
   RUNTIME_KEYS: { DATA_KEY, META_KEY, LEASE_KEY },

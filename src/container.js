@@ -48,6 +48,8 @@ const NbaMonsterProvider = require('./providers/NbaMonsterProvider');
 const LeafRecapProvider = require('./providers/LeafRecapProvider');
 const ScoreZoneProvider = require('./providers/ScoreZoneProvider');
 const PitSportProvider = require('./providers/PitSportProvider');
+const PlooplayerProvider = require('./providers/PlooplayerProvider');
+const PlooplayerService = require('./services/PlooplayerService');
 const ProviderHealthService = require('./services/ProviderHealthService');
 const BroadcasterMatchService = require('./services/BroadcasterMatchService');
 const DashToHlsService = require('./services/DashToHlsService');
@@ -128,6 +130,10 @@ container.register({
   leafRecapProvider: asClass(LeafRecapProvider).singleton(),
   scorezoneProvider: asClass(ScoreZoneProvider).singleton(),
   pitSportProvider: asClass(PitSportProvider).singleton(),
+  // Per-install list (config `plooplayerList`), not aggregated: served by
+  // routes/plooplayer.js through PlooplayerService, never by MatchAggregator.
+  plooplayerProvider: asClass(PlooplayerProvider).singleton(),
+  plooplayerService: asClass(PlooplayerService).singleton(),
   yamlProviders: asValue(yamlProviders)
 });
 

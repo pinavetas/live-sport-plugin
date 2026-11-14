@@ -102,9 +102,13 @@ function parseTenc(buf, tenc, expectedKid = '') {
   if (bodyLen >= 24) candidates.push(at(bodyLen - 16)); // no trailing pad, KID flush to the end
 
   const sane = (c) => (c.isProtected === 0 || c.isProtected === 1) && [0, 8, 16].includes(c.ivSize);
-  const wanted = String(expectedKid || '').toLowerCase().replace(/-/g, '');
+  // One KID, or several when a stream keys its tracks separately (Plooplayer
+  // lists carry up to four kid:key pairs per channel).
+  const wanted = new Set((Array.isArray(expectedKid) ? expectedKid : [expectedKid])
+    .map((k) => String(k || '').toLowerCase().replace(/-/g, ''))
+    .filter(Boolean));
 
-  const chosen = (wanted && candidates.find((c) => c.kid === wanted)) || candidates.find(sane) || candidates[0];
+  const chosen = (wanted.size > 0 && candidates.find((c) => wanted.has(c.kid))) || candidates.find(sane) || candidates[0];
   if (!chosen) return null;
 
   // Constant-IV protection (IV_size == 0) is legal but never used by live

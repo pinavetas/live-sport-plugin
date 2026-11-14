@@ -311,6 +311,41 @@
         </div>
       </section>
 
+      <!-- 04 · Plooplayer -->
+      <section class="panel" aria-labelledby="ploo-h">
+        <div class="section-head">
+          <div>
+            <div class="section-title"><span class="section-index">04</span><h2 id="ploo-h">Plooplayer</h2></div>
+            <p class="section-sub">Canales de una lista de Plooplayer, con la misma agrupación que la app: una fila por grupo y los subgrupos como filtro.</p>
+          </div>
+        </div>
+
+        <div class="prefs-grid">
+          <div class="field">
+            <label for="plooplayerList">URL de la lista</label>
+            <input type="url" id="plooplayerList" placeholder="https://v0-listasplooplayer.vercel.app/xxxxxxxx/raw" autocomplete="off" spellcheck="false">
+            <p class="hint">Lista W3U de Plooplayer. Para cambiar de lista, pega la nueva y vuelve a instalar.</p>
+          </div>
+
+          <div class="field">
+            <label for="plooplayerDecryptor">Descifrador local (canales ClearKey)</label>
+            <input type="url" id="plooplayerDecryptor" placeholder="http://127.0.0.1:8090" autocomplete="off" spellcheck="false">
+            <p class="hint">Los canales ClearKey se descifran en tu propia tele, nunca en el servidor. Déjalo vacío si no lo usas: esos canales mostrarán un aviso.</p>
+          </div>
+        </div>
+
+        <details class="disclosure advanced">
+          <summary>Instalar el descifrador en Android TV (Termux)</summary>
+          <div class="disclosure-body">
+            <p class="hint">1. Instala Termux (F-Droid o GitHub) en la tele y ábrelo.</p>
+            <p class="hint">2. Ejecuta: <code>pkg install nodejs-lts</code></p>
+            <p class="hint">3. Descárgalo: <code id="plooDecryptorCurl">curl -fsSL &lt;addon&gt;/plooplayer/decryptor.js -o ~/ploo-decryptor.js</code></p>
+            <p class="hint">4. Arráncalo: <code>node ~/ploo-decryptor.js</code> y pon <code>http://127.0.0.1:8090</code> arriba.</p>
+            <p class="hint">Para que arranque solo, usa Termux:Boot (ver docs/PLOOPLAYER.md). En un PC o NAS de casa: <code>HOST=0.0.0.0 node ploo-decryptor.js</code> y usa su IP.</p>
+          </div>
+        </details>
+      </section>
+
     </main>
 
     <aside class="setup-rail">
@@ -372,6 +407,9 @@
     const COPY_LINK_LABEL = 'Copy manifest link';
     const input = document.getElementById('teams');
     const madplayUrlInput = document.getElementById('madplayUrl');
+    const plooListInput = document.getElementById('plooplayerList');
+    const plooDecryptorInput = document.getElementById('plooplayerDecryptor');
+    const plooCurl = document.getElementById('plooDecryptorCurl');
     const checkboxes = document.querySelectorAll('#sportsGrid input[type="checkbox"]');
     const liveSourceCheckboxes = document.querySelectorAll('#liveSourcesGrid input[type="checkbox"]');
     const replaySourceCheckboxes = document.querySelectorAll('#replaySourcesGrid input[type="checkbox"]');
@@ -486,6 +524,12 @@
     if (madplayUrlInput && typeof existingConfig.madplayUrl === 'string') {
       madplayUrlInput.value = existingConfig.madplayUrl;
     }
+    if (plooListInput && typeof existingConfig.plooplayerList === 'string') {
+      plooListInput.value = existingConfig.plooplayerList;
+    }
+    if (plooDecryptorInput && typeof existingConfig.plooplayerDecryptor === 'string') {
+      plooDecryptorInput.value = existingConfig.plooplayerDecryptor;
+    }
 
     // Preferred commentary languages, and the replay-catalog scope. Both are
     // optional; blanks fall back to the defaults (English-first, all replays).
@@ -542,7 +586,10 @@
         ...(isReplayDisabled ? [] : [{ k: 'Replay sources', v: count(selectedReplay.length, replaySourceCheckboxes.length) }]),
         { k: 'Timezone', v: tz || 'n/a' },
         { k: 'Languages', v: languages || 'English only' },
-        { k: 'Web streams', v: webStreams === 'disabled' ? 'Hidden' : 'Included' }
+        { k: 'Web streams', v: webStreams === 'disabled' ? 'Hidden' : 'Included' },
+        { k: 'Plooplayer', v: plooListInput && /^https?:\/\//i.test(plooListInput.value.trim())
+          ? (plooDecryptorInput && /^https?:\/\//i.test(plooDecryptorInput.value.trim()) ? 'Lista + descifrador' : 'Lista')
+          : 'Off' }
       ];
       configSummary.innerHTML = items
         .map(i => '<li><span>' + esc(i.k) + '</span> <b' + (i.hot ? ' class="is-accent"' : '') + ' title="' + esc(i.v) + '">' + esc(i.v) + '</b></li>')
@@ -584,6 +631,14 @@
       if (languages) config.languages = languages;
       if (replayFilter && replayFilter !== 'all') config.replayFilter = replayFilter;
       if (webStreams === 'disabled') config.webStreams = 'disabled';
+
+      // Plooplayer: only http(s) URLs are kept; the server validates them again.
+      const isHttp = (v) => /^https?:\/\/\S+$/i.test(v);
+      const plooList = plooListInput ? plooListInput.value.trim() : '';
+      const plooDecryptor = plooDecryptorInput ? plooDecryptorInput.value.trim().replace(/\/+$/, '') : '';
+      if (isHttp(plooList)) config.plooplayerList = plooList;
+      if (isHttp(plooList) && isHttp(plooDecryptor)) config.plooplayerDecryptor = plooDecryptor;
+      if (plooCurl) plooCurl.textContent = 'curl -fsSL ' + effectiveOrigin + '/plooplayer/decryptor.js -o ~/ploo-decryptor.js';
 
       if (selectedSports.length < checkboxes.length) {
         config.sports = selectedSports.join(',');
@@ -683,6 +738,8 @@
 
     input.addEventListener('input', updateLink);
     if (madplayUrlInput) madplayUrlInput.addEventListener('input', updateLink);
+    if (plooListInput) plooListInput.addEventListener('input', updateLink);
+    if (plooDecryptorInput) plooDecryptorInput.addEventListener('input', updateLink);
     timezoneSelect.addEventListener('change', updateLink);
 
     function setCheckboxes(cbs, checked) {

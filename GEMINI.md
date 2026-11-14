@@ -91,7 +91,8 @@ normalization once (`_precompute`); never regex inside comparators or request lo
 
 **I8 - Relayed DASH stays off.** `StreamPolicy.isBlockedDashStream` drops ClearKey/relayed DASH by
 design, including nested `/api/manifest?url=…` forms (D2). Do not re-enable without an owner
-decision.
+decision. Plooplayer ClearKey channels (`docs/PLOOPLAYER.md`) respect this: they point at the
+viewer's *local* decryptor (`src/services/plooplayer/localDecryptor.js`), never at this server.
 
 **I9 - Filter order is load-bearing.** `/api` gates sit after the routers but before the SDK router
 in `src/index.js`; a route mounted past them silently 404s.

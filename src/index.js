@@ -1001,7 +1001,9 @@ app.use((req, res, next) => {
 
 // Config segment decoding (JSON / URL-encoded JSON / base64url), see src/configSegment.js.
 const { decodeConfigSegment } = require('./configSegment');
-app.get('/:config?/manifest.json', (req, res, next) => {
+// How long the manifest may wait for a Plooplayer list (root + sub-lists).
+const PLOOPLAYER_MANIFEST_DEADLINE_MS = Number(process.env.PLOOPLAYER_MANIFEST_DEADLINE_MS) || 9000;
+app.get('/:config?/manifest.json', async (req, res, next) => {
   const { manifest } = require('./manifest');
   let parsedConfig = {};
   if (req.params.config) {
@@ -1120,10 +1122,37 @@ app.get('/:config?/manifest.json', (req, res, next) => {
     newManifest.catalogs.unshift(teamsCatalog);
   }
 
+  // Plooplayer: one row per top-level group of the install's own list, first.
+  // Shorter cache when configured, so group changes reach the client; very
+  // short when the list could not be read, so the CDN never pins a manifest
+  // that is missing the rows.
+  let manifestMaxAge = 86400;
+  if (typeof parsedConfig.plooplayerList === 'string' && parsedConfig.plooplayerList.trim()) {
+    const { PLOO_TYPE, ID_PREFIX } = require('./services/PlooplayerService');
+    let timer = null;
+    try {
+      const plooCatalogs = await Promise.race([
+        container.resolve('plooplayerService').manifestCatalogs(parsedConfig),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('list load timed out')), PLOOPLAYER_MANIFEST_DEADLINE_MS); })
+      ]);
+      if (plooCatalogs.length > 0) {
+        newManifest.catalogs = [...plooCatalogs, ...newManifest.catalogs];
+        newManifest.types = [...new Set([...newManifest.types, PLOO_TYPE])];
+        newManifest.idPrefixes = [...new Set([...(newManifest.idPrefixes || []), ID_PREFIX])];
+      }
+      manifestMaxAge = 3600;
+    } catch (err) {
+      console.warn(`[Plooplayer] manifest without list rows: ${err && err.message}`);
+      manifestMaxAge = 60;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.setHeader('Cache-Control', `public, max-age=${manifestMaxAge}`);
   res.send(newManifest);
 });
 
@@ -1156,6 +1185,13 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+// ─── Plooplayer (per-install W3U list) ────────────────────────────────────────
+// Catalog/meta/stream for type "Plooplayer" plus GET /plooplayer/decryptor.js.
+// Ahead of the SDK router: the stream handler needs the request origin.
+app.use(require('./routes/plooplayer').createPlooplayerRouter({
+  getService: () => container.resolve('plooplayerService')
+}));
 
 // ─── Direct Handler for Nuvio Collection Sub-Catalogs ─────────────────────────
 // Nuvio Collection folders query catalogs directly by ID (e.g. nuvio_sports_replays_football_recent).

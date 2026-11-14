@@ -23,8 +23,9 @@
 
 'use strict';
 
-const { XMLParser } = require('fast-xml-parser');
-const { safeFetch } = require('./ProviderOutbound');
+// fast-xml-parser and the guarded egress stack are loaded lazily, only when the
+// caller does not inject `xmlParser` / `fetcher`: the Plooplayer local
+// decryptor reuses this service on a TV (Termux) with node core modules only.
 const { buildPolicy, assertAllowed } = require('./DashUpstream');
 
 // Akamai/CloudFront edges 403 Dalvik UAs on manifest paths; always present a
@@ -98,20 +99,33 @@ function fillSegmentTemplate(template, vars) {
     .replace(/\u0000/g, '$');
 }
 
+function createDefaultXmlParser() {
+  const { XMLParser } = require('fast-xml-parser');
+  return new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: '@_',
+    parseAttributeValue: true,
+    isArray: (name) => ALWAYS_ARRAY_TAGS.has(name)
+  });
+}
+
 class DashToHlsService {
+  /**
+   * @param {object} [options]
+   * @param {Function} [options.fetcher]      safeFetch-compatible; defaults to the guarded egress stack
+   * @param {boolean} [options.proxyEnabled]
+   * @param {{parse: (xml: string) => object}} [options.xmlParser]  fast-xml-parser-compatible output
+   * @param {string} [options.routePrefix]    path of the proxy routes (default `/api/dash`)
+   */
   constructor(options = {}) {
-    this._fetcher = options.fetcher || safeFetch;
+    this._fetcher = options.fetcher || require('./ProviderOutbound').safeFetch;
     this._mpdCache = new Map(); // mpdUrl -> { ts, parsed }
     this._ctxCache = new Map(); // mpdUrl -> { ts, parsed, policy }
     this.proxyEnabled = options.proxyEnabled !== undefined
       ? Boolean(options.proxyEnabled)
       : proxyEnabledFromEnv();
-    this._parser = new XMLParser({
-      ignoreAttributes: false,
-      attributeNamePrefix: '@_',
-      parseAttributeValue: true,
-      isArray: (name) => ALWAYS_ARRAY_TAGS.has(name)
-    });
+    this._parser = options.xmlParser || createDefaultXmlParser();
+    this._routePrefix = options.routePrefix || '/api/dash';
   }
 
   /* ────────────────────────────── HTTP layer ────────────────────────────── */
@@ -423,13 +437,13 @@ class DashToHlsService {
 
   _keyLine(reqBase, key, encryption) {
     if (!encryption) return '';
-    const keyUrl = `${reqBase}/api/dash/key.ts?k=${key}`;
+    const keyUrl = `${reqBase}${this._routePrefix}/key.ts?k=${key}`;
     return `#EXT-X-KEY:METHOD=${encryption},URI="${keyUrl}",KEYFORMAT="identity",KEYFORMATVERSIONS="1"`;
   }
 
   _childPlaylistUrl(reqBase, name, token, repId) {
     const rep = repId ? `&r=${encodeURIComponent(repId)}` : '';
-    return `${reqBase}/api/dash/${name}.m3u8?d=${token}${rep}`;
+    return `${reqBase}${this._routePrefix}/${name}.m3u8?d=${token}${rep}`;
   }
 
   /** True when this representation must be decrypted and re-served by us. */
@@ -488,11 +502,11 @@ class DashToHlsService {
       // No #EXT-X-KEY at all: the bytes we serve are plaintext fMP4.
       const repParam = rep.id ? `&r=${encodeURIComponent(rep.id)}` : '';
       if (rep.initUrl) {
-        lines.push(`#EXT-X-MAP:URI="${reqBase}/api/dash/init.mp4?d=${token}&k=${kind}${repParam}"`);
+        lines.push(`#EXT-X-MAP:URI="${reqBase}${this._routePrefix}/init.mp4?d=${token}&k=${kind}${repParam}"`);
       }
       for (const seg of rep.segments) {
         lines.push(`#EXTINF:${seg.durationSec.toFixed(3)},`);
-        lines.push(`${reqBase}/api/dash/segment.mp4?d=${token}&k=${kind}${repParam}&n=${seg.number}`);
+        lines.push(`${reqBase}${this._routePrefix}/segment.mp4?d=${token}&k=${kind}${repParam}&n=${seg.number}`);
       }
       return lines.join('\n') + '\n';
     }
@@ -631,3 +645,4 @@ class DashToHlsService {
 module.exports = DashToHlsService;
 module.exports.fillSegmentTemplate = fillSegmentTemplate;
 module.exports.proxyEnabledFromEnv = proxyEnabledFromEnv;
+module.exports.ALWAYS_ARRAY_TAGS = ALWAYS_ARRAY_TAGS;
