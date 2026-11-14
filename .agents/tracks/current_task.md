@@ -1,22 +1,25 @@
-# Session Checkpoint: Basketball Replays & Leaf Premium Deployment to VPS
-**Date**: 2026-11-06
-**Status**: Completed (Deployed to Production VPS)
+# Session Checkpoint: Plooplayer provider (per-install W3U list + local ClearKey decryptor)
+**Date**: 2026-11-14
+**Status**: Implemented on branch `feat/plooplayer-provider` (not committed, not deployed)
 
 ### What Was Completed
-- **Branches**: `feat/leaf-premium-integration` & `stable` (both pushed to `origin`, HEAD `ea0c642`).
-- **VPS Deployment**:
-  - Fast-forward pulled `origin/stable` (`5e9265b..ea0c642`).
-  - Zero dependency diffs in `package-lock.json` (no native binary churn under traffic).
-  - Prebuild timezone checks verified 65/65 against IANA 2026f.
-  - Built staged distribution bundle (`dist.next`) and verified `MATCHES_CACHE_PATH` runtime mapping.
-  - Executed atomic directory swap (`dist.next` -> `dist`) and rolling reload on PM2 cluster (PIDs 1108880, 1108909).
-  - Executed `npm run sync:matches`: 13,532 total matches aggregated (including 40 BasketballVideo replays, 18 PitSport events, and 19 Leaf fixtures).
-  - Cluster health endpoint `/health` returned 200 OK with 0 open breakers and healthy memory.
+- New per-install provider: the user pastes a Plooplayer list URL in `/configure` (`plooplayerList`);
+  the add-on shows one row per top-level group (type `Plooplayer`, ids `ploo_*`), deeper groups as
+  the row's genre filter, quality/server variants merged into one channel. See `docs/PLOOPLAYER.md`.
+- ClearKey DASH plays through a **local decryptor** on the viewer's TV (Termux) or LAN
+  (`plooplayerDecryptor`), served as one file by `GET /plooplayer/decryptor.js`. The add-on emits
+  URLs only — I1/I8 untouched (owner decision 2026-11-14: Vercel, no server relay).
+- AceStream entries → `externalUrl` (`acestream://`); HLS → direct URL + `proxyHeaders`.
+- Reuse changes: `DashToHlsService` loads fast-xml-parser/ProviderOutbound lazily, accepts
+  `xmlParser` and `routePrefix`; `cenc/init.parseTenc` accepts several expected KIDs;
+  `serverless` cold-start gate skips `Plooplayer` requests.
 
 ### Verification Record
-- `node --check src/providers/BasketballVideoProvider.js`: Clean exit (code 0).
-- `npm test -- tests/basketballVideoRelativeLinks.test.js`: 9/9 passed.
-- `npm test -- tests/basketballVideoProvider.test.js`: 11/11 passed.
-- `npm test -- tests/leafRecapProvider.test.js`: 14/14 passed.
-- Replay resolution on `livetv_memphis-sacramento-20261101`: 4 direct OK.ru CDN streams returned with 0 VPS bandwidth.
-- Production cluster `/health`: 200 OK, memory nominal (353MB / 519MB).
+- `npm test -- tests/plooplayer*` + DASH/config/serverless suites: 18 suites, 204 tests passed.
+- Live E2E (real list, local add-on with `NODE_APP_INSTANCE=1`, decryptor downloaded from the
+  add-on): manifest 2 rows (22 + 66 channels, 19 filters); DAZN 1 (4 KIDs) and SKY sports 16
+  init+segment decrypted; `ffmpeg -v error` on video (h264 1080p) and audio (aac): no errors.
+
+### Open
+- Not yet tried on a real Android TV (Termux + Stremio/Nuvio player) — next step for the owner.
+- `npm run build` (ncc dist) lacks the sources `/plooplayer/decryptor.js` bundles → 503 there.

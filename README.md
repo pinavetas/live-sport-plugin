@@ -210,6 +210,7 @@ Visit `http://localhost:7000/configure` to customize:
 - **Streaming Sources Selection:** Individually enable or disable scrapers (DaddyLive, StreamFree, TimStreams, Streamed.pk, SportyHunter, WatchFooty, CDNLiveTV, StreamSports99, Streamic, DamiTV, EmbedIndia, PpvSt, ReplayZone, ScoreZone).
 - **Localization & Timezones:** Automatically detects or manually configures your local IANA timezone to render match kick-offs in your local time.
 - **Priority Tracking ("⭐ Your Teams"):** Enter comma-separated favorite clubs or athletes (e.g. `Arsenal, Lakers, Ferrari`) to dynamically generate a dedicated priority catalog.
+- **Plooplayer list:** paste a Plooplayer (W3U) list URL to get its channels with the app's grouping (one row per group, sub-groups as filters). ClearKey channels play through a local decryptor on your TV or LAN, never through the server. See [`docs/PLOOPLAYER.md`](docs/PLOOPLAYER.md).
 
 ### Other pages
 - **`/live`:** browse the live, upcoming, 24/7 and replay catalogs in the browser and play streams with an in-page HLS player (web-only sources open in a new tab).
